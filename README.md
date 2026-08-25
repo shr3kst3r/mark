@@ -162,6 +162,29 @@ the keep-mine / take-theirs prompt.
 completions for zsh, bash, and fish are in `packaging/completions/` and inside
 the app bundle at `Contents/Resources/completions/`.
 
+## For agents
+
+The CLI half exists to be called in a loop, and `skills/mark/SKILL.md` is what
+makes that pay off: the `--json` shape of every command, the six exit codes and
+which two are worth retrying, and which half of the CLI needs the app running.
+It is a [Claude Code](https://claude.com/claude-code) skill, and it works in
+any agent runtime that reads `~/.claude/skills` or `~/.agents/skills`.
+
+`spg.toml` installs it:
+
+```sh
+spg install     # symlink the skill into ~/.claude/skills and ~/.agents/skills
+```
+
+[`spg`](https://github.com/shr3kst3r/spg) is a per-project command publisher,
+but this `spg.toml` publishes no commands — only the two skill symlinks. The dev
+loop is the `just` recipes below, which already work from a clone, and `mark`
+itself is a symlink into an installed `mark.app`: a `~/bin` wrapper running this
+checkout from source would shadow it silently, including in the agent sessions
+the skill is for. `spg.toml` is unrelated to packaging either way —
+`packaging/mark.rb` still owns installing the app and putting `mark` on your
+PATH.
+
 ## Building
 
 ```sh
@@ -197,6 +220,7 @@ docs/adrs/          the decision records; accepted ones are immutable
 packaging/          the formula, the cask, the man page, shell completions
 scripts/            bundle assembly, integration checks, corpus generator
 bench/              fixtures and the class-vs-inline highlighting pair
+skills/mark/        the agent skill: how to drive the CLI, and its JSON shapes
 ```
 
 Two toolchains, and neither can produce a runnable app alone:

@@ -1,0 +1,42 @@
+# spg.toml — publishes this repo's agent skill onto your machine.
+#
+# `spg` (https://github.com/shr3kst3r/spg) reads this file and, on
+# `spg install`, creates a symlink for each [links.*] entry, repairs them on
+# `spg sync`, and removes them on `spg uninstall`. It is unrelated to
+# packaging: `packaging/mark.rb` owns installing the app and putting `mark` on
+# your PATH; this file only says where the agent skill belongs.
+#
+# No [commands.*] tables, on purpose. The dev loop is the `just` recipes, which
+# already work from a clone, and the one name worth having on $PATH — `mark` —
+# is a symlink into an installed mark.app. A ~/bin wrapper running this checkout
+# from source would shadow it silently, including inside the agent sessions the
+# skill below is for. So: no wrappers here, and don't add one later.
+#
+# Either link is declined per-machine with `spg install --without link:mark`,
+# `spg install -i`, or `spg disable link:mark`.
+
+[project]
+name = "mark"
+
+# `mark` is built to be called in a loop by an agent (see the module docs in
+# cli/src/main.rs), which only pays off if the agent knows the JSON shapes, the
+# six exit codes, and which half of the CLI needs the app running. That is what
+# skills/mark/SKILL.md carries, so it belongs in every session rather than only
+# the ones whose cwd is this repo.
+#
+# `source` points at the real top-level directory — never at the
+# `.claude/skills/` bridge symlink, so nothing resolves through two hops.
+
+[links.mark]
+source = "skills/mark"
+target = "~/.claude/skills/"
+description = "mark skill: drive the mark CLI — toc/tasks/check/grep/ls/render, the JSON shapes, and the six exit codes"
+
+# The same skill for Antigravity and other agent runtimes that read
+# ~/.agents/skills. The explicit leaf is needed because the table name has to
+# differ from the ~/.claude entry above to avoid a collision.
+
+[links.agents-mark]
+source = "skills/mark"
+target = "~/.agents/skills/mark"
+description = "mark skill: drive the mark CLI — toc/tasks/check/grep/ls/render, the JSON shapes, and the six exit codes"

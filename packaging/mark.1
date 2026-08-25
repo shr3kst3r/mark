@@ -1,0 +1,300 @@
+.\" mark(1) — hand-written troff, per M10.
+.\"
+.\" Not generated from clap. A generator would produce a flag list, and the
+.\" half of this page worth reading is the part clap does not know: which
+.\" subcommands answer locally and which drive the running app, what each exit
+.\" code means to a caller, and where the socket and the session file live.
+.\" `cli/src/main.rs`'s `the_man_page_and_completions_name_every_subcommand`
+.\" fails if a subcommand or a long flag is added and not documented here, so
+.\" the drift a generator prevents is prevented by a test instead.
+.\"
+.\" Preview it with:  man packaging/mark.1
+.\" Lint it with:     mandoc -T lint packaging/mark.1
+.TH MARK 1 "2026-08-25" "mark 0.1.0" "User Commands"
+.SH NAME
+mark \- fast native markdown viewer for macOS, and its CLI
+.SH SYNOPSIS
+.B mark
+.I command
+.RI [ arguments ]
+.RI [ --json ]
+.SH DESCRIPTION
+.B mark
+reads, renders, and edits markdown. It is one binary with two halves that share
+one implementation of parsing, task semantics, highlighting, and directory
+queries: a Rust core, and an AppKit app that links the same core.
+.PP
+Commands split into two kinds, and the distinction is the one that matters when
+scripting:
+.TP
+.B local
+.BR render ,\  toc ,\  tasks ,\  check ,\  ls ,\  grep ,\  stats ,\  doctor ,
+and
+.B theme
+with
+.BR --list ,\  --show ,
+or
+.BR --import .
+These answer in this process, in milliseconds, with no app running. An agent is
+usually in exactly this situation.
+.TP
+.B remote
+.BR open ,\  tab ,\  goto ,\  reload ,\  sidebar ,\  nav ,
+and
+.B theme
+with a name. These drive the running app over a Unix socket at
+.IR $TMPDIR/mark-$UID.sock ,
+launching it first if it is not running. Every one of them can fail with a
+reason and a non-zero exit; none of them steals focus.
+.PP
+.B --json
+is available on every command that carries structured output, and always writes
+only JSON to stdout \(em diagnostics go to stderr, so
+.B MARK_TRACE=1
+cannot corrupt a parse.
+.SH COMMANDS
+.SS Local
+.TP
+.BI "render " file " [--html|--ansi|--plain] [--prefix " N "] [--theme " name ]
+Render to stdout.
+.B --html
+is a complete self-contained document carrying both light and dark palettes,
+inline MathML, and inline SVG for Mermaid diagrams \(em no JavaScript and no
+network access. Without a format flag, output is styled when stdout is a
+terminal and plain when it is a pipe.
+.B --prefix
+emits only the first
+.I N
+top-level blocks, which is the first-paint tunable the app itself uses.
+.TP
+.BI "toc " file " [--json]"
+The heading tree: level, text, anchor, byte offsets, line, and block id.
+.TP
+.BI "tasks " [path] " [--open] [--json] [--depth " N ]
+Every task in a file or directory: path, index in document order, state, text,
+and byte span.
+.B --open
+lists only unchecked ones.
+.TP
+.BI "check " file " --item " N " [--on|--off|--toggle] [--json]"
+Flip one checkbox in place. Exactly one byte changes \(em the character between
+the brackets \(em and the write is temp-file-plus-rename through the real file
+behind any symlink. The document is re-parsed immediately before the write, and
+if the target span no longer holds a task marker the write is refused rather
+than guessed.
+.B --toggle
+is the default.
+.IP
+The write takes an exclusive
+.BR flock (2)
+first and refuses, with exit status 6, if another
+.B mark
+holds it \(em typically a window with unsaved edits to the same file. The lock
+is never waited on.
+.TP
+.BI "ls " [dir] " [--json] [--depth " N "] [--all]"
+Markdown files with titles and open/total task counts. Honours
+.IR .gitignore .
+.B --all
+includes non-markdown files.
+.TP
+.BI "grep " pattern " " [path] " [--json] [-i|--ignore-case] [--depth " N ]
+Regular-expression search reporting the heading each match sits under.
+.TP
+.BI "stats " file " [--json]"
+Per-stage timings and counters for one document: parse, highlight, render,
+block count, code bytes, task counts, cache hit rate.
+.TP
+.BR doctor " [--json]"
+Environment report to paste into a bug report: the resolved socket path and its
+length against the 104-byte limit, whether the app is running, the
+.I .app
+resolved from
+.IR $0 ,
+core version, theme directory, and syntect asset load time.
+.SS Remote
+.TP
+.BI "open " path " [--tab] [--json]"
+A file opens in a tab. A
+.B directory
+roots the sidebar there, exactly as
+.B nav
+does, and the reply says which of the two happened.
+.B --tab
+adds the tab without moving the reader off the current document. Neither form
+activates the app.
+.TP
+.BR "tab list" " [--json]"
+Every open tab: index, title, open/total tasks, and whether it currently holds a
+web view.
+.TP
+.BI "tab select " index|path " [--json]"
+Bring a tab to the front.
+.TP
+.BI "tab close " [index|path] " [--json]"
+Close a tab; with no argument, the selected one.
+.TP
+.BI "goto " anchor " [--json]"
+Scroll the front document to a heading, with or without the leading
+.RB \(oq # \(cq.
+Exits 5 when the document has no such anchor.
+.TP
+.BR reload " [--json]"
+Re-read the front document from disk and patch the page. Refused, rather than
+silently discarding work, when the tab has unsaved changes.
+.TP
+.BR sidebar " [--json]"
+Report the sidebar without moving it: root, breadcrumb, how deep the back and
+forward history is, what it is showing, and the active filter.
+.TP
+.BI "nav " dir " | --up (--parent) | --back | --forward [--json]"
+Move the sidebar's root: into a directory, up to its parent, or back and forward
+through the roots already visited \(em the same four moves the window offers as
+Cmd-Up, Cmd-[ and Cmd-]. A move with nowhere to go exits 5 rather than
+succeeding quietly.
+.TP
+.BI "theme " [name] " [--list] [--show " name "] [--import " file "] [--json]"
+Apply a theme to every open tab, or, with no name and no flags, report the one
+in force. Both go over the socket.
+.BR --list ,
+.BR --show ,
+and
+.B --import
+are answered locally.
+.B --import
+converts a
+.I .tmTheme
+or a base16 scheme
+.I .yaml
+into
+.IR ~/.config/mark/themes .
+.SH EXIT STATUS
+A contract to script against, which is why a usage error is 1 rather than
+clap's default 2.
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Usage: an unknown flag, or an argument combination this tool refuses.
+.TP
+.B 2
+A file that is missing or cannot be read.
+.TP
+.B 3
+A task index out of range, or a task marker that moved between the read and the
+write. Nothing was written.
+.TP
+.B 4
+The app could not be reached: no socket, a launch that failed, a reply that
+never came. Worth retrying.
+.TP
+.B 5
+The app was reached and refused \(em no such anchor, no such tab, nothing to go
+back to. Not worth retrying.
+.TP
+.B 6
+Another
+.B mark
+holds the document's write lock: a window with unsaved edits, or another
+.B mark
+mid\-write. Nothing was written, and the message names the pid holding it. The
+lock is
+.BR flock (2)
+and so is released the instant the holder exits, however it exits. Worth
+retrying once that happens.
+.SH ENVIRONMENT
+.TP
+.B MARK_TRACE
+Set to 1 for per-stage timings on stderr, and, in the app, per-stage logging to
+.BR OSLog .
+Never on stdout.
+.TP
+.B TMPDIR
+Where the socket lives. The full socket path must stay under 104 bytes
+.RI ( sun_path
+on macOS, not Linux's 108); the app refuses to start rather than truncating it.
+.TP
+.B MARK_APP
+An explicit
+.I mark.app
+to talk to and to launch, instead of the one resolved from
+.IR $0 .
+.TP
+.B MARK_NO_LAUNCH
+Set to 1 to fail with exit 4 instead of launching the app.
+.TP
+.BR MARK_IPC_TIMEOUT_MS ", " MARK_IPC_LAUNCH_TIMEOUT_MS
+Reply timeout, and how long to wait for a cold launch. Default 30000 and 15000.
+.TP
+.B MARK_PROTOCOL_VERSION
+The wire version to claim. For exercising the version-mismatch path.
+.TP
+.B MARK_THEME_DIR
+Where user themes are read from, instead of
+.IR ~/.config/mark/themes .
+.TP
+.B MARK_SESSION_FILE
+Where the app reads and writes its session, instead of
+.IR "~/Library/Application Support/mark/session.json" .
+.TP
+.B MARK_NO_SESSION
+Set to 1 and the app neither restores nor saves a session.
+.TP
+.B MARK_RESIDENT_TABS
+How many tabs keep a live web view. Default 3; each one costs about 52 MB.
+.TP
+.B COLUMNS
+Terminal width for
+.BR render ,
+overriding what the terminal reports.
+.SH FILES
+.TP
+.I $TMPDIR/mark-$UID.sock
+The command socket, mode 0600, uid-checked. Recreated on launch; a stale one is
+unlinked and rebound.
+.TP
+.I ~/Library/Application Support/mark/session.json
+Tabs, selection, scroll offsets, sidebar root and history, theme, and whether
+the editor pane was open. Written atomically.
+.TP
+.I ~/.config/mark/themes/*.toml
+User themes, picked up without a rebuild.
+.TP
+.I mark.app/Contents/MacOS/mark-cli
+This program.
+.B mark
+on your PATH is a symlink to it, and it resolves
+.I $0
+through the symlink chain to find the bundle \(em so the link breaks if the
+.I .app
+moves.
+.SH NOTES
+The app is not sandboxed and there is no telemetry of any kind. Documents are
+read where they are; nothing is uploaded, and no file contents are ever logged.
+.PP
+The write lock is
+.BR flock (2)
+and therefore
+.IR advisory .
+It stops one
+.B mark
+clobbering another; it does not stop
+.BR vim ,
+VS Code, or anything else, none of which take it or respect it. An external
+editor saving over a document the app holds unsaved still raises the app's
+keep\-mine / take\-theirs conflict prompt, which is the only defence against
+those. A document on an NFS or SMB mount, where
+.BR flock (2)
+is unreliable, is effectively unlocked.
+.PP
+.B mark://
+URLs are registered with LaunchServices as the cold-launch and Finder path, and
+carry the same commands:
+.IR mark://open?path=/n.md&tab=1 .
+.SH SEE ALSO
+The decision records under
+.IR docs/adrs/ ,
+which carry the reasoning and the measurements behind all of the above, and
+.I packaging/README.md
+for installation.

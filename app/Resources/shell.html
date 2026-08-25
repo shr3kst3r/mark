@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      The shell page. Loaded exactly once per web view, over the `mark-asset`
+      custom scheme (a WKURLSchemeHandler, not a file: baseURL — research §2.13
+      / the M2 brief: `loadHTMLString` with a file: baseURL hits subresource
+      restrictions and has no caching story).
+
+      Documents are injected into #mk-doc; the page is never reloaded. ADR-2
+      rejects `loadHTMLString` per document precisely because it tears the
+      document down, loses scroll and JS state, and flashes white.
+
+      No third-party JavaScript is loaded here, and none ever will be: ADR-5
+      forbids KaTeX and mermaid.js, and math and diagrams arrive as inline
+      MathML and SVG from the core in M6.
+    -->
+    <title>mark</title>
+    <link rel="stylesheet" href="shell.css" />
+  </head>
+  <body class="mk-doc">
+    <main id="mk-doc" class="mk-container" aria-live="polite"></main>
+    <script src="shell.js"></script>
+  </body>
+</html>

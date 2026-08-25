@@ -1,0 +1,36 @@
+[package]
+name = "mark-cli"
+description = "Headless CLI for mark: render, toc, tasks, check, ls, grep."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+# ADR-1 ships two Mach-O executables in mark.app/Contents/MacOS: `mark` (the
+# AppKit app, M2) and `mark-cli` (this one). Homebrew symlinks it as `mark`.
+name = "mark-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# getuid, and sockaddr_un's size, for ADR-3's $TMPDIR/mark-$UID.sock. Already in
+# the tree transitively; nothing else in std reports the uid.
+libc = "0.2"
+mark-core = { path = "../core" }
+pulldown-cmark.workspace = true
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+terminal_size = "0.4"
+# Table alignment is a *display width* problem, not a character-count one: one
+# CJK ideograph or emoji occupies two terminal cells, so counting `chars()`
+# under-measures the cell and every column after it slides. M6 is when this
+# stopped being theoretical — mermaid labels and math attract wide characters.
+unicode-width = "0.2"
+
+[dev-dependencies]
+libc = "0.2"
+serde_json.workspace = true
+tempfile = "3"

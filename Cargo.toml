@@ -1,0 +1,51 @@
+[workspace]
+members = ["core", "cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/shr3kst3r/mark"
+# MSRV is pinned so a dependency that raises it fails loudly rather than
+# mysteriously. The value comes from 2026-08-24-rust-side-math-and-diagrams
+# (merman 0.8.0-alpha.5 requires 1.95); it is set here even though merman
+# itself does not land until M6.
+rust-version = "1.95"
+
+[workspace.dependencies]
+# No `simd`: pulldown-cmark's SIMD escaping is x86_64-only and this is an
+# arm64-only product (ADR-1 forecloses other platforms). At ~2.9 ms/MB the
+# parse is ~1% of the budget anyway (ADR-2), so it would buy nothing here.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Features are picked per crate; `regex-onig` is required everywhere, since
+# `regex-fancy` measured at half the throughput (research 2.10).
+syntect = { version = "5.3", default-features = false }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+# panic MUST stay "unwind": every `extern "C"` entry point relies on
+# `catch_unwind` to satisfy ADR-1's "no extern C function may unwind"
+# constraint, and ADR-5 mandates `catch_unwind` around merman. `abort` would
+# turn a recoverable render failure into a process kill.
+panic = "unwind"
+
+# ADR-5 measured merman at +10.2 MB with `opt-level = "z"`. This project cannot
+# use the rest of that measurement's profile — `panic = "abort"` is ruled out
+# above — but it can apply the size setting to merman's own crates, which are
+# ~65% of the binary and are not on any hot path we budget: a diagram renders
+# once per fence and is then memoized (ADR-5), against a 16 ms frame.
+# Deliberately scoped to these three packages rather than `"*"`, so syntect and
+# pulldown-cmark keep the codegen the ADR-2 timings were taken with.
+[profile.release.package.merman]
+opt-level = "z"
+
+[profile.release.package.merman-core]
+opt-level = "z"
+
+[profile.release.package.merman-render]
+opt-level = "z"

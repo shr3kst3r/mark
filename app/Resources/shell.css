@@ -1,0 +1,339 @@
+/*
+ * The shell stylesheet.
+ *
+ * Every colour here is a custom property. Their *values* arrive from the core
+ * as one string per theme — see `core/src/theme.rs` — carrying **both**
+ * appearances, with the dark half inside `@media (prefers-color-scheme: dark)`.
+ * `shell.js`'s `setTheme` installs that string into `<style id="mk-theme">`
+ * ahead of this file, so this file never changes and never has to be reloaded.
+ *
+ * The consequence, which is M7's first gate: switching macOS appearance runs
+ * **no** JavaScript, sends **no** message to Swift, and mutates **no** DOM
+ * node. WebKit re-resolves the variables and repaints. There is nothing here to
+ * make fast because there is nothing here that runs.
+ *
+ * The values below are the base16 `default-dark` palette, and they are a
+ * *fallback* rather than a theme: they only apply between the shell page
+ * loading and the first `setTheme`, which is a few milliseconds on cold start.
+ * Without them that window paints black text on a transparent background.
+ *
+ * ==========================================================================
+ *  DO NOT ADD `content-visibility: auto` HERE.
+ * ==========================================================================
+ * It is the obvious optimization and it is a measured 1.8x pessimization on
+ * this workload: 225 ms versus 124 ms for plain injection on the 1 MB corpus,
+ * because establishing 3,771 containment scopes costs more than the layout it
+ * skips. ADR-2 (2026-08-24-progressive-document-rendering) bans it, and says
+ * reintroducing it requires a fresh measurement that beats plain injection —
+ * which would be a supersession, not a CSS tidy-up.
+ *
+ * `overflow-anchor` is also absent, but for the opposite reason: WebKit does
+ * not implement it. Scroll anchoring is done by hand in shell.js.
+ */
+
+:root {
+  color-scheme: dark;
+  --mk-background: #181818;
+  --mk-surface: #282828;
+  --mk-selection: #383838;
+  --mk-muted: #585858;
+  --mk-subtle: #b8b8b8;
+  --mk-foreground: #d8d8d8;
+  --mk-heading: #7cafc2;
+  --mk-link: #7cafc2;
+  --mk-accent: #ba8baf;
+  --mk-rule: #383838;
+  --mk-error: #ab4642;
+  --mk-warning: #f7ca88;
+  --mk-success: #a1b56c;
+  --mk-s00: #181818;
+  --mk-s01: #282828;
+  --mk-s02: #383838;
+  --mk-s03: #585858;
+  --mk-s04: #b8b8b8;
+  --mk-s05: #d8d8d8;
+  --mk-s06: #e8e8e8;
+  --mk-s07: #f8f8f8;
+  --mk-s08: #ab4642;
+  --mk-s09: #dc9656;
+  --mk-s0A: #f7ca88;
+  --mk-s0B: #a1b56c;
+  --mk-s0C: #86c1b9;
+  --mk-s0D: #7cafc2;
+  --mk-s0E: #ba8baf;
+  --mk-s0F: #a16946;
+}
+
+html {
+  background: var(--mk-background);
+  color: var(--mk-foreground);
+  /* Smooth scrolling is switched off for the duration of an anchor
+     correction by shell.js; it is off by default here so the correction is
+     never fighting an in-flight animation. */
+  scroll-behavior: auto;
+}
+
+body.mk-doc {
+  margin: 0;
+  padding: 0;
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mk-container {
+  display: block;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 6rem;
+  max-width: 46rem;
+}
+
+.mk-blk {
+  margin: 0 0 1rem;
+}
+
+.mk-h {
+  line-height: 1.25;
+  margin: 1.8rem 0 0.6rem;
+  font-weight: 600;
+  color: var(--mk-heading);
+}
+
+h1.mk-h {
+  font-size: 1.9rem;
+}
+h2.mk-h {
+  font-size: 1.5rem;
+}
+h3.mk-h {
+  font-size: 1.2rem;
+}
+
+a {
+  color: var(--mk-link);
+}
+
+pre.mk-code {
+  background: var(--mk-surface);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  font: 13px/1.5 "SF Mono", ui-monospace, monospace;
+}
+
+code {
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+:not(pre) > code {
+  background: var(--mk-surface);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+
+/*
+ * Syntax highlighting.
+ *
+ * The core emits `<span class="t0B">` — the **palette slot**, not a colour —
+ * and these sixteen rules are the only place a slot becomes one. That is what
+ * makes both a theme change and an appearance change free: the document's HTML
+ * is identical under every theme that shares a scope map, which all of the
+ * shipped ones do.
+ *
+ * Text in the default slot (`base05`, the body colour) carries no span at all
+ * and inherits from `pre.mk-code`, which is where a good part of the byte
+ * saving over inline `style="color:…"` comes from.
+ */
+.t00 { color: var(--mk-s00); }
+.t01 { color: var(--mk-s01); }
+.t02 { color: var(--mk-s02); }
+.t03 { color: var(--mk-s03); }
+.t04 { color: var(--mk-s04); }
+.t05 { color: var(--mk-s05); }
+.t06 { color: var(--mk-s06); }
+.t07 { color: var(--mk-s07); }
+.t08 { color: var(--mk-s08); }
+.t09 { color: var(--mk-s09); }
+.t0A { color: var(--mk-s0A); }
+.t0B { color: var(--mk-s0B); }
+.t0C { color: var(--mk-s0C); }
+.t0D { color: var(--mk-s0D); }
+.t0E { color: var(--mk-s0E); }
+.t0F { color: var(--mk-s0F); }
+/* base24's extra eight. No shipped theme defines them; a user theme may. */
+.t10 { color: var(--mk-s10); }
+.t11 { color: var(--mk-s11); }
+.t12 { color: var(--mk-s12); }
+.t13 { color: var(--mk-s13); }
+.t14 { color: var(--mk-s14); }
+.t15 { color: var(--mk-s15); }
+.t16 { color: var(--mk-s16); }
+.t17 { color: var(--mk-s17); }
+
+blockquote {
+  margin: 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--mk-accent);
+  color: var(--mk-subtle);
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+th,
+td {
+  border: 1px solid var(--mk-rule);
+  padding: 0.35rem 0.7rem;
+}
+
+th {
+  background: var(--mk-surface);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--mk-rule);
+}
+
+ul,
+ol {
+  padding-left: 1.5rem;
+}
+
+li {
+  margin: 0.15rem 0;
+}
+
+::selection {
+  background: var(--mk-selection);
+}
+
+/* Task lists. `accent-color` tints the box; `color-scheme`, which the theme's
+   own CSS sets per appearance, is what stops a dark page drawing a light
+   checkbox. */
+input.mk-task {
+  margin-right: 0.4rem;
+  cursor: pointer;
+  accent-color: var(--mk-accent);
+}
+
+li:has(> input.mk-task) {
+  list-style: none;
+  margin-left: -1.1rem;
+}
+
+img {
+  max-width: 100%;
+}
+
+/*
+ * Math and diagrams (ADR-5), and M7's half of them.
+ *
+ * MathML carries no colours at all — verified, not assumed: the core's output
+ * has no `style`, `color`, or `fill` attribute anywhere — so it inherits
+ * `currentColor` and is legible in both appearances for free.
+ *
+ * An SVG from `merman` is the opposite: it carries its own `<style>` scoped by
+ * `#id`, holding whatever palette it was rendered with, and nothing in this
+ * file can reach inside it. So the core renders each diagram **once per
+ * appearance**, in the theme's own palette, and these two rules choose. The
+ * hidden copy is never laid out.
+ */
+.mk-diagram {
+  overflow-x: auto;
+}
+
+.mk-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mk-appear-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mk-appear-light {
+    display: none;
+  }
+  .mk-appear-dark {
+    display: inline;
+  }
+}
+
+math {
+  font-size: 1.05em;
+}
+
+math[display="block"] {
+  display: block;
+  margin: 0.6rem 0;
+  overflow-x: auto;
+}
+
+/* A construct we could not render shows as an explicitly failed construct,
+   with its source still selectable (ADR-5). */
+.mk-rich-error {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+  border: 1px solid var(--mk-error);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--mk-error) 12%, transparent);
+  padding: 0.1em 0.4em;
+  font-size: 0.9em;
+}
+
+.mk-diagram-error {
+  display: block;
+}
+
+.mk-rich-label {
+  color: var(--mk-error);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75em;
+  letter-spacing: 0.04em;
+  margin-right: 0.4em;
+}
+
+.mk-rich-message {
+  color: var(--mk-subtle);
+}
+
+.mk-rich-source {
+  user-select: text;
+  white-space: pre-wrap;
+  margin: 0 0.4em 0 0;
+}
+
+.mk-diagram-error .mk-rich-source {
+  display: block;
+  margin: 0.4em 0 0;
+}
+
+/* Plan §3: a document we cannot read shows an inline error card rather than an
+   empty window. */
+.mk-error {
+  margin: 2rem 0;
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--mk-error);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--mk-error) 12%, transparent);
+}
+
+.mk-error h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  color: var(--mk-error);
+}
+
+.mk-error p {
+  margin: 0;
+  font: 13px/1.5 "SF Mono", ui-monospace, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

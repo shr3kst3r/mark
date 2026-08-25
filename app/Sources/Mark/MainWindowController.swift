@@ -1,0 +1,1312 @@
+import AppKit
+import Foundation
+
+/// `mark`'s window. There is exactly one.
+///
+/// ADR-4 constraint, quoted because it is easy to violate by accident:
+///
+/// > **There is exactly one `NSWindow` and one `NSWindowController`.** Anything
+/// > wanting a second top-level window (preferences, a detached document) is a
+/// > new decision, not an extension of this one.
+/// >
+/// > **Never call `addTabbedWindow` or set `tabbingMode = .preferred`.** Mixing
+/// > native tabbing into this design produces two competing tab bars. Set
+/// > `tabbingMode = .disallowed` explicitly so AppKit does not add one.
+///
+/// M2 built the split view and the shared sidebar. M3 adds the document area's
+/// other half: a ``TabBarView`` above a container of resident ``DocumentView``s,
+/// one per hydrated tab, switched by show/hide. This controller is both the
+/// ``TabStore``'s ``TabHydrator`` — the only place a tab's web view is made or
+/// unmade — and its ``TabStoreDelegate``.
+@MainActor
+public final class MainWindowController: NSWindowController, NSWindowDelegate {
+
+    public let sidebar: TreeViewController
+    public let tabs: TabStore
+    public let tabBar: TabBarView
+
+    /// Where the resident web views live, stacked. Exactly one is unhidden.
+    public let documentContainer: DocumentContainerView
+
+    /// M9's third pane: the markdown source of the selected tab.
+    ///
+    /// One pane, rebound on every tab switch, rather than one per tab — see
+    /// ``EditorPane`` for why, and for how per-document undo survives the
+    /// sharing.
+    public let editor: EditorPane
+
+    /// The preview and the editor, side by side, below the tab bar.
+    public let editorSplit: NSSplitView
+
+    /// ADR-6's *"we prompt and never guess"*, and the state machine behind it.
+    public let conflicts: ConflictController
+
+    /// The two debounces every buffer this window makes is given.
+    ///
+    /// Overridable so a test can assert *ordering* — nothing before the
+    /// debounce, everything after it — without spending 800 ms per assertion,
+    /// and so `mark-bench` can run its 60-second typing gate at a realistic
+    /// cadence rather than a punitive one. Production is ADR-6's 800 ms.
+    public var bufferDebounces: (autosave: TimeInterval, preview: TimeInterval) = (
+        Buffer.autosaveDebounce, Buffer.previewDebounce
+    )
+
+    /// How many external changes the watcher has delivered to this window.
+    ///
+    /// Instrumentation, and the only honest way to assert ADR-6's *"our own
+    /// saves never trigger a re-render"*: the property is that the watcher
+    /// **does not report** our write, and a counter of patches cannot tell
+    /// "suppressed" from "reported and coalesced". Also the number to ask for
+    /// when someone says the preview flickers while they type.
+    public private(set) var externalChangesSeen = 0
+
+    private let splitViewController: NSSplitViewController
+    private let session: Session
+
+    /// ADR-2's file watcher, for every open document at once.
+    ///
+    /// It lives here rather than on ``DocumentView`` for the reason ADR-4
+    /// states as a constraint: *"no feature may assume a tab's web view
+    /// exists"*. A dehydrated tab has no `DocumentView` to own a watcher, and
+    /// its badge still has to be right — so the watcher is owned by the thing
+    /// that outlives hydration, and a change to a dehydrated tab's file updates
+    /// its metadata through the core without a DOM being involved at all.
+    private var watcher: FileWatcher!
+
+    /// Shown when every tab has been closed. The window stays — it still has
+    /// the sidebar, which is the entire reason ADR-4 chose one window over N.
+    private let emptyStateLabel: NSTextField
+
+    /// The selected tab's view, or `nil` when nothing is open.
+    ///
+    /// Optional on purpose. In M2 this was a stored, always-present property;
+    /// under ADR-4 there is no such thing, because a window with no tabs has no
+    /// web view at all and a dehydrated tab has none either. Callers that
+    /// force-unwrapped it would be the first instance of the "assumes a tab's
+    /// web view exists" bug the ADR warns about.
+    public var documentView: DocumentView? { tabs.selected?.documentView }
+
+    public init(root: URL, session: Session = Session()) {
+        self.session = session
+        sidebar = TreeViewController(root: root)
+        tabs = TabStore()
+        tabBar = TabBarView(store: tabs)
+        documentContainer = DocumentContainerView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+
+        emptyStateLabel = NSTextField(labelWithString: "No document open")
+        emptyStateLabel.font = .systemFont(ofSize: 15)
+        emptyStateLabel.textColor = .tertiaryLabelColor
+        emptyStateLabel.alignment = .center
+        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        editor = EditorPane(frame: NSRect(x: 0, y: 0, width: 380, height: 700))
+        // Hidden by default: ADR-6 says *"the pane is collapsible and hidden by
+        // default; a document opens read-only until the user asks to edit it"*.
+        editor.isHidden = true
+        conflicts = ConflictController()
+
+        editorSplit = NSSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        editorSplit.isVertical = true
+        editorSplit.dividerStyle = .thin
+        editorSplit.addSubview(documentContainer)
+        editorSplit.addSubview(editor)
+
+        let documentArea = DocumentAreaView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 700),
+            tabBar: tabBar,
+            container: editorSplit
+        )
+        documentContainer.addSubview(emptyStateLabel)
+
+        let documentController = NSViewController()
+        documentController.view = documentArea
+
+        let splitViewController = NSSplitViewController()
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sidebarItem.minimumThickness = 160
+        sidebarItem.maximumThickness = 480
+        sidebarItem.canCollapse = true
+        let documentItem = NSSplitViewItem(viewController: documentController)
+        documentItem.minimumThickness = 320
+        splitViewController.addSplitViewItem(sidebarItem)
+        splitViewController.addSplitViewItem(documentItem)
+        self.splitViewController = splitViewController
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = splitViewController
+        window.title = "mark"
+        window.titlebarAppearsTransparent = false
+        window.setFrameAutosaveName("dev.mark.MainWindow")
+        window.minSize = NSSize(width: 640, height: 400)
+
+        // ADR-4. Not `.automatic` (which lets a user's "Prefer tabs: always"
+        // System Settings preference add a native tab bar), and never
+        // `.preferred`.
+        window.tabbingMode = .disallowed
+
+        // ADR-4: *"Session state lives in our own file, not
+        // `NSWindowRestoration`."* Turning AppKit's mechanism off is what makes
+        // "deterministic regardless of the user's Close-windows-when-quitting
+        // setting" true rather than merely intended — otherwise both mechanisms
+        // restore, and which one wins depends on that very setting.
+        //
+        // The other half of that constraint — *"`NSQuitAlwaysKeepsWindows` is a
+        // user preference we must not write"* — is enforced by not writing it,
+        // here or anywhere, and asserted in `SessionTests`.
+        window.isRestorable = false
+
+        super.init(window: window)
+        window.delegate = self
+        editorSplit.delegate = self
+        conflicts.use(presenter: AlertConflictPresenter(window: window))
+
+        NSLayoutConstraint.activate([
+            emptyStateLabel.centerXAnchor.constraint(equalTo: documentContainer.centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: documentContainer.centerYAnchor),
+        ])
+
+        // Before the store gets a delegate, so no tab can exist — and therefore
+        // no `tabStoreDidChangeTabs` can reach ``syncWatchedFiles()`` — while
+        // this is still nil.
+        watcher = FileWatcher { [weak self] change in
+            self?.documentChangedOnDisk(change)
+        }
+        tabs.delegate = self
+        tabs.hydrator = self
+        sidebar.onSelect = { [weak self] url in
+            self?.open(url)
+        }
+        // M8: the root, the history, and the two listing toggles all live in
+        // the session file, so anything that moves them schedules a save.
+        sidebar.onStateChange = { [weak self] in
+            self?.saveSessionSoon()
+        }
+        // ADR-6: *"nothing may read the file for […] task counts […] on a
+        // dirty tab"*. The sidebar's badge is a task count computed from a file
+        // read, so it asks here first and counts the buffer's tasks instead.
+        sidebar.badges.dirtySource = { [weak self] url in
+            self?.tabs.tab(for: url)?.authoritativeSource
+        }
+        documentArea.onDrop = { [weak self] urls in
+            self?.sidebar.handleDrop(urls) ?? false
+        }
+        tabBar.reload()
+        updateChrome()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("MainWindowController is created in code, not from a nib")
+    }
+
+    // MARK: - Documents
+
+    /// Show a document: select the tab already on it, or open a new one.
+    public func open(_ url: URL) {
+        Log.app.info("open \(url.lastPathComponent, privacy: .public)")
+        tabs.open(url)
+    }
+
+    /// Point the sidebar somewhere else, recording it in the history.
+    public func setSidebarRoot(_ url: URL) {
+        sidebar.navigate(to: url)
+        saveSessionSoon()
+    }
+
+    public func showWindow(activating: Bool) {
+        showWindow(nil)
+        if activating {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    // MARK: - Watching
+
+    /// Watch exactly the files that are open, and nothing else.
+    ///
+    /// Driven from ``tabStoreDidChangeTabs(_:)`` rather than from open/close,
+    /// so a tab that appears by any route — the sidebar, ⌘T, `mark open`,
+    /// `mark://`, session restore — is watched by construction and there is no
+    /// second list to forget to update.
+    private func syncWatchedFiles() {
+        watcher.setWatched(Set(tabs.tabs.map(\.url)))
+    }
+
+    /// A watched file changed on disk.
+    ///
+    /// Two effects, and the split between them is ADR-4's constraint:
+    ///
+    /// * **The badge always updates**, through the core against the bytes on
+    ///   disk. This works identically whether or not the tab has a web view,
+    ///   which is the whole point — *"anything operating across all open
+    ///   documents goes through the core against the file on disk"*.
+    /// * **The document is patched only if it is hydrated.** A dehydrated tab
+    ///   has no DOM to patch, and hydrating one because a file changed would
+    ///   spend ~52 MB on a document nobody is looking at. It re-reads on
+    ///   rehydration anyway.
+    private func documentChangedOnDisk(_ change: FileChange) {
+        externalChangesSeen += 1
+        let url = change.url.standardizedFileURL
+        let matching = tabs.tabs.filter { $0.url == url }
+        guard !matching.isEmpty else {
+            // The tab closed between the scan and this hop to the main actor.
+            Log.watch.debug("change for \(url.lastPathComponent, privacy: .public); no tab open")
+            return
+        }
+
+        switch change {
+        case .vanished:
+            // Not an error and not a close: the file may be mid-`git checkout`.
+            // The tab keeps its last render and its last known badge.
+            Log.watch.info(
+                "\(url.lastPathComponent, privacy: .public) is gone; keeping the last render")
+
+        case .changed(_, let source, let hash):
+            Log.watch.info(
+                "\(url.lastPathComponent, privacy: .public) changed on disk (\(source.utf8.count) bytes, \(hash.prefix(8), privacy: .public)); \(matching.count) tab(s)"
+            )
+            // The sidebar's badge for this file is now stale too, and it is a
+            // different cache from the tab's: one is per open tab, the other is
+            // per visible row, and a file can be in either, both, or neither.
+            sidebar.invalidateBadge(for: url)
+            for tab in matching {
+                // M9's fork in the road, and the one place it can be got wrong
+                // quietly. A tab with a buffer decides for itself what an
+                // external change means: ours, adopted, converged, or a
+                // conflict. A tab without one behaves exactly as it did in M5.
+                if let buffer = tab.buffer {
+                    let outcome = buffer.fileChanged(source: source, hash: hash)
+                    switch outcome {
+                    case .ours:
+                        // Our own autosave, seen anyway — the watcher's
+                        // suppression should already have eaten it, so this is
+                        // the second line of defence and worth saying out loud.
+                        Log.watch.info(
+                            "\(url.lastPathComponent, privacy: .public): a change matching our own write reached the buffer; not re-rendering"
+                        )
+                        continue
+                    case .conflicted:
+                        // The preview keeps showing the buffer: while dirty,
+                        // the buffer is truth, and the file's version is not
+                        // rendered anywhere until the user asks for it.
+                        tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+                        continue
+                    case .adopted, .converged:
+                        // `adopted` has already pushed the text into the editor
+                        // through `onChange`; both need the preview and the
+                        // badge brought up to date, which the code below does.
+                        break
+                    }
+                }
+
+                tab.refreshMetadata { [weak self, weak tab] in
+                    guard let self, let tab, self.tabs.tabs.contains(tab) else { return }
+                    self.tabBar.reload()
+                }
+                guard let view = tab.documentView else {
+                    Log.watch.debug(
+                        "\(url.lastPathComponent, privacy: .public) is dehydrated; badge only, no DOM touched"
+                    )
+                    continue
+                }
+                _Concurrency.Task { @MainActor in
+                    await view.apply(source: source)
+                }
+            }
+        }
+    }
+
+    // MARK: - Editing (M9)
+
+    /// Whether the third pane is on screen.
+    public var isEditorVisible: Bool { !editor.isHidden }
+
+    /// Show or hide the editor for the selected tab.
+    ///
+    /// Opening it is what creates the tab's ``Buffer`` — ADR-6's *"a document
+    /// opens read-only until the user asks to edit it"*. Hiding the pane does
+    /// **not** discard the buffer: unsaved text does not stop existing because
+    /// a view was collapsed, and the tab stays dirty, stays exempt from
+    /// eviction, and keeps autosaving.
+    public func setEditorVisible(_ visible: Bool) {
+        guard visible != isEditorVisible else { return }
+        editor.isHidden = !visible
+        if visible {
+            if let tab = tabs.selected {
+                bindEditor(to: tab)
+            }
+            // A first opening with no divider position yet: give the editor a
+            // sensible share rather than whatever `adjustSubviews` invents.
+            if editor.frame.width < 80 {
+                let width = editorSplit.bounds.width
+                editorSplit.setPosition(width * 0.55, ofDividerAt: 0)
+            }
+        } else {
+            editor.window?.makeFirstResponder(nil)
+        }
+        editorSplit.adjustSubviews()
+        editorSplit.needsLayout = true
+        Log.app.info("editor pane \(visible ? "shown" : "hidden")")
+    }
+
+    /// The buffer for `tab`, made on first use.
+    ///
+    /// Every wire between a buffer and the rest of the app is tied here, in one
+    /// place, so "did we remember to tell the watcher about our own write?" has
+    /// exactly one answer rather than one per call site.
+    @discardableResult
+    public func buffer(for tab: DocumentTab) -> Buffer? {
+        if let existing = tab.buffer { return existing }
+        let buffer: Buffer
+        do {
+            buffer = try Buffer.open(
+                url: tab.url,
+                autosaveDelay: bufferDebounces.autosave,
+                previewDelay: bufferDebounces.preview
+            )
+        } catch {
+            Log.core.error(
+                "\(tab.url.lastPathComponent, privacy: .public) cannot be edited: \(String(describing: error), privacy: .public)"
+            )
+            return nil
+        }
+
+        buffer.onWillWrite = { [weak self] contents in
+            // ADR-6: *"Every write records its content hash, and the watcher
+            // suppresses matches."* This is that. Before the write, so a fast
+            // FSEvents delivery cannot arrive at a watcher that has not been
+            // told yet — the failure mode is a re-render under the cursor.
+            self?.watcher.noteWrittenContent(contents, to: tab.url)
+        }
+        buffer.onPreviewDue = { [weak self, weak tab] source in
+            guard let self, let tab else { return }
+            self.updatePreview(of: tab, from: source)
+        }
+        buffer.onDirtyChanged = { [weak self, weak tab] _ in
+            guard let self, let tab else { return }
+            self.tabBar.reload()
+            // The sidebar's badge for this file now comes from the buffer (or
+            // stops doing so), so the cached one is wrong either way.
+            self.sidebar.invalidateBadge(for: tab.url)
+            tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+        }
+        buffer.onSaved = { [weak self, weak tab] _ in
+            guard let self, let tab else { return }
+            self.sidebar.invalidateBadge(for: tab.url)
+            tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+        }
+        buffer.onConflict = { [weak self, weak buffer] conflict in
+            guard let self, let buffer else { return }
+            self.conflicts.handle(conflict, for: buffer)
+        }
+        buffer.onChange = { [weak self, weak buffer] origin in
+            guard let self, let buffer else { return }
+            // "Take theirs" and a clean tab following the disk both replace the
+            // text underneath the caret; the editor has to be told, and only
+            // for the buffer it is actually showing.
+            if origin == .external, self.editor.buffer === buffer {
+                self.editor.adoptExternalText(buffer.text)
+            }
+        }
+
+        tab.attach(buffer: buffer)
+        // The checkbox seam: from here on a click on this tab's preview goes to
+        // the buffer while dirty and to the file while clean, decided per
+        // click rather than by a flag.
+        tab.documentView?.taskWriter = BufferTaskWriter(buffer: buffer)
+        Log.app.info(
+            "editing \(tab.url.lastPathComponent, privacy: .public) (\(buffer.text.utf8.count) bytes)"
+        )
+        return buffer
+    }
+
+    private func bindEditor(to tab: DocumentTab) {
+        guard isEditorVisible else { return }
+        guard let buffer = buffer(for: tab) else { return }
+        editor.bind(buffer)
+    }
+
+    /// Bring the preview up to date from the buffer.
+    ///
+    /// The one place the preview is fed while a tab is dirty, and it feeds it
+    /// the **buffer**, never the file.
+    private func updatePreview(of tab: DocumentTab, from source: String) {
+        guard let view = tab.documentView else {
+            // ADR-6's last constraint: *"the editor pane must not assume a
+            // `WKWebView` exists"*. There is nothing to patch, and the tab
+            // re-renders from the buffer when it rehydrates.
+            return
+        }
+        _Concurrency.Task { @MainActor in
+            await view.apply(source: source)
+        }
+    }
+
+    /// Write every dirty buffer now.
+    ///
+    /// The quit path, and ⌘S's "all documents" half. Synchronous, because
+    /// `applicationWillTerminate` has no runloop left to await on: this is what
+    /// bounds ADR-6's exposure to *"at most the last 800 ms"*.
+    @discardableResult
+    public func flushDirtyBuffers() -> Int {
+        var saved = 0
+        for tab in tabs.tabs {
+            guard let buffer = tab.buffer, buffer.isDirty else { continue }
+            if buffer.isConflicted {
+                // Never resolve a conflict by writing — not even at quit.
+                Log.core.error(
+                    "\(tab.url.lastPathComponent, privacy: .public) has an unresolved conflict; leaving the file as it is"
+                )
+                continue
+            }
+            if buffer.save() { saved += 1 }
+        }
+        if saved > 0 { Log.core.info("flushed \(saved) dirty buffer(s)") }
+        return saved
+    }
+
+    // MARK: - Session
+
+    /// Everything ADR-4's session file records, right now.
+    ///
+    /// M8 adds the sidebar's half: the root was already here, and the back and
+    /// forward stacks and the two listing toggles join it. Without the history
+    /// a relaunch comes back in the right place with ⌘[ pointing at nothing,
+    /// which reads as "it forgot where I had been" rather than as a missing
+    /// feature.
+    public func sessionSnapshot() -> SessionState {
+        var state = tabs.snapshot(sidebarRoot: sidebar.root)
+        state.theme = ThemeController.shared.chosenName
+        let sidebarState = sidebar.snapshot()
+        state.sidebarBack = sidebarState.back.map(\.path)
+        state.sidebarForward = sidebarState.forward.map(\.path)
+        state.sidebarOptions = SessionSidebarOptions(
+            showsNonMarkdown: sidebarState.options.showsNonMarkdown,
+            showsHidden: sidebarState.options.showsHidden,
+            sort: sidebarState.sort.rawValue
+        )
+        // M10. M9 shipped without this and a relaunch came back read-only,
+        // which reads as the window forgetting rather than as ADR-6's
+        // read-only default being honoured.
+        state.editorVisible = isEditorVisible
+        return state
+    }
+
+    /// Restore a session. Only the selected tab is hydrated, so a 40-tab
+    /// session costs one document to reopen, not forty.
+    /// - Parameter sidebarRoot: overrides the session's root. Set when files
+    ///   were named on the command line: `mark notes/today.md` is an explicit
+    ///   instruction about where to be, and yesterday's saved root should not
+    ///   win over it. The history still restores, so ⌘[ goes back to where the
+    ///   last session left off rather than nowhere.
+    public func restore(_ state: SessionState, sidebarRoot: URL? = nil) {
+        // Before any tab is opened, so the first render is already themed
+        // rather than being rendered once and re-rendered.
+        ThemeController.shared.restore(named: state.theme)
+        if let root = (sidebarRoot?.path ?? state.sidebarRoot) {
+            let options = state.sidebarOptions ?? SessionSidebarOptions()
+            sidebar.restore(
+                SidebarState(
+                    root: URL(fileURLWithPath: root),
+                    back: (state.sidebarBack ?? []).map { URL(fileURLWithPath: $0) },
+                    forward: (state.sidebarForward ?? []).map { URL(fileURLWithPath: $0) },
+                    options: TreeListingOptions(
+                        showsNonMarkdown: options.showsNonMarkdown,
+                        showsHidden: options.showsHidden
+                    ),
+                    // An unrecognised sort name is not a reason to refuse a
+                    // session; it is a reason to sort by name.
+                    sort: TreeSort(rawValue: options.sort) ?? .name
+                )
+            )
+        }
+        tabs.restore(state)
+        // After the tabs, because showing the pane binds the selected tab's
+        // buffer and there is no selection until `restore` has made one. A
+        // session with no tabs restores no pane either: an editor bound to
+        // nothing is a blank read-only rectangle.
+        if state.editorVisible == true, tabs.selected != nil {
+            setEditorVisible(true)
+        }
+    }
+
+    public func saveSessionSoon() {
+        session.scheduleSave { [weak self] in
+            self?.sessionSnapshot() ?? SessionState()
+        }
+    }
+
+    /// The quit path. `applicationWillTerminate` is synchronous, which is why
+    /// scroll offsets are pushed from the page continuously rather than
+    /// queried here.
+    public func saveSessionNow() {
+        session.saveNow(sessionSnapshot())
+    }
+
+    // MARK: - Chrome
+
+    private func updateChrome() {
+        let selected = tabs.selected
+        window?.title = selected?.title ?? "mark"
+        window?.representedURL = selected?.url
+        emptyStateLabel.isHidden = !tabs.isEmpty
+        if tabBar.isHidden != tabs.isEmpty {
+            tabBar.isHidden = tabs.isEmpty
+            tabBar.superview?.needsLayout = true
+        }
+        WindowMenu.shared?.update(with: tabs)
+    }
+}
+
+// MARK: - TabHydrator
+
+extension MainWindowController: TabHydrator {
+
+    /// ADR-4's hydration. Every web view made in the app is made here.
+    public func makeDocumentView(for tab: DocumentTab) -> DocumentView {
+        let view = DocumentView(frame: documentContainer.bounds)
+        // Autoresizing rather than four constraints per view: with up to 20
+        // resident views this is layout the window would otherwise redo on
+        // every resize, and the container's job is to stack, not to lay out.
+        view.autoresizingMask = [.width, .height]
+        view.isHidden = true
+        documentContainer.addSubview(view)
+
+        view.onOpen = { [weak self, weak tab] url in
+            guard let self, let tab else { return }
+            self.tabs.notePainted(tab)
+            if tab == self.tabs.selected {
+                self.window?.title = tab.title
+                self.window?.representedURL = url
+            }
+            self.tabBar.reload()
+        }
+        view.onScroll = { [weak self, weak tab] y in
+            guard let self, let tab else { return }
+            tab.scrollOffset = y
+            self.saveSessionSoon()
+        }
+        // ADR-6: *"nothing may read the file for rendering […] on a dirty
+        // tab"*. Rehydration is a render, so a dirty tab is rehydrated from its
+        // buffer — otherwise switching away from an unsaved document and back
+        // would show the version on disk.
+        if let buffer = tab.buffer {
+            view.taskWriter = BufferTaskWriter(buffer: buffer)
+        }
+        view.open(
+            tab.url, source: tab.authoritativeSource, restoringScrollTo: tab.scrollOffset)
+        return view
+    }
+
+    public func discardDocumentView(_ view: DocumentView, for tab: DocumentTab) {
+        view.tearDown()
+    }
+}
+
+// MARK: - TabStoreDelegate
+
+extension MainWindowController: TabStoreDelegate {
+
+    /// The last chance to write a tab's unsaved buffer.
+    ///
+    /// Autosave's contract is *"at most the last 800 ms"*, and a tab closed
+    /// inside that window would otherwise take the difference with it. A tab
+    /// with an **unresolved conflict** is the one case that is not written:
+    /// ADR-6 says never to resolve a conflict by writing, and closing the tab
+    /// is not the user answering the question.
+    public func tabStore(_ store: TabStore, willClose tab: DocumentTab) {
+        guard let buffer = tab.buffer else { return }
+        if buffer.isDirty && !buffer.isConflicted {
+            buffer.save()
+        } else if buffer.isConflicted {
+            Log.core.error(
+                """
+                \(tab.url.lastPathComponent, privacy: .public) is closing with an unresolved \
+                conflict; the unsaved buffer is discarded and the file on disk is left alone
+                """
+            )
+        }
+        conflicts.cancel(for: tab.url)
+        editor.forget(buffer)
+        tab.detachBuffer()
+    }
+
+    public func tabStoreDidChangeTabs(_ store: TabStore) {
+        tabBar.reload()
+        updateChrome()
+        syncWatchedFiles()
+        saveSessionSoon()
+    }
+
+    /// The switch itself: unhide one view, hide the other.
+    ///
+    /// ADR-4 measured this at 0.05 ms median because that is all it is. There
+    /// is no re-injection, no re-layout of the document, and no scroll
+    /// restoration — the outgoing view keeps its DOM, its scroll position, and
+    /// its JS state, and gets them back untouched when it is next shown.
+    public func tabStore(_ store: TabStore, didSelect tab: DocumentTab?, previous: DocumentTab?) {
+        let state = Log.signposter.beginInterval("tab switch")
+        previous?.documentView?.isHidden = true
+        if let view = tab?.documentView {
+            view.frame = documentContainer.bounds
+            view.isHidden = false
+        }
+        Log.signposter.endInterval("tab switch", state)
+        // The editor follows the selection. A tab that has never been edited
+        // gets its buffer here, but only while the pane is open — an unopened
+        // editor reads no files and allocates no buffers.
+        if isEditorVisible {
+            if let tab {
+                bindEditor(to: tab)
+            } else {
+                editor.bind(nil)
+            }
+        }
+        tabBar.reload()
+        updateChrome()
+        saveSessionSoon()
+    }
+}
+
+// MARK: - CommandTarget
+
+/// What `mark-cli` and `mark://` can do to this window (ADR-3).
+///
+/// Every method here goes through ``TabStore``, which is also what the menu
+/// items and the sidebar go through — so a command from the socket and the same
+/// action taken with the mouse cannot diverge, and neither can bypass ADR-4's
+/// residency accounting.
+///
+/// Nothing here calls `NSApp.activate`. ADR-3 launches the app with `open -g`
+/// *"so focus is not stolen"*, and an app that immediately raises itself on the
+/// command that follows would give the focus back with one hand and take it
+/// with the other. `mark open` brings the **window** forward without activating
+/// the app; `mark open --tab` does not even do that.
+extension MainWindowController: CommandTarget {
+
+    public func openDocument(at url: URL, background: Bool) throws -> OpenOutcome {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            throw CommandFailure(
+                .notFound, "\(url.path): no such file", detail: ["path": .string(url.path)])
+        }
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            throw CommandFailure(
+                .notFound, "\(url.path): not readable", detail: ["path": .string(url.path)])
+        }
+        if isDirectory.boolValue {
+            // M8 made a directory a *place*, not a document, and M10 made
+            // `open` say so instead of refusing: `mark open notes/` roots the
+            // sidebar there, exactly as `mark nav notes/` does. It was refused
+            // until now for a shape reason rather than a semantic one — the
+            // reply could only carry a tab, and a success with no tab in it
+            // lies to the caller. ``OpenOutcome`` is that shape fixed.
+            //
+            // `--tab` means "do not move me", so a background open still sets
+            // the root but leaves the window where it is; the sidebar is
+            // shared by every tab (ADR-4), so there is nothing else it could
+            // mean here.
+            let sidebar = try navigateSidebar(to: .path(url.path))
+            if !background { showWindow(activating: false) }
+            return .sidebar(sidebar)
+        }
+
+        // `--tab` is "add it to my tabs", so it must not move the reader off
+        // whatever they are looking at. Re-selecting afterwards is cheap: the
+        // new tab is already hydrated and the switch is a show/hide (ADR-4).
+        let previous = background ? tabs.selected : nil
+        let tab = tabs.open(url)
+        if let previous, previous != tab { tabs.select(previous) }
+        if !background { showWindow(activating: false) }
+        return .tab(summary(for: tab))
+    }
+
+    public func documentTabs() -> [TabSummary] {
+        tabs.tabs.map { summary(for: $0) }
+    }
+
+    public func selectTab(matching selector: TabSelector) throws -> TabSummary {
+        let tab = try resolve(selector)
+        tabs.select(tab)
+        showWindow(activating: false)
+        return summary(for: tab)
+    }
+
+    public func closeTab(matching selector: TabSelector) throws -> TabSummary {
+        let tab = try resolve(selector)
+        // Captured before the close, because afterwards the tab has no index.
+        let closed = summary(for: tab)
+        tabs.close(tab)
+        return closed
+    }
+
+    public func scrollSelectedDocument(toAnchor anchor: String) async throws -> TabSummary {
+        let tab = try selectedTab()
+        guard let view = tab.documentView else {
+            // ADR-4 never evicts the selected tab, so this is a genuine
+            // internal inconsistency rather than an expected state.
+            throw CommandFailure(
+                .noDocument, "the selected tab has no view to scroll")
+        }
+        await view.awaitReady()
+        let found: Bool
+        do {
+            found = try await view.scrollToAnchor(anchor)
+        } catch {
+            throw CommandFailure(
+                .internalError, "scrolling to \"\(anchor)\" failed: \(String(describing: error))")
+        }
+        guard found else {
+            throw CommandFailure(
+                .anchorNotFound,
+                "\(tab.url.lastPathComponent) has no anchor \"\(anchor)\"",
+                detail: ["anchor": .string(anchor), "path": .string(tab.url.path)]
+            )
+        }
+        return summary(for: tab)
+    }
+
+    public func reloadSelectedDocument() async throws -> Int {
+        let tab = try selectedTab()
+        guard let view = tab.documentView else {
+            throw CommandFailure(.noDocument, "the selected tab has no view to reload")
+        }
+        // Reload means "re-read the file", and
+        // `2026-08-24-editing-pane-and-autosave` forbids reading the file for
+        // rendering while a tab is dirty. Doing it anyway would replace the
+        // reader's unsaved text with the version on disk, silently — the same
+        // failure the ADR rejects "reload-theirs" for. Refusing is the answer,
+        // with the two ways out named.
+        guard !tab.isDirty else {
+            throw CommandFailure(
+                .unsupported,
+                "\(tab.url.lastPathComponent) has unsaved changes; save it (⌘S) or resolve the conflict before reloading",
+                detail: ["path": .string(tab.url.path), "dirty": .bool(true)]
+            )
+        }
+        await view.awaitReady()
+        let report = await view.reload()
+        tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+        return report?.blocks ?? 0
+    }
+
+    // MARK: The sidebar (M8)
+
+    public func sidebarSummary() -> SidebarSummary {
+        let state = sidebar.snapshot()
+        return SidebarSummary(
+            root: state.root.path,
+            breadcrumb: sidebar.navigator.breadcrumb.map(\.name),
+            back: state.back.map(\.path),
+            forward: state.forward.map(\.path),
+            showsNonMarkdown: state.options.showsNonMarkdown,
+            showsHidden: state.options.showsHidden,
+            sort: state.sort.rawValue,
+            filter: state.filter
+        )
+    }
+
+    /// M7. Apply a theme to every tab — including the dehydrated ones, which
+    /// need nothing done to them.
+    ///
+    /// The gate is *"`mark theme dracula` applies to every open tab, including
+    /// dehydrated ones"*, and the reason it is met is structural rather than
+    /// careful: a hydrated tab gets one `<style>` assignment, and a dehydrated
+    /// tab has no DOM to update and is rendered against
+    /// ``ThemeController/active`` when it next hydrates (``makeDocumentView``).
+    /// There is no per-tab theme state that could go stale.
+    public func applyTheme(named name: String?) async throws -> ThemeSummaryForCLI {
+        let controller = ThemeController.shared
+        let resolved: ResolvedTheme
+        let previousStamp = controller.active.codeStamp
+        if let name {
+            do {
+                resolved = try controller.apply(named: name)
+            } catch {
+                throw CommandFailure(
+                    .badArguments, String(describing: error),
+                    detail: ["theme": .string(name)])
+            }
+        } else {
+            resolved = controller.active
+        }
+
+        var applied = 0
+        var rerendered = 0
+        for tab in tabs.tabs {
+            // A dehydrated tab needs nothing: it has no DOM, and it is
+            // rendered against the new theme when it next hydrates.
+            guard let view = tab.documentView else { continue }
+            // `_ =` because the report is only interesting to `mark-bench`,
+            // which reads it from its own harness; here the value is awaited
+            // for its ordering — the CSS is installed before the count says it
+            // is — and discarded.
+            _ = await view.applyTheme(resolved).value
+            applied += 1
+
+            // Two things a `<style>` swap cannot re-colour, both of which are
+            // *baked into the HTML* at render time:
+            //
+            //   * a diagram, because `merman` writes its own palette into the
+            //     SVG's scoped `<style>` — the whole reason the core renders
+            //     one copy per appearance rather than one copy;
+            //   * code tokens, but only if the incoming theme's scope → slot
+            //     map differs, which no shipped theme's does.
+            //
+            // Both are rare and both are a re-render, which is ~95 ms and
+            // node-preserving where it can be. Everything else — chrome,
+            // links, tables, code colours — is the style swap above and costs
+            // nothing.
+            let stampChanged = resolved.codeStamp != previousStamp
+            let hasDiagram = await view.containsDiagram()
+            if stampChanged || hasDiagram {
+                rerendered += 1
+                await view.rerenderForTheme()
+                _ = await view.applyTheme(resolved).value
+            }
+        }
+        if rerendered > 0 {
+            Log.render.info(
+                "theme \(resolved.name, privacy: .public): re-rendered \(rerendered) of \(applied) hydrated tab(s) — diagrams and code markup are baked in at render time"
+            )
+        }
+        saveSessionSoon()
+        return ThemeSummaryForCLI(
+            name: resolved.name,
+            kind: resolved.kind.rawValue,
+            light: resolved.light.name,
+            dark: resolved.dark.name,
+            paired: resolved.paired,
+            applied: applied,
+            rerendered: rerendered
+        )
+    }
+
+    public func navigateSidebar(to target: NavigationTarget) throws -> SidebarSummary {
+        switch target {
+        case .path(let path):
+            let url = CommandRouter.fileURL(from: path)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+                throw CommandFailure(
+                    .notFound, "\(url.path): no such directory",
+                    detail: ["path": .string(url.path)])
+            }
+            guard isDirectory.boolValue else {
+                throw CommandFailure(
+                    .badArguments, "\(url.path) is a file; the sidebar's root is a directory",
+                    detail: ["path": .string(url.path)])
+            }
+            sidebar.navigate(to: url)
+
+        case .parent:
+            guard sidebar.navigateToParent() else {
+                throw CommandFailure(
+                    .unsupported, "\(sidebar.root.path) has no parent")
+            }
+
+        case .back:
+            guard sidebar.navigateBack() else {
+                throw CommandFailure(.unsupported, "there is nothing to go back to")
+            }
+
+        case .forward:
+            guard sidebar.navigateForward() else {
+                throw CommandFailure(.unsupported, "there is nothing to go forward to")
+            }
+        }
+        saveSessionSoon()
+        return sidebarSummary()
+    }
+
+    // MARK: Helpers
+
+    private func selectedTab() throws -> DocumentTab {
+        guard let tab = tabs.selected else {
+            throw CommandFailure(.noDocument, "no document is open")
+        }
+        return tab
+    }
+
+    private func resolve(_ selector: TabSelector) throws -> DocumentTab {
+        switch selector {
+        case .selected:
+            return try selectedTab()
+        case .index(let index):
+            guard tabs.tabs.indices.contains(index) else {
+                throw CommandFailure(
+                    .tabNotFound,
+                    "there is no tab \(index); \(tabs.count) \(tabs.count == 1 ? "tab is" : "tabs are") open",
+                    detail: ["index": .int(index), "tabs": .int(tabs.count)]
+                )
+            }
+            return tabs.tabs[index]
+        case .path(let path):
+            let url = CommandRouter.fileURL(from: path)
+            guard let tab = tabs.tab(for: url) else {
+                throw CommandFailure(
+                    .tabNotFound, "no tab is open on \(url.path)",
+                    detail: ["path": .string(url.path)])
+            }
+            return tab
+        }
+    }
+
+    private func summary(for tab: DocumentTab) -> TabSummary {
+        TabSummary(
+            index: tabs.index(of: tab) ?? -1,
+            path: tab.url.path,
+            title: tab.metadata?.documentTitle ?? tab.title,
+            selected: tab == tabs.selected,
+            resident: tab.state.isResident,
+            openTasks: tab.metadata?.tasks.open,
+            totalTasks: tab.metadata?.tasks.total
+        )
+    }
+}
+
+// MARK: - Menu actions
+
+/// With native tabbing AppKit supplies *and validates* ⌘T, ⌘W, ⌃⇥ and the
+/// Window-menu tab items. ADR-4 traded that away, so this is the other half of
+/// the bill: `NSMenuItemValidation` explicitly, because `NSWindowController`
+/// does not conform to it and an `override` here compiles as nothing.
+extension MainWindowController: NSMenuItemValidation {
+
+    /// ⌘T. A viewer has no blank document to open, so "New Tab" is the open
+    /// panel — the tab is what you get, and the file is what you choose.
+    @objc public func newTab(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText, .text]
+        panel.allowsOtherFileTypes = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = tabs.selected?.url.deletingLastPathComponent() ?? sidebar.root
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { open(url) }
+    }
+
+    /// ⌘W closes the *tab*, matching every tab bar on the platform. The window
+    /// has ⇧⌘W (`performClose:`), which AppKit routes itself.
+    @objc public func closeTab(_ sender: Any?) {
+        tabs.closeSelected()
+    }
+
+    @objc public func closeOtherTabs(_ sender: Any?) {
+        guard let keep = tabs.selected else { return }
+        for tab in tabs.tabs where tab != keep { tabs.close(tab) }
+    }
+
+    /// ⌃⇥.
+    @objc public func selectNextTab(_ sender: Any?) { tabs.selectNext() }
+
+    /// ⌃⇧⇥.
+    @objc public func selectPreviousTab(_ sender: Any?) { tabs.selectPrevious() }
+
+    /// ⌘1–⌘9, dispatched by `tag`. ⌘9 is the last tab, not the ninth.
+    @objc public func selectTabByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        tabs.selectByKeyEquivalent(number: item.tag)
+    }
+
+    // MARK: M8 — the navigator
+
+    /// ⌘↑.
+    @objc public func navigateToParent(_ sender: Any?) {
+        sidebar.navigateToParent()
+    }
+
+    /// ⌘[.
+    @objc public func navigateBack(_ sender: Any?) {
+        sidebar.navigateBack()
+    }
+
+    /// ⌘].
+    @objc public func navigateForward(_ sender: Any?) {
+        sidebar.navigateForward()
+    }
+
+    /// ⌘⇧O — jump the tree to the selected tab's file and select it.
+    ///
+    /// Goes through ``DocumentTab/url``, never through the tab's web view, so
+    /// it works for a dehydrated tab exactly as it does for a resident one —
+    /// ADR-4's *"no feature may assume a tab's web view exists"*, and one of
+    /// the easier places to violate it by reaching for `documentView`.
+    @objc public func revealInSidebar(_ sender: Any?) {
+        guard let url = tabs.selected?.url else { return }
+        if !sidebar.reveal(url) {
+            Log.tree.error("reveal failed for \(url.path, privacy: .public)")
+        }
+    }
+
+    /// ⌘⌥R — hand the file to Finder. The sidebar's selection if there is one,
+    /// otherwise the selected tab's document.
+    @objc public func revealInFinder(_ sender: Any?) {
+        sidebar.revealInFinder(sidebar.selectedNode?.url ?? tabs.selected?.url)
+    }
+
+    /// ⌥⌘F — put the caret in the sidebar's filter field.
+    @objc public func focusSidebarFilter(_ sender: Any?) {
+        guard let field = sidebar.filterField else { return }
+        window?.makeFirstResponder(field)
+    }
+
+    @objc public func toggleShowsNonMarkdownFiles(_ sender: Any?) {
+        sidebar.listingOptions.showsNonMarkdown.toggle()
+    }
+
+    @objc public func toggleShowsHiddenFiles(_ sender: Any?) {
+        sidebar.listingOptions.showsHidden.toggle()
+    }
+
+    /// The Sort By submenu, dispatched by `tag` in ``TreeSort/allCases`` order.
+    @objc public func sortSidebar(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+            TreeSort.allCases.indices.contains(item.tag)
+        else { return }
+        sidebar.sort = TreeSort.allCases[item.tag]
+    }
+
+    @objc public func refreshSidebar(_ sender: Any?) {
+        sidebar.refresh()
+    }
+
+    @objc public func reloadDocument(_ sender: Any?) {
+        guard let documentView, let tab = tabs.selected else { return }
+        // Same refusal as the socket's `reload`, for the same reason: a reload
+        // is a read of the file, and on a dirty tab the buffer is the truth.
+        guard !tab.isDirty else {
+            Log.render.error(
+                "\(tab.url.lastPathComponent, privacy: .public) has unsaved changes; refusing to reload it from disk"
+            )
+            NSSound.beep()
+            return
+        }
+        _Concurrency.Task { @MainActor in
+            await documentView.reload()
+            tab.refreshMetadata { [weak self] in
+                self?.tabBar.reload()
+            }
+        }
+    }
+
+    // MARK: M9 — the editor
+
+    /// ⌥⌘E.
+    @objc public func toggleEditorPane(_ sender: Any?) {
+        setEditorVisible(!isEditorVisible)
+        if isEditorVisible {
+            window?.makeFirstResponder(editor.textView)
+        }
+        // The pane's visibility is session state (M10), and nothing else in
+        // this action changes anything the session records — so without this
+        // the flag is only written the next time a tab or the sidebar moves.
+        saveSessionSoon()
+    }
+
+    /// ⌘S. Autosave means this is rarely needed, which is exactly why it has to
+    /// exist: an editor without ⌘S feels broken even when it is saving.
+    @objc public func saveDocument(_ sender: Any?) {
+        guard let buffer = tabs.selected?.buffer else { return }
+        buffer.save()
+    }
+
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(toggleEditorPane(_:)):
+            item.title = isEditorVisible ? "Hide Editor" : "Show Editor"
+            return tabs.selected != nil
+        case #selector(saveDocument(_:)):
+            return tabs.selected?.isDirty == true
+        case #selector(reloadDocument(_:)):
+            // Greyed out rather than beeping when there is something to lose.
+            return tabs.selected != nil && tabs.selected?.isDirty != true
+        case #selector(closeTab(_:)):
+            return tabs.selected != nil
+        case #selector(navigateToParent(_:)):
+            return sidebar.navigator.canGoUp
+        case #selector(navigateBack(_:)):
+            return sidebar.navigator.canGoBack
+        case #selector(navigateForward(_:)):
+            return sidebar.navigator.canGoForward
+        case #selector(revealInSidebar(_:)):
+            return tabs.selected != nil
+        case #selector(revealInFinder(_:)):
+            return sidebar.selectedNode != nil || tabs.selected != nil
+        case #selector(toggleShowsNonMarkdownFiles(_:)):
+            item.state = sidebar.listingOptions.showsNonMarkdown ? .on : .off
+            return true
+        case #selector(toggleShowsHiddenFiles(_:)):
+            item.state = sidebar.listingOptions.showsHidden ? .on : .off
+            return true
+        case #selector(sortSidebar(_:)):
+            item.state =
+                TreeSort.allCases.indices.contains(item.tag)
+                && TreeSort.allCases[item.tag] == sidebar.sort ? .on : .off
+            return true
+        case #selector(closeOtherTabs(_:)):
+            return tabs.count > 1
+        case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
+            return tabs.count > 1
+        case #selector(selectTabByNumber(_:)):
+            return item.tag == 9 ? !tabs.isEmpty : tabs.tabs.indices.contains(item.tag - 1)
+        default:
+            return true
+        }
+    }
+}
+
+// MARK: - The editor split
+
+/// Minimum widths for the preview and the editor.
+///
+/// Both are real minimums rather than politeness: a 40 pt preview cannot show a
+/// code block, and a 40 pt editor wraps every line of markdown into a column of
+/// single words. Dragging the divider to either end collapses the pane instead,
+/// which is what ADR-6's "collapsible" means in AppKit.
+extension MainWindowController: @MainActor NSSplitViewDelegate {
+
+    public func splitView(
+        _ splitView: NSSplitView, constrainMinCoordinate proposed: CGFloat,
+        ofSubviewAt index: Int
+    ) -> CGFloat {
+        max(proposed, 320)
+    }
+
+    public func splitView(
+        _ splitView: NSSplitView, constrainMaxCoordinate proposed: CGFloat,
+        ofSubviewAt index: Int
+    ) -> CGFloat {
+        min(proposed, splitView.bounds.width - 260)
+    }
+
+    public func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        subview === editor
+    }
+
+    public func splitView(
+        _ splitView: NSSplitView, shouldCollapseSubview subview: NSView,
+        forDoubleClickOnDividerAt index: Int
+    ) -> Bool {
+        subview === editor
+    }
+}
+
+// MARK: - Layout
+
+/// The document half of the split: the tab bar on top, the web views below.
+///
+/// Frame-based rather than autolayout for the same reason the stacked document
+/// views are: this view has two children whose geometry is one subtraction, and
+/// a constraint solver invoked on every window resize with 20 resident web
+/// views beneath it is a cost with nothing to show for it.
+@MainActor
+public final class DocumentAreaView: NSView {
+
+    private let tabBar: TabBarView
+    /// The preview/editor split. Typed as `NSView` because this view's job is
+    /// two frames and a subtraction; what is inside the lower one is not its
+    /// business.
+    private let container: NSView
+
+    /// Plan §2 M8's *"drop a folder onto the window to set the root"*, on the
+    /// document half. Returns whether the drop was accepted.
+    ///
+    /// The sidebar registers for the same drop, so both halves of the window
+    /// answer. What neither can claim is the region a `WKWebView` covers:
+    /// WebKit installs its own drag destination on its hosting view and takes
+    /// the drop before AppKit walks back up to us. Dropping on the tab bar,
+    /// the empty state, or anywhere in the sidebar works; dropping onto a
+    /// rendered document is WebKit's, and that is a limitation rather than a
+    /// bug we can fix from here.
+    public var onDrop: (([URL]) -> Bool)?
+
+    public init(frame: NSRect, tabBar: TabBarView, container: NSView) {
+        self.tabBar = tabBar
+        self.container = container
+        super.init(frame: frame)
+        addSubview(tabBar)
+        addSubview(container)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        SidebarContainerView.urls(from: sender).isEmpty ? [] : .generic
+    }
+
+    public override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        SidebarContainerView.urls(from: sender).isEmpty ? [] : .generic
+    }
+
+    public override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        onDrop?(SidebarContainerView.urls(from: sender)) ?? false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("DocumentAreaView is created in code, not from a nib")
+    }
+
+    public override var isFlipped: Bool { true }
+
+    /// How far down the tab bar has to start to clear the title bar.
+    ///
+    /// The window carries `.fullSizeContentView` (M2's choice, unchanged
+    /// here), so the content view extends *under* the title bar and a tab bar
+    /// at y = 0 is drawn behind the traffic lights and the window title. The
+    /// first screenshot of this milestone showed the first tab as a smear
+    /// behind the title text; no test caught it, and none would have.
+    ///
+    /// `safeAreaInsets` is the documented answer and is **0** here:
+    /// `NSSplitViewController` applies the title-bar allowance to its *sidebar*
+    /// item, and the content item's view is left flush with the top of the
+    /// content view. So the allowance is derived from the window directly, and
+    /// only when this view really does reach the top.
+    var titlebarInset: CGFloat {
+        if safeAreaInsets.top > 0 { return safeAreaInsets.top }
+        guard let window, let content = window.contentView else { return 0 }
+        let titlebar = content.bounds.height - window.contentLayoutRect.height
+        guard titlebar > 0 else { return 0 }
+        // This view is flipped, so its (0, 0) is the top-left; in the content
+        // view's unflipped coordinates that is the max-y edge.
+        let top = convert(NSPoint.zero, to: content)
+        return top.y >= content.bounds.maxY - 0.5 ? titlebar : 0
+    }
+
+    public override func layout() {
+        let top = titlebarInset
+        let barHeight = tabBar.isHidden ? 0 : TabBarView.barHeight
+        tabBar.frame = NSRect(
+            x: 0, y: top, width: bounds.width, height: TabBarView.barHeight)
+        container.frame = NSRect(
+            x: 0,
+            y: top + barHeight,
+            width: bounds.width,
+            height: max(0, bounds.height - top - barHeight)
+        )
+        super.layout()
+    }
+
+    // AppKit has no `safeAreaInsetsDidChange` on `NSView` (that is UIKit); it
+    // re-lays-out the content view when the window's layout rect changes, so
+    // `layout()` above is the whole story for entering and leaving full screen.
+}
+
+/// The stack of resident web views. Showing a tab unhides one and hides the
+/// rest; nothing here re-injects anything.
+@MainActor
+public final class DocumentContainerView: NSView {
+
+    public override var isFlipped: Bool { true }
+
+    /// The resident ``DocumentView``s, in creation order.
+    public var documentViews: [DocumentView] { subviews.compactMap { $0 as? DocumentView } }
+
+    /// The one currently on screen, if any.
+    public var visibleDocumentView: DocumentView? { documentViews.first { !$0.isHidden } }
+}

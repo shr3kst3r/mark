@@ -1,0 +1,54 @@
+[package]
+name = "mark-core"
+description = "Markdown document core for mark: parsing, block identity, highlighting, task toggling, directory queries."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mark_core"
+# `lib` for the CLI and the tests, `staticlib` for the Swift shell (ADR-1).
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+ignore = "0.4"
+# `flock(2)` and, on the refusal path only, the `libproc` calls that name the
+# process holding a document (2026-08-25-flock-write-locking). Nothing in std
+# exposes either. Already in the tree — `mark-cli` has depended on it since M4.
+libc = "0.2"
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# ADR-5: math and diagrams are rendered here, in Rust, and the WebView receives
+# no JavaScript for either.
+#
+# `merman` is pinned to an **exact** version rather than a caret range because
+# it is 0.8.0-alpha: a pre-1.0 alpha must not float. It is also what sets the
+# workspace MSRV to 1.95.
+#
+# Default features (`complete-svg`) are deliberate, and so is what they leave
+# out: `system-clock`, `system-timezone`, and `system-random` are off, so a
+# gantt chart cannot render differently depending on when or where it is
+# rendered. ADR-5 requires both renderers to stay pure functions of their
+# source so their output can be memoized alongside highlighted code.
+merman = { version = "=0.8.0-alpha.5", default-features = false, features = ["svg"] }
+pulldown-latex = "0.8"
+
+# `regex-onig` is deliberate: `regex-fancy` measured at half the throughput
+# (research 2.10).
+#
+# No `default-themes`: M7 synthesizes the syntect `Theme` it needs in memory
+# from a base16 palette (`src/theme.rs`), so syntect's own seven are dead
+# weight. `plist-load` *is* on, and only for `mark theme --import x.tmTheme`:
+# it is the escape hatch for "make it look exactly like VS Code's X", and
+# syntect's loader is the one thing here we would otherwise reimplement.
+[dependencies.syntect]
+workspace = true
+features = ["parsing", "html", "default-syntaxes", "dump-load", "plist-load", "regex-onig"]
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

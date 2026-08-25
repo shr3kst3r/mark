@@ -1,0 +1,45 @@
+# Run with `just lint` (or `pre-commit run --all-files`).
+# Install the git hook once with `just hooks` (or `pre-commit install`).
+#
+# Hooks here are the fast subset. `just check` is the real gate: it also runs
+# the test suite and a release build, which are too slow for every commit.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown fixtures use trailing whitespace meaningfully (hard breaks),
+        # and the ADR corpus is immutable once accepted.
+        exclude: ^(docs/adrs/|core/tests/fixtures/)
+      - id: end-of-file-fixer
+        exclude: ^docs/adrs/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=256]
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # A stale INDEX.md is a corpus that lies about itself, so it fails the
+      # commit rather than being silently regenerated.
+      - id: adr-index
+        name: ADR INDEX.md is current
+        entry: just adr-check
+        language: system
+        files: ^docs/adrs/
+        pass_filenames: false

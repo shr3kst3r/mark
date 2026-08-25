@@ -1,0 +1,8 @@
+# asdf-managed bootstrap tools. Run `asdf install` to get these versions.
+#
+# Rust is intentionally NOT pinned here: Cargo owns the toolchain floor via
+# rust-version in Cargo.toml (MSRV 1.95, see the math-and-diagrams ADR), and
+# Swift comes from the system Xcode. asdf pins only the CLIs that bootstrap
+# the project.
+just 1.40.0
+pre-commit 3.8.0

@@ -1,0 +1,875 @@
+//! Blocks → HTML, carrying the two contracts the rest of the product is built
+//! on.
+//!
+//! **ADR-1, the checkbox contract.** Every task marker is emitted as
+//! `<input type="checkbox" class="mk-task" data-mk-idx=".." data-mk-start=".."
+//! data-mk-end="..">`, so a DOM click knows its own byte span with no side
+//! table to keep in sync.
+//!
+//! **ADR-2, block identity.** Every top-level block is wrapped in
+//! `<div class="mk-blk" data-blk="<hash>-<ordinal>" data-mk-start=".."
+//! data-mk-end="..">`, and the id is content-derived rather than positional.
+//!
+//! Blocks render independently of one another — [`render_range`] takes any
+//! slice of the block list — which is what makes ADR-2's prefix-then-fill
+//! possible without re-parsing. Task indices are looked up by byte offset
+//! rather than counted as we go, precisely so that rendering block 40 first and
+//! block 0 second cannot renumber a checkbox.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use pulldown_cmark::{Event, Tag, TagEnd, html};
+
+use crate::block::Block;
+use crate::highlight::{self, Highlighter};
+use crate::parse::{Document, code_language, slugify};
+use crate::rich::{self, Diagram, MathDisplay};
+use crate::tasks;
+use crate::theme::{self, ThemePair};
+
+/// How much of a document to emit, and in what shape.
+#[derive(Debug, Clone)]
+pub struct RenderOptions {
+    /// Emit only the first N blocks. `None` emits all of them.
+    ///
+    /// ADR-2 calls the first-paint block count "a tunable, not a constant", to
+    /// be derived from viewport height at runtime — hence a parameter here and
+    /// no default baked into the core.
+    pub prefix_blocks: Option<usize>,
+    /// Wrap the output in a complete `<html>` document with the default
+    /// stylesheet inline. The CLI's `--html` needs this; the app does not.
+    pub standalone: bool,
+    /// `<title>` for standalone output. Falls back to the first heading.
+    pub title: Option<String>,
+    /// The theme to render against.
+    ///
+    /// A *resolved* pair rather than a name, because rendering may not fail: a
+    /// name that does not resolve is a named error at the boundary where the
+    /// caller can report it (the C ABI, the CLI), not a blank document here.
+    /// `Default` is the built-in pair, which no user file can break.
+    pub theme: Arc<ThemePair>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions {
+            prefix_blocks: None,
+            standalone: false,
+            title: None,
+            // `Arc<T>`'s own `Default` would build a second pair; this shares
+            // the one the process already has.
+            theme: theme::default_pair(),
+        }
+    }
+}
+
+/// Rendered HTML plus the counters `mark stats` reports.
+#[derive(Debug, Clone)]
+pub struct Render {
+    pub html: String,
+    pub blocks_emitted: usize,
+    pub blocks_total: usize,
+    pub code_bytes: usize,
+    /// Code blocks that went through the highlighter. A `mermaid` fence that
+    /// rendered as a diagram is counted in [`diagrams`] instead, not here.
+    ///
+    /// [`diagrams`]: Render::diagrams
+    pub code_blocks: usize,
+    pub highlight_time: Duration,
+    /// `$…$` and `$$…$$` expressions rendered to MathML.
+    pub math: usize,
+    /// `mermaid` fences rendered to SVG, or badged. A fence `merman` reported
+    /// as `NoDiagram` is a code block, so it is not counted here.
+    pub diagrams: usize,
+    /// Constructs that produced a badge instead of MathML or SVG. ADR-5's
+    /// design is that a failure is *visible*; this is how it is also countable
+    /// — `mark stats` on a real document says how much of its math we cannot
+    /// render, without anyone having to read the page.
+    pub rich_failures: usize,
+    /// Time in [`crate::rich`], the counterpart to [`highlight_time`].
+    ///
+    /// [`highlight_time`]: Render::highlight_time
+    pub rich_time: Duration,
+}
+
+/// Render a whole document, honouring [`RenderOptions::prefix_blocks`].
+#[must_use]
+pub fn render(doc: &Document<'_>, opts: &RenderOptions) -> Render {
+    let end = opts
+        .prefix_blocks
+        .unwrap_or(usize::MAX)
+        .min(doc.blocks().len());
+    let mut render = with_context(doc, &Context::new(doc, &opts.theme), 0..end);
+    render.blocks_total = doc.blocks().len();
+
+    if opts.standalone {
+        let title = opts
+            .title
+            .clone()
+            .or_else(|| doc.title())
+            .unwrap_or_else(|| "mark".to_owned());
+        render.html = standalone(&title, &render.html, &opts.theme);
+    }
+    render
+}
+
+/// Render an arbitrary slice of the block list, in the default theme.
+/// Out-of-range indices are clamped rather than panicking: this is reachable
+/// from the C ABI.
+#[must_use]
+pub fn render_range(doc: &Document<'_>, blocks: Range<usize>) -> Render {
+    render_range_themed(doc, blocks, &theme::default_pair())
+}
+
+/// The same, against a chosen theme.
+#[must_use]
+pub fn render_range_themed(
+    doc: &Document<'_>,
+    blocks: Range<usize>,
+    theme: &Arc<ThemePair>,
+) -> Render {
+    with_context(doc, &Context::new(doc, theme), blocks)
+}
+
+/// Render several ranges of one document, building the per-document lookups
+/// **once**.
+///
+/// [`Context::new`] walks every task and every heading in the document, so
+/// calling [`render_range`] in a loop is O(ranges × document). ADR-2's edit
+/// script has one range per changed run, and a document where every block
+/// changed would otherwise be quadratic — which is the case a re-render after a
+/// find-and-replace hits.
+#[must_use]
+pub fn render_ranges(
+    doc: &Document<'_>,
+    ranges: &[Range<usize>],
+    theme: &Arc<ThemePair>,
+) -> Vec<Render> {
+    let ctx = Context::new(doc, theme);
+    ranges
+        .iter()
+        .map(|blocks| with_context(doc, &ctx, blocks.clone()))
+        .collect()
+}
+
+fn with_context(doc: &Document<'_>, ctx: &Context, blocks: Range<usize>) -> Render {
+    let start = blocks.start.min(doc.blocks().len());
+    let end = blocks.end.clamp(start, doc.blocks().len());
+
+    let mut out = Render {
+        html: String::new(),
+        blocks_emitted: end - start,
+        blocks_total: doc.blocks().len(),
+        code_bytes: 0,
+        code_blocks: 0,
+        highlight_time: Duration::ZERO,
+        math: 0,
+        diagrams: 0,
+        rich_failures: 0,
+        rich_time: Duration::ZERO,
+    };
+
+    for block in &doc.blocks()[start..end] {
+        render_block(doc, block, ctx, &mut out);
+    }
+    out
+}
+
+/// Per-document lookups shared by every block, built once.
+struct Context {
+    /// Task marker start offset → (document-order index, checked).
+    tasks: HashMap<usize, (usize, bool)>,
+    /// Heading block start offset → deduplicated anchor.
+    anchors: HashMap<usize, String>,
+    highlighter: &'static Highlighter,
+    /// The theme every code block and diagram in this render uses. Carried
+    /// here rather than read from anywhere ambient, because ADR-2 requires
+    /// highlighting to be a pure function of `(language, code, theme)`.
+    theme: Arc<ThemePair>,
+}
+
+impl Context {
+    fn new(doc: &Document<'_>, theme: &Arc<ThemePair>) -> Context {
+        Context {
+            tasks: tasks::enumerate(doc)
+                .into_iter()
+                .map(|t| (t.start, (t.index, t.checked)))
+                .collect(),
+            anchors: doc
+                .headings()
+                .into_iter()
+                .map(|h| (h.start, h.anchor))
+                .collect(),
+            highlighter: highlight::shared(),
+            theme: Arc::clone(theme),
+        }
+    }
+}
+
+fn render_block(doc: &Document<'_>, block: &Block, ctx: &Context, out: &mut Render) {
+    let _ = write!(
+        out.html,
+        "<div class=\"mk-blk mk-{}\" data-blk=\"{}\" data-mk-start=\"{}\" data-mk-end=\"{}\">",
+        block.kind.slug(),
+        block.id,
+        block.start,
+        block.end
+    );
+
+    let events = doc.block_events(block);
+    let mut index = 0usize;
+    let mut run = 0usize;
+
+    while index < events.len() {
+        match &events[index].0 {
+            Event::TaskListMarker(checked) => {
+                flush(events, run..index, &mut out.html);
+                let span = &events[index].1;
+                let idx = ctx
+                    .tasks
+                    .get(&span.start)
+                    .map_or_else(|| usize::MAX, |(i, _)| *i);
+                write_task(&mut out.html, idx, span, *checked);
+                index += 1;
+                run = index;
+            }
+            Event::InlineMath(latex) => {
+                flush(events, run..index, &mut out.html);
+                write_math(out, latex, MathDisplay::Inline);
+                index += 1;
+                run = index;
+            }
+            Event::DisplayMath(latex) => {
+                flush(events, run..index, &mut out.html);
+                write_math(out, latex, MathDisplay::Block);
+                index += 1;
+                run = index;
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                flush(events, run..index, &mut out.html);
+                let language = code_language(kind).map(str::to_owned);
+                let close = find_end(events, index);
+                let code = collect_text(&events[index + 1..close]);
+
+                if !write_diagram(out, block, language.as_deref(), &code, ctx) {
+                    let started = Instant::now();
+                    let highlighted =
+                        ctx.highlighter
+                            .highlight(language.as_deref(), &code, &ctx.theme);
+                    out.highlight_time += started.elapsed();
+                    out.code_blocks += 1;
+                    out.code_bytes += code.len();
+
+                    write_code(&mut out.html, language.as_deref(), &highlighted);
+                }
+                index = close + 1;
+                run = index;
+            }
+            Event::Start(Tag::Heading { level, .. }) => {
+                flush(events, run..index, &mut out.html);
+                let anchor = ctx
+                    .anchors
+                    .get(&block.start)
+                    .cloned()
+                    .unwrap_or_else(|| slugify(&block.id.to_string()));
+                let _ = write!(
+                    out.html,
+                    "<{level} id=\"{}\" class=\"mk-h\">",
+                    escape_attr(&anchor)
+                );
+                index += 1;
+                run = index;
+            }
+            Event::End(TagEnd::Heading(level)) => {
+                flush(events, run..index, &mut out.html);
+                let _ = write!(out.html, "</{level}>");
+                index += 1;
+                run = index;
+            }
+            _ => index += 1,
+        }
+    }
+    flush(events, run..events.len(), &mut out.html);
+
+    out.html.push_str("</div>");
+}
+
+/// Hand a run of untouched events to `pulldown-cmark`'s own writer. Splitting
+/// the stream this way keeps its correct handling of tables, footnotes, and
+/// inline HTML while letting us own the three constructs that carry contracts.
+fn flush(events: &[(Event<'_>, Range<usize>)], range: Range<usize>, out: &mut String) {
+    if range.is_empty() {
+        return;
+    }
+    html::push_html(out, events[range].iter().map(|(event, _)| event.clone()));
+}
+
+fn write_task(out: &mut String, index: usize, span: &Range<usize>, checked: bool) {
+    let _ = write!(
+        out,
+        "<input type=\"checkbox\" class=\"mk-task\" data-mk-idx=\"{index}\" \
+         data-mk-start=\"{}\" data-mk-end=\"{}\"{}>",
+        span.start,
+        span.end,
+        if checked { " checked" } else { "" }
+    );
+}
+
+/// Append one math expression, rendered to inline MathML by [`crate::rich`].
+///
+/// ADR-5: no KaTeX, no JavaScript. A failure becomes a badge here rather than
+/// propagating, because the surrounding paragraph still has to render.
+fn write_math(out: &mut Render, latex: &str, display: MathDisplay) {
+    let started = Instant::now();
+    let rendered = rich::math(latex, display);
+    out.rich_time += started.elapsed();
+    out.math += 1;
+    out.rich_failures += usize::from(rendered.failed());
+    out.html.push_str(&rendered.html);
+}
+
+/// Append a `mermaid` fence as inline SVG, returning whether it was one.
+///
+/// `false` means "render this as an ordinary code block": either the info
+/// string was not `mermaid`, or `merman` reported `NoDiagram` — which per
+/// plan §3 means the fence's contents are not a diagram, and is deliberately
+/// *not* a reason to show an error badge.
+fn write_diagram(
+    out: &mut Render,
+    block: &Block,
+    language: Option<&str>,
+    code: &str,
+    ctx: &Context,
+) -> bool {
+    if !rich::is_mermaid(language) {
+        return false;
+    }
+
+    let started = Instant::now();
+    // ADR-5: the id derives from the block's `data-blk`, so it is unique in
+    // the document and survives ADR-2's incremental patching unchanged.
+    let diagram = rich::diagram(code, block.id.as_str(), &ctx.theme);
+    out.rich_time += started.elapsed();
+
+    let Diagram::Rendered(rendered) = diagram else {
+        return false;
+    };
+    out.diagrams += 1;
+    out.rich_failures += usize::from(rendered.failed());
+    out.html.push_str(&rendered.html);
+    true
+}
+
+fn write_code(out: &mut String, language: Option<&str>, highlighted: &highlight::Highlighted) {
+    out.push_str("<pre class=\"mk-code\"");
+    if let Some(language) = language {
+        let _ = write!(out, " data-lang=\"{}\"", escape_attr(language));
+    }
+    if highlighted.syntax.is_none() {
+        // Says plainly that this block is unhighlighted rather than leaving a
+        // reader to guess whether the theme is broken.
+        out.push_str(" data-plain=\"1\"");
+    }
+    out.push_str("><code>");
+    out.push_str(&highlighted.html);
+    out.push_str("</code></pre>");
+}
+
+/// Index of the `End` event matching the `Start` at `start`.
+fn find_end(events: &[(Event<'_>, Range<usize>)], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (offset, (event, _)) in events[start..].iter().enumerate() {
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return start + offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    events.len().saturating_sub(1)
+}
+
+fn collect_text(events: &[(Event<'_>, Range<usize>)]) -> String {
+    let mut out = String::new();
+    for (event, _) in events {
+        if let Event::Text(text) | Event::Code(text) = event {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+/// Escape for HTML text content.
+#[must_use]
+pub fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Escape for a double-quoted HTML attribute value.
+#[must_use]
+pub fn escape_attr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The rules that turn a theme's custom properties into a page.
+///
+/// Every colour here is `var(--mk-…)`, supplied by [`theme_css`] for **both**
+/// appearances at once. Nothing in this string changes when the theme or the
+/// system appearance does, which is the point: an appearance switch re-resolves
+/// variables and repaints, with no IPC, no re-render, and no DOM work.
+///
+/// `app/Resources/shell.css` is the same rules for the app, which loads them
+/// once per web view rather than per document. The two are deliberately not
+/// generated from one source — the shell's copy carries the layout rules the
+/// standalone page does not need (and the `content-visibility` warning ADR-2
+/// requires) — but the colour rules must agree, and
+/// `ShellAssetsTests` pins them together.
+#[must_use]
+pub fn document_css() -> String {
+    let mut css = String::from(
+        "\
+html { background: var(--mk-background); color: var(--mk-foreground); }
+body.mk-doc { margin: 0 auto; padding: 2rem 1.5rem; max-width: 46rem;
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; }
+.mk-blk { margin: 0 0 1rem; }
+.mk-h { line-height: 1.25; margin: 1.8rem 0 0.6rem; color: var(--mk-heading); }
+a { color: var(--mk-link); }
+pre.mk-code { background: var(--mk-surface); border-radius: 6px; padding: 0.8rem 1rem;
+  overflow-x: auto; font: 13px/1.5 'SF Mono', ui-monospace, monospace; }
+code { font-family: 'SF Mono', ui-monospace, monospace; }
+:not(pre) > code { background: var(--mk-surface); border-radius: 4px; padding: 0.1em 0.35em; }
+blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid var(--mk-accent);
+  color: var(--mk-subtle); }
+table { border-collapse: collapse; }
+th, td { border: 1px solid var(--mk-rule); padding: 0.35rem 0.7rem; }
+th { background: var(--mk-surface); }
+hr { border: none; border-top: 1px solid var(--mk-rule); }
+input.mk-task { margin-right: 0.4rem; accent-color: var(--mk-accent); }
+::selection { background: var(--mk-selection); }
+/* ADR-5. No font or stylesheet is fetched for either: MathML resolves to the
+   system `math` font and inherits `currentColor`, and merman's SVG carries its
+   own scoped <style> — which is why a diagram is rendered once per appearance
+   and switched here rather than re-coloured. */
+.mk-diagram { overflow-x: auto; }
+.mk-diagram svg { max-width: 100%; height: auto; }
+.mk-appear-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  .mk-appear-light { display: none; }
+  .mk-appear-dark { display: inline; }
+}
+math { font-size: 1.05em; }
+math[display='block'] { display: block; margin: 0.6rem 0; overflow-x: auto; }
+.mk-rich-error { display: inline-block; max-width: 100%; vertical-align: middle;
+  border: 1px solid var(--mk-error); border-radius: 4px;
+  background: color-mix(in srgb, var(--mk-error) 12%, transparent);
+  padding: 0.1em 0.4em; font-size: 0.9em; }
+.mk-diagram-error { display: block; }
+.mk-rich-label { color: var(--mk-error); font-weight: 600; text-transform: uppercase;
+  font-size: 0.75em; letter-spacing: 0.04em; margin-right: 0.4em; }
+.mk-rich-message { color: var(--mk-subtle); }
+/* The raw source stays selectable next to the badge — that is the whole point
+   of failing visibly rather than blanking the construct. */
+.mk-rich-source { user-select: text; white-space: pre-wrap; margin: 0 0.4em 0 0; }
+.mk-diagram-error .mk-rich-source { display: block; margin: 0.4em 0 0; }
+",
+    );
+    css.push_str(&token_css());
+    css
+}
+
+/// `.t0B { color: var(--mk-s0B) }` for every palette slot.
+///
+/// The slot classes are **constant** — the theme supplies the colours, not the
+/// class names — so this is static CSS that no theme change invalidates. That
+/// is the whole reason highlighted HTML re-themes without being re-rendered.
+#[must_use]
+pub fn token_css() -> String {
+    let mut css = String::new();
+    for index in 0..24u8 {
+        let suffix = theme::Slot::parse(&format!("base{index:02X}"))
+            .expect("index < 24 is a slot")
+            .suffix();
+        let _ = writeln!(css, ".t{suffix} {{ color: var(--mk-s{suffix}); }}");
+    }
+    css
+}
+
+/// The theme's own custom properties, light and dark.
+#[must_use]
+pub fn theme_css(theme: &ThemePair) -> String {
+    theme.css()
+}
+
+fn standalone(title: &str, body: &str, theme: &Arc<ThemePair>) -> String {
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{}</title>\n<style>\n{}{}</style>\n</head>\n<body class=\"mk-doc\">\n{}\n</body>\n</html>\n",
+        escape_html(title),
+        theme_css(theme),
+        document_css(),
+        body
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn html_of(src: &str) -> String {
+        render(&Document::parse(src), &RenderOptions::default()).html
+    }
+
+    #[test]
+    fn every_block_is_wrapped_with_its_id_and_span() {
+        let html = html_of("# A\n\npara\n");
+        let doc_src = "# A\n\npara\n";
+        let doc = Document::parse(doc_src);
+        for block in doc.blocks() {
+            assert!(
+                html.contains(&format!("data-blk=\"{}\"", block.id)),
+                "missing data-blk for {block:?} in {html}"
+            );
+            assert!(html.contains(&format!("data-mk-start=\"{}\"", block.start)));
+        }
+    }
+
+    #[test]
+    fn task_markers_carry_index_and_byte_span() {
+        let src = "- [ ] one\n- [x] two\n";
+        let html = html_of(src);
+        assert!(
+            html.contains("<input type=\"checkbox\" class=\"mk-task\" data-mk-idx=\"0\""),
+            "{html}"
+        );
+        assert!(html.contains("data-mk-idx=\"1\""), "{html}");
+        // ADR-1's shape: the checked one, and only it, carries `checked`.
+        assert_eq!(html.matches(" checked>").count(), 1);
+        // And the spans point at the literal markers.
+        let first = src.find("[ ]").unwrap();
+        assert!(html.contains(&format!(
+            "data-mk-start=\"{first}\" data-mk-end=\"{}\"",
+            first + 3
+        )));
+    }
+
+    #[test]
+    fn a_prose_bracket_is_not_a_checkbox() {
+        let html = html_of("A literal [ ] in prose.\n");
+        assert!(!html.contains("mk-task"), "{html}");
+    }
+
+    #[test]
+    fn code_blocks_are_highlighted_and_labelled() {
+        let html = html_of("```rust\nfn main() {}\n```\n");
+        assert!(
+            html.contains("<pre class=\"mk-code\" data-lang=\"rust\">"),
+            "{html}"
+        );
+        assert!(html.contains("<span"), "{html}");
+        assert!(!html.contains("data-plain"), "{html}");
+    }
+
+    #[test]
+    fn unknown_language_still_renders_as_a_code_block() {
+        let html = html_of("```nosuchlang\na < b\n```\n");
+        assert!(html.contains("data-plain=\"1\""), "{html}");
+        assert!(html.contains("a &lt; b"), "{html}");
+    }
+
+    #[test]
+    fn a_mermaid_fence_renders_as_inline_svg_for_both_appearances() {
+        let html = html_of("```mermaid\nflowchart TD\n  A[Start] --> B[Done]\n```\n");
+        assert!(html.contains("<div class=\"mk-diagram\">"), "{html}");
+        assert!(!html.contains("<pre"), "{html}");
+        // ADR-5: no JavaScript reaches the WebView for this.
+        assert!(!html.contains("<script"), "{html}");
+
+        // M7's inherited defect: merman bakes Mermaid's light palette into a
+        // scoped <style> and paints the SVG root white, so a diagram was a
+        // white box on a dark page. Both appearances are now rendered, and
+        // `prefers-color-scheme` picks — so the switch stays free.
+        assert!(html.contains("class=\"mk-appear-light\""), "{html}");
+        assert!(html.contains("class=\"mk-appear-dark\""), "{html}");
+        assert!(!html.contains("background-color: white"), "{html}");
+        let theme = crate::theme::default_pair();
+        let light = theme.light().chrome("foreground").unwrap().hex();
+        let dark = theme.dark().chrome("foreground").unwrap().hex();
+        assert_ne!(light, dark);
+        let (before, after) = html.split_once("mk-appear-dark").unwrap();
+        assert!(before.contains(&format!("fill:{light}")), "{before}");
+        assert!(after.contains(&format!("fill:{dark}")), "{after}");
+        // Nothing left of Mermaid's stock lavender node fill.
+        assert!(!html.contains("#ECECFF"), "{html}");
+    }
+
+    #[test]
+    fn a_diagram_under_an_unpaired_theme_is_emitted_once() {
+        // Dracula has no base16 light counterpart, so it is used for both
+        // appearances — and then a second copy of the SVG would be bytes in
+        // the layout path for nothing.
+        let source = "```mermaid\nflowchart TD\n  A --> B\n```\n";
+        let doc = Document::parse(source);
+        let html = render(
+            &doc,
+            &RenderOptions {
+                theme: crate::theme::resolve("dracula").unwrap(),
+                ..RenderOptions::default()
+            },
+        )
+        .html;
+        assert!(html.contains("<div class=\"mk-diagram\"><svg"), "{html}");
+        assert!(!html.contains("mk-appear-"), "{html}");
+        assert!(
+            html.contains("#282a36") || html.contains("#21222c"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_diagrams_svg_id_comes_from_its_block_id() {
+        // ADR-5's stability constraint: the id is content-derived, so the same
+        // diagram in a document with a paragraph inserted above it keeps it.
+        let source = "```mermaid\nflowchart TD\n  A --> B\n```\n";
+        let doc = Document::parse(source);
+        let id = doc.blocks()[0].id.to_string();
+        let html = html_of(source);
+        assert!(html.contains(&format!("<svg id=\"mk-{id}\"")), "{html}");
+
+        let moved = html_of(&format!("inserted above\n\n{source}"));
+        assert!(moved.contains(&format!("<svg id=\"mk-{id}\"")), "{moved}");
+    }
+
+    #[test]
+    fn two_diagrams_in_one_document_get_distinct_ids() {
+        // merman scopes the diagram's own <style> by `#id`, so a shared id is
+        // not cosmetic — the second diagram would restyle the first.
+        let html = html_of(
+            "```mermaid\nflowchart TD\n  A --> B\n```\n\n```mermaid\nflowchart LR\n  C --> D\n```\n",
+        );
+        let ids: Vec<&str> = html
+            .match_indices("<svg id=\"")
+            .map(|(at, marker)| {
+                let rest = &html[at + marker.len()..];
+                &rest[..rest.find('"').expect("a closed attribute")]
+            })
+            .collect();
+        // Two diagrams, two appearances each.
+        assert_eq!(ids.len(), 4, "{html}");
+        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), 4, "{ids:?}");
+    }
+
+    #[test]
+    fn a_mermaid_fence_that_is_not_a_diagram_stays_a_code_block() {
+        // `RenderSvgError::NoDiagram` means "not a diagram" (plan §3), which
+        // is a code block and not a badge.
+        let html = html_of("```mermaid\nnot a diagram at all\n```\n");
+        assert!(
+            html.contains("<pre class=\"mk-code\" data-lang=\"mermaid\""),
+            "{html}"
+        );
+        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains("mk-rich-error"), "{html}");
+    }
+
+    #[test]
+    fn a_malformed_diagram_becomes_a_badge_and_keeps_its_source() {
+        let html = html_of("```mermaid\nflowchart TD\n  A[[[Start --> B\n```\n");
+        assert!(html.contains("mk-diagram-error"), "{html}");
+        assert!(html.contains("A[[[Start"), "{html}");
+        assert!(!html.contains("<svg"), "{html}");
+    }
+
+    #[test]
+    fn a_rust_fence_is_never_treated_as_a_diagram() {
+        let html = html_of("```rust\nfn main() {}\n```\n");
+        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains("mk-diagram"), "{html}");
+        assert!(html.contains("data-lang=\"rust\""), "{html}");
+    }
+
+    #[test]
+    fn inline_and_display_math_become_mathml() {
+        let html = html_of("Let $x^2$ be, and $$\\int_0^1 f$$ too.\n");
+        assert!(html.contains("<math display=\"inline\""), "{html}");
+        assert!(html.contains("<math display=\"block\""), "{html}");
+        assert!(!html.contains("$"), "the delimiters leaked: {html}");
+        assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
+    fn math_inside_a_task_item_renders_and_leaves_the_checkbox_alone() {
+        let html = html_of("- [ ] prove $a^2 + b^2 = c^2$\n");
+        assert!(
+            html.contains("class=\"mk-task\" data-mk-idx=\"0\""),
+            "{html}"
+        );
+        assert!(html.contains("<math display=\"inline\""), "{html}");
+    }
+
+    #[test]
+    fn a_broken_expression_becomes_a_badge_rather_than_merror_markup() {
+        // ADR-5: `\newcommand` returns `Ok` with an embedded `<merror>`, so a
+        // `Result`-only check renders the parser's verbose diagnostics into
+        // the page and calls it a success.
+        let html = html_of("Define $\\newcommand{\\R}{\\mathbb{R}}$ here.\n");
+        assert!(html.contains("mk-math-error"), "{html}");
+        assert!(!html.contains("<merror"), "{html}");
+        assert!(html.contains("expected an argument"), "{html}");
+        // The raw LaTeX is still on the page, and still selectable.
+        assert!(html.contains("\\newcommand{\\R}{\\mathbb{R}}"), "{html}");
+    }
+
+    #[test]
+    fn a_badge_inside_a_paragraph_stays_an_inline_element() {
+        // `Event::DisplayMath` is an inline event, so a `<div>` badge would be
+        // a `<div>` inside a `<p>` — invalid, and WebKit closes the paragraph
+        // around it.
+        //
+        // The broken expression is `\newcommand` rather than something like
+        // `\frac{`: `pulldown-cmark` requires the braces inside `$…$` to
+        // balance, so an unclosed one never becomes a math event at all and
+        // stays literal text.
+        let html = html_of("before $$\\newcommand{\\R}{x}$$ after\n");
+        let paragraph = html
+            .split("<p>")
+            .nth(1)
+            .expect("a paragraph")
+            .split("</p>")
+            .next()
+            .expect("a closed paragraph");
+        assert!(paragraph.contains("mk-math-error"), "{html}");
+        assert!(!paragraph.contains("<div"), "{html}");
+    }
+
+    #[test]
+    fn dollar_signs_in_prose_are_left_alone() {
+        let html = html_of("It costs $5 and $10.\n");
+        assert!(html.contains("It costs $5 and $10."), "{html}");
+        assert!(!html.contains("<math"), "{html}");
+    }
+
+    #[test]
+    fn rich_counters_separate_diagrams_from_code_blocks() {
+        let source = "$x$ and $$y$$\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n\
+                      ```rust\nfn f() {}\n```\n\n```mermaid\nnot a diagram\n```\n";
+        let out = render(&Document::parse(source), &RenderOptions::default());
+        assert_eq!(out.math, 2);
+        assert_eq!(out.diagrams, 1);
+        assert_eq!(out.rich_failures, 0);
+        // The rust fence and the mermaid fence that was not a diagram.
+        assert_eq!(out.code_blocks, 2);
+    }
+
+    #[test]
+    fn rich_failures_are_counted() {
+        let out = render(
+            &Document::parse("$\\newcommand{\\R}{x}$\n\n```mermaid\nflowchart TD\n  A[[[B\n```\n"),
+            &RenderOptions::default(),
+        );
+        assert_eq!(out.rich_failures, 2);
+    }
+
+    #[test]
+    fn headings_get_anchors() {
+        let html = html_of("## Hello World\n");
+        assert!(
+            html.contains("<h2 id=\"hello-world\" class=\"mk-h\">Hello World</h2>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn tables_still_go_through_pulldowns_writer() {
+        let html = html_of("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert!(html.contains("<table>"), "{html}");
+        assert!(html.contains("<th>a</th>"), "{html}");
+    }
+
+    #[test]
+    fn prefix_rendering_emits_only_the_first_n_blocks() {
+        let src = "a\n\nb\n\nc\n";
+        let doc = Document::parse(src);
+        let out = render(
+            &doc,
+            &RenderOptions {
+                prefix_blocks: Some(2),
+                ..RenderOptions::default()
+            },
+        );
+        assert_eq!((out.blocks_emitted, out.blocks_total), (2, 3));
+        assert!(out.html.contains(">a</p>"), "{}", out.html);
+        assert!(!out.html.contains(">c</p>"), "{}", out.html);
+    }
+
+    #[test]
+    fn prefix_then_tail_equals_a_full_render() {
+        let src = "# H\n\n- [ ] t\n\n```rust\nfn f() {}\n```\n\npara\n";
+        let doc = Document::parse(src);
+        let whole = render(&doc, &RenderOptions::default()).html;
+        let prefix = render_range(&doc, 0..2).html;
+        let tail = render_range(&doc, 2..doc.blocks().len()).html;
+        assert_eq!(whole, format!("{prefix}{tail}"));
+    }
+
+    #[test]
+    fn render_range_clamps_instead_of_panicking() {
+        let doc = Document::parse("a\n");
+        assert_eq!(render_range(&doc, 5..9).html, "");
+        assert_eq!(render_range(&doc, 0..99).blocks_emitted, 1);
+    }
+
+    #[test]
+    fn standalone_is_self_contained() {
+        let doc = Document::parse("# Title\n\ntext\n");
+        let out = render(
+            &doc,
+            &RenderOptions {
+                standalone: true,
+                ..RenderOptions::default()
+            },
+        );
+        assert!(out.html.starts_with("<!DOCTYPE html>"), "{}", out.html);
+        assert!(out.html.contains("<title>Title</title>"), "{}", out.html);
+        assert!(out.html.contains("<style>"), "{}", out.html);
+        assert!(
+            !out.html.contains("<script"),
+            "no JS ships in rendered output"
+        );
+    }
+
+    #[test]
+    fn escaping_covers_text_and_attributes() {
+        assert_eq!(escape_html("a<b&c>d"), "a&lt;b&amp;c&gt;d");
+        assert_eq!(escape_attr("a\"b'c"), "a&quot;b&#39;c");
+    }
+}

@@ -1,0 +1,16 @@
+# Pin the macOS deployment target for cargo builds.
+#
+# Added in M2, when the Rust core first started being linked into a Swift
+# binary. Without it, cargo defaults to the *host* OS version (26.x on this
+# machine) while SwiftPM targets `.macOS(.v14)` — which the linker reports for
+# every object in libmark_core.a:
+#
+#   ld: warning: object file (...regexec.o) was built for newer 'macOS' version
+#       (26.5) than being linked (14.0)
+#
+# ~50 lines of that on every `just build`. More importantly the warning is
+# telling the truth: an unpinned `mark-cli` would refuse to run on anything
+# older than the machine that built it, while Info.plist advertises
+# LSMinimumSystemVersion 14.0. One value, set once, for both toolchains.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "14.0"

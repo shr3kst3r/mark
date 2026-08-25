@@ -1,0 +1,32 @@
+# Standalone: `[workspace]` makes this its own workspace root, so it is not a
+# member of the repo's `core`/`cli` workspace and `cargo test --workspace`,
+# `cargo clippy --workspace`, and `just check` never see it.
+#
+# It exists to settle one question ADR-2 explicitly deferred to implementation:
+#
+#   > class-based highlighting (`ClassedHTMLGenerator`) re-themes with zero
+#   > re-render but emits 2.7x more HTML into the layout path that is already
+#   > our bottleneck. Inline styles are the opposite trade. We will measure both
+#   > during implementation rather than guess now.
+#
+# The core emits the inline-style variant. Producing a *faithful* class-based
+# variant needs real `ClassedHTMLGenerator` output over the real corpus, which
+# is Rust — and `core/` is off limits for this change. So this crate renders
+# both variants of the same document to disk, and `mark-bench` measures them in
+# the real WKWebView.
+[package]
+name = "mark-highlight-format"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+mark-core = { path = "../../core" }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+[dependencies.syntect]
+version = "5.3"
+default-features = false
+features = ["parsing", "html", "default-syntaxes", "default-themes", "regex-onig"]

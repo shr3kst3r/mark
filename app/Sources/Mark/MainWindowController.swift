@@ -1055,6 +1055,13 @@ extension MainWindowController: NSMenuItemValidation {
         sidebar.revealInFinder(sidebar.selectedNode?.url ?? tabs.selected?.url)
     }
 
+    /// ⌥⌘P — put the keyboard on the sidebar's path bar, where ← / → walk the
+    /// crumbs, ↓ opens a folder's subfolders, and ⏎ navigates. Finder spells
+    /// its own path-bar command the same way.
+    @objc public func focusPathBar(_ sender: Any?) {
+        sidebar.focusPathBar()
+    }
+
     /// ⌥⌘F — put the caret in the sidebar's filter field.
     @objc public func focusSidebarFilter(_ sender: Any?) {
         guard let field = sidebar.filterField else { return }

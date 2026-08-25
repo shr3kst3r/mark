@@ -401,6 +401,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: String(UnicodeScalar(NSUpArrowFunctionKey)!))
         goMenu.addItem(.separator())
         goMenu.addItem(
+            withTitle: "Focus Path Bar",
+            action: #selector(MainWindowController.focusPathBar(_:)), keyEquivalent: "p"
+        ).keyEquivalentModifierMask = [.command, .option]
+        goMenu.addItem(.separator())
+        goMenu.addItem(
             withTitle: "Reveal in Sidebar",
             action: #selector(MainWindowController.revealInSidebar(_:)), keyEquivalent: "O"
         ).keyEquivalentModifierMask = [.command, .shift]

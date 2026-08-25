@@ -196,6 +196,12 @@ public final class TreeViewController: NSViewController {
         breadcrumbBar.onSelect = { [weak self] url in self?.navigate(to: url) }
         breadcrumbBar.onBack = { [weak self] in self?.navigateBack() }
         breadcrumbBar.onForward = { [weak self] in self?.navigateForward() }
+        breadcrumbBar.childDirectories = { [weak self] url in self?.subdirectories(of: url) ?? [] }
+        breadcrumbBar.onRevealInFinder = { [weak self] url in self?.revealInFinder(url) }
+        breadcrumbBar.onDropFiles = { [weak self] destination, urls, move in
+            self?.drop(urls, into: destination, move: move) ?? false
+        }
+        breadcrumbBar.onDropOnBar = { [weak self] urls in self?.handleDrop(urls) ?? false }
 
         let filterField = NSSearchField()
         filterField.placeholderString = "Filter"
@@ -255,6 +261,33 @@ public final class TreeViewController: NSViewController {
     /// it is ``navigate(to:)`` and does record history.
     public func setRoot(_ url: URL) {
         navigate(to: url)
+    }
+
+    /// ⌘⌥P — put the keyboard on the path bar.
+    public func focusPathBar() {
+        breadcrumbBar?.focusPathBar()
+    }
+
+    /// The subdirectories of `url`, in the sidebar's own display order.
+    ///
+    /// This is what the breadcrumb's chevron menus list, and it is **one
+    /// directory read, on demand** — the menu asks when it opens, and nothing
+    /// else calls this. Routed through ``lister`` rather than `FileManager` so
+    /// the menus honour the same `.gitignore` and hidden-file toggles the tree
+    /// does; a chevron offering a folder the tree refuses to show would be two
+    /// answers to one question.
+    public func subdirectories(of url: URL) -> [URL] {
+        do {
+            return try lister.entries(in: url.path)
+                .filter(\.isDirectory)
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                .map { url.appendingPathComponent($0.name, isDirectory: true) }
+        } catch {
+            Log.tree.error(
+                "listing \(url.path, privacy: .public) for the path bar failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
     }
 
     private func rootDidMove(to url: URL) {
@@ -559,6 +592,61 @@ public final class TreeViewController: NSViewController {
             }
         }
         return handled
+    }
+
+    /// Files were dropped onto a breadcrumb: put them in that directory.
+    ///
+    /// **Copies by default; moves only when the user held ⌘.** Explorer and
+    /// Finder default a same-volume drop to a move, and for a file manager that
+    /// is right. `mark` is a reader whose path bar sits directly above the
+    /// tree, where a drag aimed at a folder row can easily cross it, and a
+    /// stray gesture that silently relocates a note out of the folder it was
+    /// filed in is a worse failure than one that leaves a duplicate behind. ⌘
+    /// is Finder's own force-move modifier, so the destructive reading is
+    /// available and spelled the way the platform spells it.
+    ///
+    /// **Never overwrites.** A name already taken at the destination is
+    /// refused, not resolved — silently replacing a note with a same-named one
+    /// from somewhere else is data loss that looks like a successful drop.
+    ///
+    /// - Returns: whether anything was placed.
+    @discardableResult
+    public func drop(_ urls: [URL], into destination: URL, move: Bool) -> Bool {
+        let manager = FileManager.default
+        var placed = false
+        for url in urls {
+            let target = destination.appendingPathComponent(url.lastPathComponent)
+            guard url.standardizedFileURL.path != target.standardizedFileURL.path else {
+                continue  // already there; a no-op, not a failure
+            }
+            guard !manager.fileExists(atPath: target.path) else {
+                Log.tree.error(
+                    "drop refused: \(target.path, privacy: .public) already exists")
+                NSSound.beep()
+                continue
+            }
+            do {
+                if move {
+                    try manager.moveItem(at: url, to: target)
+                } else {
+                    try manager.copyItem(at: url, to: target)
+                }
+                Log.tree.info(
+                    "\(move ? "moved" : "copied", privacy: .public) \(url.lastPathComponent, privacy: .public) into \(destination.path, privacy: .public)"
+                )
+                placed = true
+            } catch {
+                Log.tree.error(
+                    "drop failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                NSSound.beep()
+            }
+        }
+        // The destination may well be an expanded directory in the tree, and a
+        // listing that does not show what was just dropped into it reads as the
+        // drop having failed.
+        if placed { refresh() }
+        return placed
     }
 
     // MARK: - Actions

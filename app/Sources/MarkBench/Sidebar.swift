@@ -613,4 +613,69 @@ func runSidebarGates() async {
 
     await measureBadges()
     checkFilterAndReveal()
+    checkPathBar()
+}
+
+/// The path bar at widths that do not fit, which is the case the first cut got
+/// wrong in a way no test at one width would have caught.
+///
+/// Three things are measured rather than asserted by eye:
+///
+///   * what the bar *lays out* at a realistic sidebar width, next to what the
+///     model says the path is — the two came apart once already;
+///   * that the crumbs it hides are the middle ones, and that they are still
+///     reachable from the ellipsis menu;
+///   * that a chevron menu costs exactly one directory read, which is the
+///     constraint that makes sibling menus affordable on a 608k-file tree at
+///     all.
+@MainActor
+func checkPathBar() {
+    print("The path bar under pressure:")
+    let deep = URL(fileURLWithPath: "/usr/local/share/man/man1", isDirectory: true)
+    let harness = SidebarHarness(root: deep)
+    harness.show()
+    let bar = harness.controller.breadcrumbBar!
+
+    for width in [420, 300, 240, 180, 120] {
+        harness.window.setContentSize(NSSize(width: CGFloat(width), height: 720))
+        harness.window.layoutIfNeeded()
+        bar.layoutSubtreeIfNeeded()
+        line(
+            "at \(width)pt",
+            bar.visibleCrumbTitles.joined(separator: " › ")
+                + (bar.overflowedCrumbTitles.isEmpty
+                    ? "" : "   (\(bar.overflowedCrumbTitles.count) behind …)"))
+        require(
+            bar.visibleCrumbTitles.last == deep.lastPathComponent,
+            "at \(width)pt the current folder is still shown")
+        require(
+            Set(bar.visibleCrumbTitles + bar.overflowedCrumbTitles) == Set(bar.crumbTitles),
+            "at \(width)pt every crumb is either shown or behind the ellipsis")
+        if bar.visibleCrumbTitles.count > 1 {
+            require(
+                bar.visibleCrumbTitles.first == "/",
+                "at \(width)pt the root is pinned rather than truncated away")
+        }
+        require(
+            bar.makeOverflowMenu().items.count == bar.overflowedCrumbTitles.count,
+            "at \(width)pt the ellipsis menu reaches every hidden crumb")
+    }
+
+    // Back to a width a real sidebar is actually set to, so the picture shows
+    // the interesting state — root, ellipsis, tail — rather than the degenerate
+    // one the sweep ends on.
+    harness.window.setContentSize(NSSize(width: 300, height: 720))
+    harness.window.layoutIfNeeded()
+    bar.layoutSubtreeIfNeeded()
+
+    harness.lister.reset()
+    let menu = bar.makeSiblingMenu(forCrumbAt: 1)
+    line(
+        "a chevron menu",
+        "\(menu?.items.count ?? 0) item(s)   \(harness.lister.count) dir read(s)")
+    require(harness.lister.count <= 1, "a chevron menu reads at most its own directory")
+
+    snapshotSidebar(harness, suffix: "pathbar")
+    harness.close()
+    print("")
 }

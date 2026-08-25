@@ -60,12 +60,30 @@ Xcode.
 **One window, three panes.** The sidebar is a lazy directory tree: it never
 walks ahead of what you have expanded, honours `.gitignore`, and computes per-file
 `3/7` open-task badges in the background rather than on the walk. ⌘↑ moves the
-root to the parent, ⌘[ and ⌘] go back and forward through where you have been,
-and the breadcrumb bar's components are clickable. The tree follows the front
+root to the parent, and ⌘[ and ⌘] go back and forward through where you have
+been. The tree follows the front
 document: switch tabs and the sidebar expands to that file and selects it,
 without moving the root or clearing your filter. ⌘⇧O is the deliberate version
 that does move the root, for a file outside it; ⌘⌥R reveals it in Finder. Drop a
 folder on the window to root there.
+
+**The path bar** above the tree is a real path bar rather than a row of links.
+Each component is clickable; the chevron after one lists that folder's
+subfolders, with the one you are in checked, so moving sideways from
+`notes/2026/08` to `notes/2026/07` is one click instead of up-then-down. When
+the path is deeper than the sidebar is wide, the crumbs shrink first and only
+then fold — from the middle outwards, so the root and the folder you are in are
+the last to go — and whatever folded away is still reachable from the `…` menu.
+⌘⌥P puts the keyboard on it: ← and → walk the crumbs, ↓ opens a folder's
+subfolders, ⏎ goes there. Right-click a crumb for Go Here, Copy Path, and Reveal
+in Finder. A crumb can be dragged out to Finder, and files dropped onto one are
+**copied** into it — hold ⌘ to move instead, and a name already taken at the
+destination is refused rather than overwritten.
+
+> Each of those menus costs exactly one directory read, when it opens. Nothing
+> the path bar does — laying out, truncating, navigating — reads a directory,
+> which is what keeps it affordable on the 608k-file tree the sidebar is built
+> against.
 
 **Tabs**, in a hand-built bar with per-tab open-task badges, drag reordering, and
 the accessibility roles VoiceOver needs. Only the three most recently used tabs

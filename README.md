@@ -13,7 +13,7 @@ after you stop typing. The `mark` CLI does everything the window does, and
 drives the running app over a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-400 Rust tests, 376 Swift tests, 43 integration checks, and committed
+400 Rust tests, 389 Swift tests, 43 integration checks, and committed
 performance gates.
 
 ## Install
@@ -152,8 +152,12 @@ the parser's message and keeps its source selectable, rather than disappearing.
 palettes so the chrome and the code colours come from the same source and cannot
 clash. Both appearances are injected as CSS custom properties, so switching macOS
 between light and dark re-colours everything with zero IPC, zero re-render, and
-no flash. Your own themes go in `~/.config/mark/themes/*.toml` and are picked up
-without a rebuild. `mark theme --list` names them all.
+no flash. Pick one from **View ▸ Theme**, which is built when you open it — so a
+file you have just dropped in is listed, and one that would not parse is named
+rather than silently missing. Choosing either half of a pair installs both: the
+half in force is ticked and its partner is dashed. Your own themes go in
+`~/.config/mark/themes/*.toml` and are picked up without a rebuild.
+`mark theme --list` names them all.
 
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and

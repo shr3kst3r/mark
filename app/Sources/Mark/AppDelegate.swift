@@ -367,6 +367,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 
+        // M7's catalogue, in the menu bar. A group of its own because it is the
+        // one item in this menu that changes how the *document* looks rather
+        // than which panes are around it. Its contents are built when it opens
+        // (``ThemeMenu``), so a theme dropped into `~/.config/mark/themes` is
+        // listed without a relaunch — the same promise the renderer makes.
+        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        themeItem.submenu = ThemeMenu()
+        viewMenu.addItem(themeItem)
+        viewMenu.addItem(.separator())
+
         // M8's sidebar toggles. Both are `NSMenuItem`s with a checkmark rather
         // than a preference pane, because both are things a reader flips for
         // one folder and flips back — and both are persisted, so the state has

@@ -533,10 +533,38 @@ public struct ThemeSummary: Decodable, Equatable, Sendable, Identifiable {
     public let kind: ThemeKind
     public let pair: String?
     public let author: String?
+    /// Built in, or a file in `~/.config/mark/themes`.
+    public let source: ThemeSource
 
     public var id: String { name }
     /// Whether this theme has a counterpart for the other appearance.
     public var isPaired: Bool { pair != nil }
+}
+
+/// Where a theme came from: `{"kind":"builtin"}` or
+/// `{"kind":"user","path":"…"}`.
+///
+/// Carried into the menu as a tooltip, because "why is my edit not showing up"
+/// is answered by the path a theme was actually loaded from — a user file
+/// shadows a built-in of the same name, and nothing else in the list says so.
+public enum ThemeSource: Decodable, Equatable, Sendable {
+    case builtin
+    case user(path: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, path
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "user":
+            self = .user(path: try container.decode(String.self, forKey: .path))
+        default:
+            self = .builtin
+        }
+    }
 }
 
 public enum ThemeKind: String, Decodable, Sendable {

@@ -1116,6 +1116,14 @@ extension MainWindowController: CommandTarget {
                 "theme \(resolved.name, privacy: .public): re-rendered \(rerendered) of \(applied) hydrated tab(s) — diagrams and code markup are baked in at render time"
             )
         }
+        // The editor pane draws with AppKit colours rather than the page's
+        // custom properties, and the dynamic `NSColor`s it holds were resolved
+        // against the *previous* pair — they track the appearance by
+        // themselves, but not the theme. Without this the two panes disagree
+        // until something else happens to repaint the editor, which is the
+        // most visible thing a theme change could get wrong now that one can be
+        // chosen from a menu with the editor open.
+        editor.themeChanged()
         saveSessionSoon()
         return ThemeSummaryForCLI(
             name: resolved.name,
@@ -1357,6 +1365,47 @@ extension MainWindowController: NSMenuItemValidation {
 
     @objc public func refreshSidebar(_ sender: Any?) {
         sidebar.refresh()
+    }
+
+    // MARK: M7 — the theme
+
+    /// The Theme submenu, dispatched by the name in `representedObject`.
+    ///
+    /// It goes through ``applyTheme(named:)`` — the same entry point
+    /// `mark theme <name>` reaches over the socket — so the menu cannot drift
+    /// from the CLI, and so choosing a theme is persisted, applied to every
+    /// hydrated tab, and free for the dehydrated ones by exactly the mechanism
+    /// ADR-7 describes.
+    @objc public func chooseTheme(_ sender: Any?) {
+        guard let name = (sender as? NSMenuItem)?.representedObject as? String else { return }
+        _Concurrency.Task { @MainActor in
+            do {
+                _ = try await self.applyTheme(named: name)
+            } catch {
+                self.reportThemeFailure(named: name, error: error)
+            }
+        }
+    }
+
+    /// M7's fourth gate on this side of the socket: *a broken theme is a named
+    /// error rather than invisible text*. The CLI gets that on stderr; someone
+    /// who picked the theme from a menu has no terminal to read, so they get a
+    /// sheet saying which theme and why. The previous theme is still in force —
+    /// ``ThemeController/apply(named:)`` changes nothing when it throws.
+    private func reportThemeFailure(named name: String, error: any Error) {
+        let reason = (error as? CommandFailure)?.message ?? String(describing: error)
+        Log.render.error(
+            "theme \(name, privacy: .public) was refused: \(reason, privacy: .public)")
+        guard let window else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "The theme “\(name)” could not be used."
+        alert.informativeText = "\(reason)\n\nThe previous theme is still in place."
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
     }
 
     @objc public func reloadDocument(_ sender: Any?) {

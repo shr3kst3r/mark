@@ -89,7 +89,19 @@ destination is refused rather than overwritten.
 the accessibility roles VoiceOver needs. Only the three most recently used tabs
 keep a live web view; the rest are dehydrated and rehydrate in ~4.7 ms when you
 switch back. Switching between resident tabs is a show/hide and costs nothing
-measurable. A tab with unsaved changes is never dehydrated.
+measurable. A tab with unsaved changes is never dehydrated. ⌃⇥ and ⌃⇧⇥ cycle,
+⌘⌥→ and ⌘⌥← do the same from wherever the caret is, and ⌘1–⌘9 go straight to a
+position — ⌘9 is the last tab, not the ninth.
+
+**One click skims, one keeps.** Clicking a file in the tree opens it as the
+*preview* tab: one italic slot that the next click replaces, so reading down a
+directory of notes costs one tab instead of forty. Four things make it
+permanent, and they are all the reader saying *keep this* — double-click the
+tab, double-click the file in the tree, drag the tab somewhere, or type into it.
+`mark open` and a file dropped on the window are already deliberate, so they
+open permanent tabs directly. `mark tab list` marks the preview tab with `~`,
+and VoiceOver reads it as "preview", because italic is not a thing a screen
+reader can see. Which tab was the preview one comes back after a relaunch.
 
 > **What tabs cost, since the number here was wrong once.** Every `WKWebView`
 > gets its own WebContent process at ~52 MB, so the budget is a formula rather

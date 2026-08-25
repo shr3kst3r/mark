@@ -125,6 +125,22 @@ public final class DocumentTab: Identifiable {
     /// The tab bar's label: the filename.
     public var title: String { url.lastPathComponent }
 
+    /// Whether this tab is the **preview** tab — VS Code's italic single-slot
+    /// tab, opened by a single click in the sidebar and replaced by the next
+    /// single click rather than accumulating.
+    ///
+    /// The invariant ``TabStore`` maintains is *at most one preview tab in the
+    /// bar*, which is what makes clicking down a directory of notes cost one
+    /// tab instead of forty. It is a property of the tab rather than of the
+    /// store because it has to survive reordering, a session round trip, and
+    /// ADR-4's dehydration — a preview tab evicted for memory is still a
+    /// preview tab when it comes back.
+    ///
+    /// Cleared, never set, by ``promote()``: promotion is one-way. A permanent
+    /// tab does not decay back into a preview one, because every way of
+    /// promoting is the user saying *keep this*.
+    public private(set) var isPreview: Bool = false
+
     /// The core's view of the document. `nil` until the first load finishes;
     /// the badge simply does not draw until then.
     public private(set) var metadata: DocumentMetadata?
@@ -182,8 +198,22 @@ public final class DocumentTab: Identifiable {
     /// old revision cannot overwrite a newer one.
     private var metadataGeneration: UInt64 = 0
 
-    public init(url: URL) {
+    public init(url: URL, isPreview: Bool = false) {
         self.url = url.standardizedFileURL
+        self.isPreview = isPreview
+    }
+
+    /// Make this tab permanent.
+    ///
+    /// - Returns: whether anything changed, so callers on a hot path — the
+    ///   drag loop calls this on every step of a reorder — can skip the
+    ///   delegate churn when it did not.
+    @discardableResult
+    func promote() -> Bool {
+        guard isPreview else { return false }
+        isPreview = false
+        Log.tabs.debug("promote \(self.title, privacy: .public) out of preview")
+        return true
     }
 
     // MARK: - Hydration

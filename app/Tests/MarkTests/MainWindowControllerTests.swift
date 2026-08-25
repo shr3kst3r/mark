@@ -215,6 +215,84 @@ struct MainWindowControllerTests {
         #expect(controller.sidebar.root.standardizedFileURL == fixture.directory.standardizedFileURL)
     }
 
+    // MARK: - Preview tabs
+
+    /// Driven through the **outline view's own selection**, not through
+    /// ``TreeViewController/onSelect``, because the wiring is the thing under
+    /// test: a click in the tree has to arrive at the store with `preview:
+    /// true`, and a test that called the closure by hand would pass with the
+    /// two ends connected to nothing.
+    @Test("clicking down the tree opens one preview tab, not one tab per file")
+    func sidebarClicksPreview() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        _ = controller.sidebar.view
+        controller.sidebar.refresh()
+
+        for name in ["a.md", "b.md", "c.md"] {
+            try Self.clickRow(named: name, in: controller.sidebar)
+        }
+        #expect(controller.tabs.count == 1)
+        #expect(controller.tabs.selected?.title == "c.md")
+        #expect(controller.tabs.selected?.isPreview == true)
+    }
+
+    /// The `onActivate` half. `rowDoubleClicked` reads `NSOutlineView.clickedRow`,
+    /// which only AppKit sets and no test can, so the double click itself stops
+    /// at the callback; what is asserted here is everything after it.
+    @Test("double-clicking a file in the tree keeps its tab")
+    func sidebarDoubleClickKeeps() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        _ = controller.sidebar.view
+        controller.sidebar.refresh()
+
+        try Self.clickRow(named: "a.md", in: controller.sidebar)
+        controller.sidebar.onActivate?(fixture.file(named: "a.md"))
+        #expect(controller.tabs.count == 1, "the double click must not mint a second tab")
+        #expect(controller.tabs.selected?.isPreview == false)
+
+        try Self.clickRow(named: "b.md", in: controller.sidebar)
+        #expect(
+            controller.tabs.tabs.map(\.title) == ["a.md", "b.md"],
+            "the kept tab must survive the next click in the tree")
+    }
+
+    /// ADR-6 exempts a dirty tab from eviction so unsaved work is never thrown
+    /// away. A preview tab that stayed a preview tab while being typed into
+    /// would be the one place that promise leaked — the next click in the tree
+    /// would close it.
+    @Test("typing into a preview tab keeps it")
+    func editingPromotes() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        _ = controller.sidebar.view
+        controller.bufferDebounces = (autosave: 60, preview: 60)
+
+        controller.open(fixture.file(named: "a.md"), preview: true)
+        let tab = try #require(controller.tabs.selected)
+        #expect(tab.isPreview)
+
+        let buffer = try #require(controller.buffer(for: tab))
+        buffer.replaceContents(buffer.text + "\ntyped\n")
+        #expect(buffer.isDirty)
+        #expect(!tab.isPreview, "an edited tab is one the reader is keeping")
+    }
+
+    /// Select the row for `name` the way a click does, and let the outline
+    /// view's delegate carry it the rest of the way.
+    static func clickRow(named name: String, in sidebar: TreeViewController) throws {
+        let outline = try #require(sidebar.outlineView)
+        for row in 0..<outline.numberOfRows {
+            guard let node = outline.item(atRow: row) as? TreeNode,
+                node.url.lastPathComponent == name
+            else { continue }
+            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            return
+        }
+        Issue.record("no row named \(name) in the tree")
+    }
+
     @Test("closing the last tab leaves the window open on an empty state")
     func lastTabLeavesWindow() throws {
         let fixture = try TabFixture()

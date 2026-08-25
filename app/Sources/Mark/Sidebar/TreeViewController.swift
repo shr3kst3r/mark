@@ -54,8 +54,22 @@ public struct SidebarState: Equatable, Sendable {
 @MainActor
 public final class TreeViewController: NSViewController {
 
-    /// Called when the user picks a markdown file.
+    /// Called when the user picks a markdown file with a single click.
+    ///
+    /// A *skim*, not a commitment: the window controller turns this into a
+    /// preview tab, which the next single click replaces. Arrow-keying down the
+    /// tree comes through here too, which is the point — holding ↓ through a
+    /// directory of notes reads every one of them and opens one tab.
     public var onSelect: ((URL) -> Void)?
+
+    /// Called when the user double-clicks a markdown file.
+    ///
+    /// The deliberate half of ``onSelect``: the window controller turns this
+    /// into a permanent tab. AppKit delivers the selection change first, so a
+    /// double click is a preview open followed immediately by a promotion of
+    /// the very tab it just made — no second tab, no flicker, and the same
+    /// result whether the row was already selected or not.
+    public var onActivate: ((URL) -> Void)?
 
     /// Called after anything the session file records changes — the root, the
     /// history, a toggle, the sort. The window controller uses it to schedule a
@@ -587,7 +601,11 @@ public final class TreeViewController: NSViewController {
                 break
             }
             if TreeNode.isMarkdown(url) {
-                onSelect?(url)
+                // A drop is a deliberate act, so it opens a tab that stays —
+                // ``onActivate`` rather than ``onSelect``. Falling back to
+                // ``onSelect`` keeps a controller that only wired one of them
+                // working, rather than silently dropping the file on the floor.
+                (onActivate ?? onSelect)?(url)
                 handled = true
             }
         }
@@ -659,7 +677,14 @@ public final class TreeViewController: NSViewController {
         guard let node = outlineView.item(atRow: outlineView.clickedRow) as? TreeNode else {
             return
         }
-        guard node.isDirectory else { return }
+        guard node.isDirectory else {
+            // A markdown file double-clicked is the user keeping it. Non-markdown
+            // rows stay deliberately inert, which is what "dimmed" is telling
+            // them — a second click on one should not start doing something a
+            // first click refuses to.
+            if node.isMarkdown { onActivate?(node.url) }
+            return
+        }
         // Double-clicking a folder **descends into it as the new root**, which
         // is plan §2 M8's *"descend into a folder as the new root"*. The
         // disclosure triangle is still there for looking without moving.

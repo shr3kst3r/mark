@@ -817,9 +817,17 @@ fn cmd_tab(action: &TabAction) -> Result<(), CliError> {
                 };
                 emitln!(
                     out,
-                    "{} {}  {:<24} {:>7}  {}  {}",
+                    "{}{} {}  {:<24} {:>7}  {}  {}",
                     if tab["selected"].as_bool() == Some(true) {
                         "*"
+                    } else {
+                        " "
+                    },
+                    // The preview tab is the one the next click in the sidebar
+                    // replaces, so `mark tab list` says which it is rather than
+                    // leaving "my tab vanished" to be worked out by experiment.
+                    if tab["preview"].as_bool() == Some(true) {
+                        "~"
                     } else {
                         " "
                     },

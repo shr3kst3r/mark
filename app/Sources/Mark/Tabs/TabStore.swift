@@ -130,6 +130,14 @@ public final class TabStore {
         return tabs.first { $0.url == standardized }
     }
 
+    /// The single preview tab, if there is one.
+    ///
+    /// *At most one* is the invariant every mutation here preserves, and it is
+    /// the whole mechanism: a preview open does not add a tab, it **takes over
+    /// this one's slot**. Reading it as a search rather than caching an index
+    /// keeps it correct across reordering and closing for free.
+    public var previewTab: DocumentTab? { tabs.first { $0.isPreview } }
+
     public func index(of tab: DocumentTab) -> Int? { tabs.firstIndex(of: tab) }
 
     // MARK: - Opening
@@ -138,17 +146,47 @@ public final class TabStore {
     ///
     /// Re-selecting rather than duplicating is what makes the sidebar usable:
     /// clicking the same file twice should not leave two identical tabs.
+    ///
+    /// `preview` is VS Code's single-click semantics, and it is the difference
+    /// between reading a directory of notes and drowning in tabs. A preview
+    /// open **reuses the preview tab's slot**: the tab that was there is closed
+    /// and the new one takes its index, so clicking down forty files leaves one
+    /// tab rather than forty. A permanent open never displaces anything, and
+    /// asking for a permanent open of a file that is already the preview
+    /// promotes it in place — which is what makes clicking down the tree and
+    /// then double-clicking the one you want do the obvious thing, rather than
+    /// leaving a duplicate behind.
+    ///
+    /// The default is `false` so every existing caller — `mark open`, `mark://`,
+    /// ⌘T, a drop on the window — keeps making permanent tabs. Only the
+    /// sidebar's single click passes `true`.
     @discardableResult
-    public func open(_ url: URL) -> DocumentTab {
+    public func open(_ url: URL, preview: Bool = false) -> DocumentTab {
         if let existing = tab(for: url) {
+            // A permanent open of the preview tab is a promotion, not a
+            // no-op: `mark open` on the file you were skimming means keep it.
+            if !preview, existing.promote() {
+                delegate?.tabStoreDidChangeTabs(self)
+            }
             select(existing)
             return existing
         }
-        let tab = DocumentTab(url: url)
-        let insertAt = selectedIndex.map { $0 + 1 } ?? tabs.count
+
+        // The slot the new tab lands in. A preview open takes over the outgoing
+        // preview tab's index so the bar does not visibly reshuffle; everything
+        // else opens after the selection, as it always has.
+        var insertAt = selectedIndex.map { $0 + 1 } ?? tabs.count
+        if preview, let stale = previewTab, let index = tabs.firstIndex(of: stale) {
+            discardPreview(stale, at: index)
+            insertAt = index
+        }
+
+        let tab = DocumentTab(url: url, isPreview: preview)
+        insertAt = min(max(0, insertAt), tabs.count)
         tabs.insert(tab, at: insertAt)
         Log.tabs.info(
-            "open tab \(tab.title, privacy: .public) at \(insertAt) of \(self.tabs.count)")
+            "open \(preview ? "preview" : "tab", privacy: .public) \(tab.title, privacy: .public) at \(insertAt) of \(self.tabs.count)"
+        )
         tab.refreshMetadata { [weak self, weak tab] in
             guard let self, let tab, self.tabs.contains(tab) else { return }
             self.delegate?.tabStoreDidChangeTabs(self)
@@ -156,6 +194,42 @@ public final class TabStore {
         delegate?.tabStoreDidChangeTabs(self)
         select(tab)
         return tab
+    }
+
+    /// Take the outgoing preview tab out of the list without choosing a
+    /// successor for it.
+    ///
+    /// Deliberately not ``close(_:)``: close picks the most recently used
+    /// survivor and selects it, and here the successor is already known — it is
+    /// the tab about to be inserted into this very slot. Routing through close
+    /// would fire a selection at some third document and then immediately fire
+    /// another, which the delegate turns into a visible flash of the wrong
+    /// file.
+    ///
+    /// Everything else close does still happens, in the same order: the
+    /// `willClose` hook that writes an unsaved buffer, then dehydration.
+    private func discardPreview(_ tab: DocumentTab, at index: Int) {
+        delegate?.tabStore(self, willClose: tab)
+        dehydrate(tab)
+        if tab == selected { selected = nil }
+        tabs.remove(at: index)
+        Log.tabs.debug("preview \(tab.title, privacy: .public) replaced in place at \(index)")
+    }
+
+    // MARK: - Promotion
+
+    /// Make `tab` permanent, and tell the bar if that changed anything.
+    ///
+    /// Every VS Code promotion route lands here: double-clicking the tab,
+    /// double-clicking the file in the tree, typing the first character into
+    /// the editor, and dragging the tab to a new position. They have nothing in
+    /// common except the user having said *keep this*, which is why the store
+    /// exposes one verb rather than four.
+    @discardableResult
+    public func promote(_ tab: DocumentTab) -> Bool {
+        guard tabs.contains(tab), tab.promote() else { return false }
+        delegate?.tabStoreDidChangeTabs(self)
+        return true
     }
 
     // MARK: - Selecting
@@ -270,12 +344,20 @@ public final class TabStore {
     /// Drag-to-reorder's model half. `to` is the destination index in the list
     /// *after* the tab has been lifted out, which is what a drop-target
     /// calculation naturally produces.
+    ///
+    /// **Reordering promotes.** Choosing where a tab sits is only meaningful
+    /// for a tab you intend to keep, and a preview tab carefully dragged into
+    /// place and then destroyed by the next click in the sidebar is the exact
+    /// surprise this whole feature exists to avoid. Promotion is folded into
+    /// the same delegate call rather than routed through ``promote(_:)``,
+    /// because the drag loop calls this on every mouse-moved event.
     public func move(from: Int, to: Int) {
         guard tabs.indices.contains(from) else { return }
         let clamped = min(max(0, to), tabs.count - 1)
         guard clamped != from else { return }
         let tab = tabs.remove(at: from)
         tabs.insert(tab, at: clamped)
+        tab.promote()
         Log.tabs.debug("reorder \(from) -> \(clamped)")
         delegate?.tabStoreDidChangeTabs(self)
     }
@@ -367,7 +449,8 @@ public final class TabStore {
                 SessionTab(
                     path: $0.url.path,
                     scrollOffset: $0.documentView?.scrollOffset ?? $0.scrollOffset,
-                    title: $0.metadata?.documentTitle
+                    title: $0.metadata?.documentTitle,
+                    preview: $0.isPreview
                 )
             },
             selectedIndex: selectedIndex,
@@ -398,9 +481,28 @@ public final class TabStore {
                 Log.tabs.info("session drops missing \(entry.path, privacy: .public)")
                 continue
             }
-            let tab = DocumentTab(url: url)
+            // Preview-ness survives a relaunch, so a session that ended with
+            // one italic skim tab comes back with one — not with a permanent
+            // tab the user never asked to keep. `preview` is absent from
+            // session files older than this feature and decodes to `false`, which is the
+            // conservative direction: the worst a stale file can do is keep a
+            // tab the user would have let go.
+            let tab = DocumentTab(url: url, isPreview: entry.preview)
             tab.scrollOffset = entry.scrollOffset
             restored.append(tab)
+        }
+        // *At most one preview tab* is an invariant of this type, not a hope
+        // about the file it is reading: a hand-edited or truncated session
+        // file can name two, and two preview tabs means the next single click
+        // replaces one of them and leaves the other stranded in italics
+        // forever. Extras are promoted, which keeps the user's documents.
+        if let first = restored.firstIndex(where: { $0.isPreview }) {
+            for extra in restored[(first + 1)...] where extra.isPreview {
+                Log.tabs.info(
+                    "session named a second preview tab (\(extra.title, privacy: .public)); promoting it"
+                )
+                extra.promote()
+            }
         }
         tabs = restored
 

@@ -16,6 +16,123 @@ import Testing
 @MainActor
 struct TabBarTests {
 
+    // MARK: - Preview tabs
+
+    @Test("a preview tab's label is italic and a permanent one's is not")
+    func previewTabsDrawItalic() throws {
+        let upright = TabItemView.titleFont(selected: false, preview: false)
+        let italic = TabItemView.titleFont(selected: false, preview: true)
+        #expect(!upright.fontDescriptor.symbolicTraits.contains(.italic))
+        #expect(italic.fontDescriptor.symbolicTraits.contains(.italic))
+        #expect(italic.pointSize == upright.pointSize)
+    }
+
+    /// The regression this exists to catch: adding `.italic` to the descriptor
+    /// resolves a semibold system font to `.SFNS-RegularItalic`, which would
+    /// make the selected tab stop being bolder than its neighbours as soon as
+    /// it was a preview. Both must be italic, and they must be different faces.
+    @Test("a selected preview tab keeps its weight as well as its italic")
+    func selectedPreviewKeepsItsWeight() throws {
+        let selected = TabItemView.titleFont(selected: true, preview: true)
+        let unselected = TabItemView.titleFont(selected: false, preview: true)
+        #expect(selected.fontDescriptor.symbolicTraits.contains(.italic))
+        #expect(unselected.fontDescriptor.symbolicTraits.contains(.italic))
+        #expect(selected.fontName != unselected.fontName)
+        // Same weight as the upright selected tab, so the bar's one non-colour
+        // selection cue survives being a preview.
+        #expect(
+            Self.weight(of: selected)
+                == Self.weight(of: TabItemView.titleFont(selected: true, preview: false)))
+    }
+
+    /// The resolved weight trait, or `nil` when the face does not carry one.
+    static func weight(of font: NSFont) -> CGFloat? {
+        let traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
+        return traits?[.weight] as? CGFloat
+    }
+
+    @Test("VoiceOver is told a tab is a preview, because italic is invisible to it")
+    func previewIsAnnounced() throws {
+        let harness = try TabHarness()
+        harness.store.open(harness.file(named: "c.md"), preview: true)
+        harness.bar.reload()
+        let item = try #require(harness.bar.items.first)
+        #expect(item.accessibilityLabel()?.contains("preview") == true)
+
+        harness.store.promote(try #require(harness.store.selected))
+        harness.bar.reload()
+        #expect(item.accessibilityLabel()?.contains("preview") == false)
+    }
+
+    // MARK: - Cycling
+
+    @Test("⌘⌥→ and ⌘⌥← move to the next and previous tab, wrapping")
+    func optionCommandArrowsCycle() throws {
+        let harness = try TabHarness(files: ["a.md", "b.md", "c.md"])
+        let (bar, store) = (harness.bar, harness.store)
+        store.select(index: 0)
+
+        #expect(bar.performKeyEquivalent(with: Self.arrow(.right)))
+        #expect(store.selectedIndex == 1)
+        #expect(bar.performKeyEquivalent(with: Self.arrow(.left)))
+        #expect(store.selectedIndex == 0)
+        #expect(bar.performKeyEquivalent(with: Self.arrow(.left)))
+        #expect(store.selectedIndex == 2, "previous from the first tab wraps to the last")
+        #expect(bar.performKeyEquivalent(with: Self.arrow(.right)))
+        #expect(store.selectedIndex == 0, "next from the last tab wraps to the first")
+    }
+
+    /// The bar must not swallow keys it does not own — ⌥→ is "move one word
+    /// right" in the editor pane, and the pane is where the caret usually is.
+    @Test("the bar declines arrow keys without exactly ⌘⌥, and declines with no tabs")
+    func otherKeysAreLeftAlone() throws {
+        let harness = try TabHarness(files: ["a.md", "b.md"])
+        harness.store.select(index: 0)
+        #expect(!harness.bar.performKeyEquivalent(with: Self.arrow(.right, modifiers: [.option])))
+        #expect(!harness.bar.performKeyEquivalent(with: Self.arrow(.right, modifiers: [.command])))
+        #expect(
+            !harness.bar.performKeyEquivalent(
+                with: Self.arrow(.right, modifiers: [.command, .option, .shift])))
+        #expect(!harness.bar.performKeyEquivalent(with: Self.arrow(.up)))
+        #expect(harness.store.selectedIndex == 0, "nothing declined may have moved the selection")
+
+        let empty = try TabHarness()
+        #expect(!empty.bar.performKeyEquivalent(with: Self.arrow(.right)))
+    }
+
+    enum Arrow {
+        case left, right, up
+
+        var scalar: UnicodeScalar {
+            switch self {
+            case .left: return UnicodeScalar(NSLeftArrowFunctionKey)!
+            case .right: return UnicodeScalar(NSRightArrowFunctionKey)!
+            case .up: return UnicodeScalar(NSUpArrowFunctionKey)!
+            }
+        }
+    }
+
+    /// A synthesized key-equivalent event. `charactersIgnoringModifiers` is the
+    /// field the bar reads, so it is the one that has to be right.
+    static func arrow(
+        _ arrow: Arrow,
+        modifiers: NSEvent.ModifierFlags = [.command, .option]
+    ) -> NSEvent {
+        let characters = String(arrow.scalar)
+        return NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: 0
+        )!
+    }
+
     // MARK: - Accessibility
 
     @Test("the bar is an AXTabGroup whose tabs are its AXTabs")

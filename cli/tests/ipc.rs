@@ -308,10 +308,28 @@ fn tab_list_prints_residency_and_the_selection_marker() {
     let output = app.run(&["tab", "list"]);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("* 0"), "{text}");
+    // Two markers, in fixed columns: `*` for the selection, `~` for the
+    // preview tab. Neither row here is a preview, so the second column is a
+    // space and `* 0` would silently pass a regression that dropped it.
+    assert!(text.contains("*  0"), "{text}");
     assert!(text.contains("2/5"), "{text}");
     assert!(text.contains("resident"), "{text}");
     assert!(text.contains("dehydrated"), "{text}");
+}
+
+/// The preview tab is the one the next click in the sidebar replaces, so
+/// `mark tab list` says which it is rather than leaving "my tab vanished" to be
+/// worked out by experiment.
+#[test]
+fn tab_list_marks_the_preview_tab() {
+    let app = FakeApp::answering(
+        r#"{"version":1,"ok":true,"result":{"tabs":[{"index":0,"path":"/a.md","title":"a","selected":false,"resident":true,"preview":false},{"index":1,"path":"/b.md","title":"b","selected":true,"resident":true,"preview":true}]}}"#,
+    );
+    let output = app.run(&["tab", "list"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("   0"), "{text}");
+    assert!(text.contains("*~ 1"), "{text}");
 }
 
 #[test]

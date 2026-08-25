@@ -178,7 +178,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         tabs.delegate = self
         tabs.hydrator = self
+        // Single click skims, double click keeps — VS Code's preview tab, and
+        // the reason clicking down a directory of notes leaves one tab rather
+        // than one per file. The two callbacks differ only in that flag; both
+        // go through the same ``TabStore/open(_:preview:)``.
         sidebar.onSelect = { [weak self] url in
+            self?.open(url, preview: true)
+        }
+        sidebar.onActivate = { [weak self] url in
             self?.open(url)
         }
         // M8: the root, the history, and the two listing toggles all live in
@@ -207,9 +214,16 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Documents
 
     /// Show a document: select the tab already on it, or open a new one.
-    public func open(_ url: URL) {
-        Log.app.info("open \(url.lastPathComponent, privacy: .public)")
-        tabs.open(url)
+    ///
+    /// `preview` is the sidebar's single click and nothing else. Every other
+    /// route in — ⌘T, a drop on the window, `mark open`, `mark://`, a double
+    /// click in the tree — opens a permanent tab, because each of them is
+    /// already the user naming a file rather than browsing past it.
+    public func open(_ url: URL, preview: Bool = false) {
+        Log.app.info(
+            "open \(url.lastPathComponent, privacy: .public)\(preview ? " (preview)" : "", privacy: .public)"
+        )
+        tabs.open(url, preview: preview)
     }
 
     /// Point the sidebar somewhere else, recording it in the history.
@@ -387,8 +401,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             guard let self, let tab else { return }
             self.updatePreview(of: tab, from: source)
         }
-        buffer.onDirtyChanged = { [weak self, weak tab] _ in
+        buffer.onDirtyChanged = { [weak self, weak tab] isDirty in
             guard let self, let tab else { return }
+            // Typing into a preview tab keeps it. Anything else would let the
+            // next click in the sidebar throw away a document the user is in
+            // the middle of writing — and ADR-4 exempts a dirty tab from
+            // eviction for the same reason, so a preview tab that stayed a
+            // preview tab would be the one place that promise leaked.
+            if isDirty { self.tabs.promote(tab) }
             self.tabBar.reload()
             // The sidebar's badge for this file now comes from the buffer (or
             // stops doing so), so the cached one is wrong either way.
@@ -969,6 +989,7 @@ extension MainWindowController: CommandTarget {
             title: tab.metadata?.documentTitle ?? tab.title,
             selected: tab == tabs.selected,
             resident: tab.state.isResident,
+            preview: tab.isPreview,
             openTasks: tab.metadata?.tasks.open,
             totalTasks: tab.metadata?.tasks.total
         )

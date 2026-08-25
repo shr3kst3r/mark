@@ -542,18 +542,25 @@ public struct TabSummary: Equatable, Sendable {
     /// real state the CLI can see, and `mark tab list` is where someone
     /// debugging a memory question will look first.
     public var resident: Bool
+    /// Whether this is the single-click **preview** tab, the one the next
+    /// single click in the sidebar replaces. Reported for the same reason
+    /// ``resident`` is: it is a real state a tab can be in, it decides whether
+    /// the tab survives the next click, and someone asking "why did my tab
+    /// vanish" will look at `mark tab list` first.
+    public var preview: Bool
     public var openTasks: Int?
     public var totalTasks: Int?
 
     public init(
         index: Int, path: String, title: String, selected: Bool, resident: Bool,
-        openTasks: Int? = nil, totalTasks: Int? = nil
+        preview: Bool = false, openTasks: Int? = nil, totalTasks: Int? = nil
     ) {
         self.index = index
         self.path = path
         self.title = title
         self.selected = selected
         self.resident = resident
+        self.preview = preview
         self.openTasks = openTasks
         self.totalTasks = totalTasks
     }
@@ -565,6 +572,7 @@ public struct TabSummary: Equatable, Sendable {
             "title": .string(title),
             "selected": .bool(selected),
             "resident": .bool(resident),
+            "preview": .bool(preview),
         ]
         if let openTasks { object["openTasks"] = .int(openTasks) }
         if let totalTasks { object["totalTasks"] = .int(totalTasks) }

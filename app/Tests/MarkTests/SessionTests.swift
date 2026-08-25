@@ -44,6 +44,57 @@ struct SessionTests {
         #expect(restoredStore.selected?.url == store.selected?.url)
     }
 
+    @Test("which tab was the preview tab survives a relaunch")
+    func previewRoundTrips() throws {
+        let harness = try TabHarness(files: ["a.md", "b.md"])
+        harness.store.open(harness.file(named: "c.md"), preview: true)
+
+        let snapshot = harness.store.snapshot(sidebarRoot: harness.fixture.directory)
+        #expect(snapshot.tabs.map(\.preview) == [false, false, true])
+        try harness.fixture.session.save(snapshot)
+        let loaded = try #require(try harness.fixture.session.load())
+
+        let restored = try TabHarness()
+        restored.store.restore(loaded)
+        #expect(restored.store.tabs.map(\.isPreview) == [false, false, true])
+        #expect(restored.store.previewTab?.title == "c.md")
+
+        // And the slot still works after the relaunch, rather than the restored
+        // tab being italic but permanent.
+        restored.store.open(restored.file(named: "d.md"), preview: true)
+        #expect(restored.store.tabs.map(\.title) == ["a.md", "b.md", "d.md"])
+    }
+
+    /// The compatibility case that would otherwise lose every tab: `preview`
+    /// is a field older builds never wrote, and Swift's synthesized decoder
+    /// throws on a missing `Bool` rather than using the property's default.
+    @Test("a session file written before preview tabs existed still decodes")
+    func previewIsOptionalInTheFile() throws {
+        let json = #"{"version":1,"tabs":[{"path":"/tmp/a.md","scrollOffset":12,"title":"A"}],"selectedIndex":0}"#
+        let decoded = try JSONDecoder().decode(SessionState.self, from: Data(json.utf8))
+        #expect(decoded.tabs.count == 1)
+        #expect(decoded.tabs[0].preview == false)
+        #expect(decoded.tabs[0].scrollOffset == 12)
+    }
+
+    /// *At most one preview tab* is this type's invariant, not a hope about the
+    /// file it reads. Two of them means the next single click replaces one and
+    /// strands the other in italics for good.
+    @Test("a session naming two preview tabs restores one, and keeps the other")
+    func twoPreviewTabsInTheFile() throws {
+        let harness = try TabHarness()
+        harness.store.restore(
+            SessionState(
+                tabs: [
+                    SessionTab(path: harness.file(named: "a.md").path, preview: true),
+                    SessionTab(path: harness.file(named: "b.md").path, preview: true),
+                ],
+                selectedIndex: 0
+            ))
+        #expect(harness.store.count == 2, "no document may be dropped to fix the invariant")
+        #expect(harness.store.tabs.map(\.isPreview) == [true, false])
+    }
+
     /// The property that makes restore cheap. A session with a hundred tabs
     /// must not cost a hundred web views on launch.
     @Test("restoring hydrates only the selected tab")

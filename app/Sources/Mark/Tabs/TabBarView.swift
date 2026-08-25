@@ -273,6 +273,14 @@ public final class TabBarView: NSView {
         guard let store, let tab = item.tab, let window else { return }
         store.select(tab)
 
+        // The gesture the whole preview mechanism hangs off: a second click on
+        // the tab itself is the user saying *keep this one*. `>= 2` rather than
+        // `== 2` because a triple click is still a double click that carried
+        // on, and a tab that un-promotes on the third would be absurd.
+        if event.clickCount >= 2 {
+            store.promote(tab)
+        }
+
         let startPoint = convert(event.locationInWindow, from: nil)
         let startOrigin = item.frame.origin.x
         var isDragging = false
@@ -339,6 +347,37 @@ public final class TabBarView: NSView {
         let position = Int((centerX / max(1, width)).rounded(.down))
         let index = firstVisibleIndex + min(max(0, position), visibleCount - 1)
         return min(max(0, index), store.tabs.count - 1)
+    }
+
+    // MARK: - Cycling
+
+    /// ⌘⌥→ and ⌘⌥← — next and previous tab.
+    ///
+    /// Handled here rather than in the Window menu because ⌃⇥ and ⌃⇧⇥ already
+    /// hold those two items and an `NSMenuItem` carries exactly one key
+    /// equivalent. The alternative is a second, near-identically named pair of
+    /// menu rows, which is worse than an undisplayed shortcut — Safari makes
+    /// the same trade for the same reason.
+    ///
+    /// The bar is in the window's view tree, so `NSView`'s default
+    /// `performKeyEquivalent` walk reaches it no matter what holds first
+    /// responder. That is the point: the shortcut has to work while the caret
+    /// is in the editor pane, which is where a reader switching documents most
+    /// often is.
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard let store, !store.isEmpty else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers == [.command, .option] else { return false }
+        switch event.charactersIgnoringModifiers {
+        case String(UnicodeScalar(NSRightArrowFunctionKey)!):
+            store.selectNext()
+            return true
+        case String(UnicodeScalar(NSLeftArrowFunctionKey)!):
+            store.selectPrevious()
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Accessibility
@@ -522,9 +561,7 @@ public final class TabItemView: NSView {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingMiddle
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(
-                ofSize: NSFont.smallSystemFontSize + 1,
-                weight: isSelected ? .semibold : .regular),
+            .font: Self.titleFont(selected: isSelected, preview: tab.isPreview),
             .foregroundColor: isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor,
             .paragraphStyle: style,
         ]
@@ -533,6 +570,32 @@ public final class TabItemView: NSView {
         title.draw(
             in: titleRect.insetBy(dx: 0, dy: (titleRect.height - height) / 2),
             withAttributes: attributes)
+    }
+
+    /// The tab label's font: italic for a preview tab, upright otherwise.
+    ///
+    /// Italic is the signal VS Code uses and the one this bar can afford — the
+    /// tab is already carrying a close button, a dirty dot, and a task badge,
+    /// and a fourth glyph would leave no room for the filename. It is
+    /// deliberately **not** the only signal: ``TabItemView/accessibilityLabel``
+    /// says "preview" in words, for the same reason the dirty dot is spoken as
+    /// "edited".
+    ///
+    /// Converted through `NSFontManager` rather than by adding `.italic` to the
+    /// descriptor, because the descriptor route **silently drops the weight**:
+    /// asking a semibold system font for the italic trait resolves to
+    /// `.SFNS-RegularItalic`, so the selected tab would quietly stop being
+    /// bolder than its neighbours the moment it was a preview. The font manager
+    /// resolves the same request to `.SFNS-SemiboldItalic` and keeps both.
+    ///
+    /// It also fails in the right direction: with no italic face available it
+    /// returns the font it was given, which is a legible upright tab rather
+    /// than a missing label.
+    static func titleFont(selected: Bool, preview: Bool) -> NSFont {
+        let size = NSFont.smallSystemFontSize + 1
+        let base = NSFont.systemFont(ofSize: size, weight: selected ? .semibold : .regular)
+        guard preview else { return base }
+        return NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
     }
 
     /// The unsaved-changes dot, in the place every editor on this platform
@@ -608,8 +671,13 @@ public final class TabItemView: NSView {
         // "edited" rather than a dot, because the dot is exactly the
         // colour-and-shape-only signal VoiceOver cannot see.
         let edited = tab.isDirty ? ", edited" : ""
-        guard let open = tab.openTaskCount else { return tab.title + edited }
-        return "\(tab.title)\(edited), \(open) open \(open == 1 ? "task" : "tasks")"
+        // "preview" in words, because the italic that says it on screen is
+        // exactly the shape-only signal VoiceOver cannot see — and this one
+        // matters more than most: a preview tab is the one that disappears
+        // when you open the next document.
+        let preview = tab.isPreview ? ", preview" : ""
+        guard let open = tab.openTaskCount else { return tab.title + preview + edited }
+        return "\(tab.title)\(preview)\(edited), \(open) open \(open == 1 ? "task" : "tasks")"
     }
 
     public override func accessibilityValueDescription() -> String? {

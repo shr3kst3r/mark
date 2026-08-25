@@ -11,10 +11,38 @@ public struct SessionTab: Codable, Equatable, Sendable {
     /// Advisory only — the badge and the label are recomputed from disk.
     public var title: String?
 
-    public init(path: String, scrollOffset: Double = 0, title: String? = nil) {
+    /// Whether this was the italic **preview** tab — the single-click slot the
+    /// next single click replaces.
+    ///
+    /// Persisted so a session that ended with one skim tab comes back with one,
+    /// rather than silently making it permanent and leaving the user to close
+    /// by hand what they never asked to keep.
+    public var preview: Bool
+
+    public init(
+        path: String, scrollOffset: Double = 0, title: String? = nil, preview: Bool = false
+    ) {
         self.path = path
         self.scrollOffset = scrollOffset
         self.title = title
+        self.preview = preview
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, scrollOffset, title, preview
+    }
+
+    /// Decoded by hand for the reason ``SessionSidebarOptions`` is: Swift's
+    /// synthesized decoder does **not** fall back to a property's default value
+    /// for a missing key, it throws. ``preview`` did not exist before preview tabs did, so a
+    /// synthesized decoder would refuse every session file written by an
+    /// earlier build and lose the user's tabs to buy nothing.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        scrollOffset = try container.decodeIfPresent(Double.self, forKey: .scrollOffset) ?? 0
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
     }
 }
 

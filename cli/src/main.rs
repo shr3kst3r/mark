@@ -80,7 +80,12 @@ const DEFAULT_RECURSIVE_DEPTH: usize = 64;
 #[derive(Parser)]
 #[command(
     name = "mark",
-    version,
+    // Not clap's bare `version`, which reports the semver alone. `mark` ships
+    // as a Homebrew `--HEAD` formula, so the semver is the same across every
+    // install between two bumps; the commit is what identifies a build, and
+    // `mark --version` is the first thing anyone reads when the answer to
+    // "which one am I running?" stops being obvious.
+    version = mark_core::BUILD,
     // What a first-time reader of `mark --help` needs: what this is, and that
     // some of these commands need no app while others drive one. "Headless
     // half" was true when there was nothing else, and stopped being useful
@@ -1706,6 +1711,11 @@ fn cmd_stats(path: &Path, json: bool) -> Result<(), CliError> {
 struct Doctor {
     core_version: String,
     cli_version: String,
+    /// The commit both were built from, and its date. The pair that makes a
+    /// `--HEAD` install identifiable, since the semver above only moves on a
+    /// deliberate bump.
+    build_commit: String,
+    build_date: String,
     protocol_version: u32,
     executable: Option<PathBuf>,
     /// The enclosing `.app`, resolved from `$0` through its symlink chain
@@ -1722,6 +1732,15 @@ struct Doctor {
     socket_path_limit: usize,
     socket_error: Option<String>,
     app_running: bool,
+    /// The **running app's** build string, when one is running.
+    ///
+    /// The whole point of the field: a `mark` on PATH and a `mark.app` that
+    /// LaunchServices picked are two installs, and nothing else in this report
+    /// would show that they had drifted apart.
+    app_build: Option<String>,
+    /// The bundle the running app was launched from — which is not necessarily
+    /// ``app_bundle``, the one this CLI lives inside.
+    app_path: Option<String>,
     theme_dir: Option<String>,
 }
 
@@ -1735,11 +1754,25 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
     // and never launches the app to answer "is it running": that would make the
     // answer yes by asking the question.
     let socket = client::socket_path();
-    let running = Client::probing().is_ok_and(|client| client.is_app_running());
+    // One `ping`, rather than a connect to answer "is it running?" and a second
+    // round trip to ask what it is: the reply answers both, and a probing
+    // client never launches, so asking still cannot make the answer yes.
+    let pong = Client::probing()
+        .ok()
+        .and_then(|client| client.send(&Request::new("ping")).ok());
+    let running = pong.is_some();
+    let field = |key: &str| {
+        pong.as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+    };
 
     let doctor = Doctor {
         core_version: mark_core::VERSION.to_owned(),
         cli_version: env!("CARGO_PKG_VERSION").to_owned(),
+        build_commit: mark_core::COMMIT.to_owned(),
+        build_date: mark_core::BUILD_DATE.to_owned(),
         protocol_version: wire::protocol_version(),
         executable: std::env::current_exe()
             .ok()
@@ -1753,6 +1786,8 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         socket_path_limit: client::MAX_SOCKET_PATH,
         socket_error: socket.as_ref().err().map(ToString::to_string),
         app_running: running,
+        app_build: field("build"),
+        app_path: field("app"),
         theme_dir: theme::user_dir().map(|dir| dir.display().to_string()),
     };
 
@@ -1763,6 +1798,12 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
     let mut out = Output::new();
     emitln!(out, "core version        {}", doctor.core_version)?;
     emitln!(out, "cli version         {}", doctor.cli_version)?;
+    emitln!(
+        out,
+        "built from          {} ({})",
+        doctor.build_commit,
+        doctor.build_date
+    )?;
     emitln!(out, "protocol version    {}", doctor.protocol_version)?;
     emitln!(
         out,
@@ -1808,6 +1849,14 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         "app running         {}",
         if doctor.app_running { "yes" } else { "no" }
     )?;
+    // Only when there is one to describe: two "n/a" lines under "app running
+    // no" would be noise in the report a bug lands with.
+    if let Some(build) = &doctor.app_build {
+        emitln!(out, "app build           {build}")?;
+    }
+    if let Some(path) = &doctor.app_path {
+        emitln!(out, "app path            {path}")?;
+    }
     emitln!(
         out,
         "theme dir           {}",

@@ -16,7 +16,12 @@
 #   MARK_ZIP="$PWD/target/mark.zip" brew install --cask shr3kst3r/mark/mark
 #
 cask "mark" do
-  version "0.1.0"
+  # Kept in step with `Cargo.toml` by hand — `just bump` prints a reminder.
+  # It is not what makes an install identifiable: the commit stamped into the
+  # bundle by `scripts/assemble-bundle.sh` is (`MarkBuildCommit` in Info.plist,
+  # the About panel, `mark doctor`). Homebrew never compares this to anything,
+  # because the sha256 below is `:no_check`.
+  version "0.2.0"
 
   # A locally built artifact has no stable checksum across rebuilds.
   # `:no_check` is correct here and would be rejected by homebrew-cask upstream —

@@ -40,6 +40,17 @@ bundle="${root}/target/mark.app"
 bundle_id="dev.mark.app"
 version="$(grep -m1 '^version' "${root}/Cargo.toml" | cut -d'"' -f2)"
 
+# The same provenance `core/build.rs` stamps into the two Mach-O binaries, in
+# the plist as well. Both come from one checkout in one run of this script, so
+# they agree by construction — and Finder's Get Info, `mdls`, and anything else
+# that reads a bundle without launching it can then answer "which build is
+# this?" too. Overridable for a build from a tarball with no `.git`.
+commit="${MARK_BUILD_COMMIT:-$(git -C "${root}" rev-parse --short=7 HEAD 2>/dev/null || echo unknown)}"
+if [[ -z "${MARK_BUILD_COMMIT:-}" && -n "$(git -C "${root}" status --porcelain 2>/dev/null)" ]]; then
+    commit="${commit}-dirty"
+fi
+build_date="${MARK_BUILD_DATE:-$(git -C "${root}" log -1 --date=format:%Y-%m-%d --format=%cd 2>/dev/null || echo unknown)}"
+
 swift_bin="${root}/app/.build/${configuration}/mark"
 cli_bin="${root}/target/${configuration}/mark-cli"
 
@@ -66,6 +77,15 @@ cat >"${bundle}/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>${version}</string>
     <key>CFBundleVersion</key>         <string>${version}</string>
+    <!--
+      Not Apple keys, and deliberately not folded into CFBundleVersion:
+      Homebrew's cask machinery and LaunchServices both compare that as a
+      version number, and "0.2.0+f63a7ca" is not one. The App's About panel
+      reads its build string out of the linked core instead (AppDelegate); these
+      are for everything that inspects a bundle without launching it.
+    -->
+    <key>MarkBuildCommit</key>         <string>${commit}</string>
+    <key>MarkBuildDate</key>           <string>${build_date}</string>
     <key>LSMinimumSystemVersion</key>  <string>14.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSPrincipalClass</key>        <string>NSApplication</string>

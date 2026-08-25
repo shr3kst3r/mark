@@ -471,6 +471,44 @@ fn doctor_reports_the_socket_path_its_length_and_whether_the_app_answers() {
     assert_eq!(report["app_running"], serde_json::json!(true));
 }
 
+/// Which build the *app* is, next to which build the CLI is.
+///
+/// A `mark` on PATH from one install and a `mark.app` LaunchServices picked
+/// from another behave like one product that is subtly wrong, and nothing else
+/// in this report would show that they had drifted apart.
+#[test]
+fn doctor_reports_the_running_apps_build_alongside_its_own() {
+    let app = FakeApp::answering(
+        r#"{"ok":true,"result":{"build":"9.9.9 (deadbee 2026-01-01)","app":"/tmp/mark.app"}}"#,
+    );
+    let output = app.run(&["doctor", "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let report: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    assert_eq!(report["app_build"], "9.9.9 (deadbee 2026-01-01)");
+    assert_eq!(report["app_path"], "/tmp/mark.app");
+    // Its own half, so the two are comparable without a second command.
+    assert_eq!(report["cli_version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        report["build_commit"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty())
+    );
+}
+
+/// An app that answers but says nothing about itself — an older build, before
+/// `ping` carried one — leaves the field out rather than inventing a value.
+#[test]
+fn doctor_omits_the_apps_build_when_it_does_not_report_one() {
+    let app = FakeApp::answering(r#"{"ok":true,"result":{}}"#);
+    let output = app.run(&["doctor", "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let report: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    assert_eq!(report["app_running"], serde_json::json!(true));
+    assert!(report["app_build"].is_null(), "{report}");
+}
+
 #[test]
 fn doctor_reports_no_app_when_nothing_is_listening() {
     let directory = scratch();

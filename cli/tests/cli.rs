@@ -666,6 +666,16 @@ fn doctor_reports_the_toolchain_state() {
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
     assert_eq!(parsed["core_version"], env!("CARGO_PKG_VERSION"));
+    // The provenance `core/build.rs` stamps in. Asserted as "present and not
+    // empty" rather than against a literal, because the whole point is that it
+    // changes with every commit — but a blank here would be the reporting
+    // silently losing the only field that identifies a `--HEAD` install.
+    for key in ["build_commit", "build_date"] {
+        let value = parsed[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} is missing: {parsed}"));
+        assert!(!value.is_empty(), "{key} is empty");
+    }
     assert!(parsed["syntect_asset_load_ms"].as_f64().unwrap() >= 0.0);
     assert_eq!(parsed["theme"], "default-dark");
     assert!(parsed["themes"].as_u64().unwrap() >= 16, "{parsed}");

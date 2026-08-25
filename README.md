@@ -13,7 +13,7 @@ after you stop typing. The `mark` CLI does everything the window does, and
 drives the running app over a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-400 Rust tests, 389 Swift tests, 43 integration checks, and committed
+402 Rust tests, 397 Swift tests, 48 integration checks, and committed
 performance gates.
 
 ## Install
@@ -51,6 +51,26 @@ just run README.md  # build and open the app on a file
 
 `packaging/README.md` covers all three paths, including the cask, and what each
 one costs.
+
+### Which build am I running?
+
+```sh
+mark --version      # mark 0.2.0 (f63a7ca 2026-08-25)
+mark doctor         # that, plus the build the running app reports
+```
+
+The commit is the identifier, not the version. `mark` is installed from a
+`--HEAD` tap, so the semver in `Cargo.toml` moves on a deliberate bump while the
+code moves every push, and brew already talks in commits —
+`HEAD-43b49df -> HEAD-f63a7ca`. It is stamped into both binaries at compile time
+(`core/build.rs`) and into `Info.plist` (`scripts/assemble-bundle.sh`), so
+**About mark** reports it too, and a build from a tree with uncommitted work
+says `f63a7ca-dirty`.
+
+`mark doctor` prints the CLI's build *and* the running app's, side by side.
+Those disagreeing means a `mark` on your PATH and a `mark.app` LaunchServices
+picked come from two different installs — which behaves like one product that is
+subtly wrong, and is otherwise invisible.
 
 Needs Rust **1.95 or newer** (the MSRV, pinned in `Cargo.toml`; it comes from
 `merman`, the Mermaid renderer) and the Xcode command line tools — not a full
@@ -264,10 +284,19 @@ just test      # cargo test --workspace
 just bench     # the committed performance gates
 just integration   # two real processes over a real socket
 just doctor    # toolchain versions, asdf-resolved vs actually-resolved
+just version   # what this build is: version, commit, commit date
+just bump minor    # 0.2.0 -> 0.3.0, Cargo.lock with it
 just           # every recipe
 ```
 
 `just check` is what CI runs, so local and CI cannot drift.
+
+The version is bumped **in the PR that changes behaviour**, not in a release
+commit afterwards: a `--HEAD` tap has no releases to hang one on, so a bump that
+waits for one never happens. Patch for a fix, minor for anything a user would
+notice. `just bump` edits the one version in `Cargo.toml` — both crates inherit
+it — updates `Cargo.lock`, and lists the two files that quote it by hand
+(`Casks/mark.rb`, `packaging/mark.1`).
 
 `just` and `pre-commit` are pinned in `.tool-versions`. Rust deliberately is
 not: Cargo's `rust-version` owns the floor, and an asdf `rust` plugin would
@@ -278,7 +307,7 @@ shadow the Homebrew toolchain every measurement was taken against.
 ```
 core/    the document core: parsing, block identity, highlighting, tasks, tree,
          math, diagrams, themes, diffing
-  src/lib.rs        the C ABI — the only pub extern surface, 12 functions (ADR-1)
+  src/lib.rs        the C ABI — the only pub extern surface, 13 functions (ADR-1)
 cli/     clap dispatch, terminal rendering, and the socket client
 app/     the Swift/AppKit shell
   Sources/Mark/         the window, sidebar, tabs, document view, IPC, editor

@@ -18,6 +18,9 @@
 #                         a running app (M5; ADR-2's FSEvents-not-kqueue choice)
 #  10. the installed shape — the bundle launches with SwiftPM's build directory
 #                         gone, which is every machine except the one that built it
+#  11. Finder cold open — a document handed to the app *as it launches* is opened,
+#                         which is `open README.md` and a double-click in Finder
+#  12. build identity   — the CLI and the app it is driving report the same build
 #
 # Isolation. The app is launched through LaunchServices, which does **not** give
 # us a way to point it at a private $TMPDIR — the socket is `$TMPDIR/mark-$UID`
@@ -684,6 +687,85 @@ else
     quit_app
     mv "${resource_bundle}.integration-hidden" "${resource_bundle}"
     stashed_resource_bundle=""
+fi
+
+# --------------------------------------------------------------- gate 13 ----
+# The regression this exists for: `open README.md` put up a window with the
+# document nowhere in it.
+#
+# `NSApplication.finishLaunching` posts `applicationWillFinishLaunching`, then
+# dispatches the queued `kAEOpenDocuments` Apple event — which is
+# `application(_:open:)` — and only *then* posts
+# `applicationDidFinishLaunching`, where this app builds its window. So the
+# document arrives before there is anywhere to put it, and the delegate has to
+# hold it rather than return. Nothing else in this script covers that: gate 1
+# opens through the CLI, and gate 7's `mark://` arrives at an app that is
+# already up.
+gate "13. a document named at cold launch is opened (Finder, 'open README.md')"
+quit_app
+rm -f "${socket}"
+printf '# Cold document\n\nOpened as the app launched.\n' > "${work}/launch.md"
+if [[ -n "$(app_pids)" ]]; then
+    fail "a mark survived the quit; this gate needs a real cold launch"
+else
+    # `open -a <bundle> <file>` is what Finder and `open(1)` do: LaunchServices
+    # starts the app and hands it the document as a launch Apple event.
+    open -a "${bundle}" "${work}/launch.md"
+    found=1
+    for _ in $(seq 1 60); do
+        if tab_paths | grep -qx "${work}/launch.md"; then found=0; break; fi
+        sleep 0.25
+    done
+    if [[ ${found} -eq 0 ]]; then
+        pass "the document handed to the launch is open in a tab"
+    else
+        fail "launch.md is not in the tab list — the launch event was dropped"
+    fi
+    # The sidebar follows the document, rather than coming back on whatever
+    # root the last session happened to leave behind.
+    root="$("${cli}" sidebar --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin)["root"])
+except Exception:
+    pass
+')"
+    # Resolved, because $work is under /tmp — a symlink to /private/tmp — and
+    # LaunchServices hands the app the resolved path.
+    work_real="$(cd "${work}" && pwd -P)"
+    if [[ "${root}" == "${work}" || "${root}" == "${work_real}" ]]; then
+        pass "the sidebar is rooted at the document's directory"
+    else
+        fail "the sidebar is rooted at '${root}', not ${work_real}"
+    fi
+fi
+
+# --------------------------------------------------------------- gate 14 ----
+# Two installs — a `mark` on PATH from one build and a `mark.app` LaunchServices
+# picked from another — behave like one product that is subtly wrong. This is
+# the check that names it, and it is a *report*, not just a pass: the two
+# strings are what a bug report should carry.
+gate "14. the CLI and the app it is driving are the same build"
+build_report="$("${cli}" doctor --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    report = json.load(sys.stdin)
+    print("{} ({} {})".format(
+        report["cli_version"], report["build_commit"], report["build_date"]))
+    print(report.get("app_build") or "")
+except Exception:
+    pass
+')"
+cli_build="$(printf %s "${build_report}" | sed -n 1p)"
+app_build="$(printf %s "${build_report}" | sed -n 2p)"
+note "cli ${cli_build:-<unknown>}"
+note "app ${app_build:-<unknown>}"
+if [[ -z "${app_build}" ]]; then
+    fail "doctor did not report the running app's build"
+elif [[ "${cli_build}" == "${app_build}" ]]; then
+    pass "both report ${cli_build}"
+else
+    fail "the CLI is ${cli_build} but the app is ${app_build}"
 fi
 
 # ------------------------------------------------------------------ done ----

@@ -66,6 +66,31 @@ use crate::render::{RenderOptions, render};
 /// The core's version, as reported by `mark doctor`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The commit this was built from, short — `f63a7ca`, or `f63a7ca-dirty` when
+/// the tree had uncommitted work, or `unknown` when there was no git to ask.
+///
+/// Stamped by `build.rs`. [`VERSION`] alone cannot answer "which build is
+/// this?": every install between two version bumps carries the same semver,
+/// and `mark` ships as a Homebrew `--HEAD` formula, so that is most of them.
+pub const COMMIT: &str = env!("MARK_BUILD_COMMIT");
+
+/// The date [`COMMIT`] was committed, `YYYY-MM-DD`, or `unknown`.
+pub const BUILD_DATE: &str = env!("MARK_BUILD_DATE");
+
+/// The one string that identifies a build — `0.2.0 (f63a7ca 2026-08-25)`.
+///
+/// What `mark --version`, `mark doctor`, the About panel, and the `ping`
+/// response all report, so that comparing the CLI against the running app is
+/// reading two lines rather than an investigation.
+pub const BUILD: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("MARK_BUILD_COMMIT"),
+    " ",
+    env!("MARK_BUILD_DATE"),
+    ")"
+);
+
 thread_local! {
     static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }

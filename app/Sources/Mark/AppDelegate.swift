@@ -36,6 +36,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Files named on the command line, before `NSApplication` starts.
     private let launchFiles: [URL]
 
+    /// URLs that arrived before there was a window to put them in.
+    ///
+    /// This is not defensive: it is the ordinary order of a Finder or `open(1)`
+    /// launch. `NSApplication.finishLaunching` posts
+    /// `applicationWillFinishLaunching`, **then** dispatches the queued
+    /// `kAEOpenDocuments` Apple event — which is what
+    /// ``application(_:open:)`` is — and only then posts
+    /// `applicationDidFinishLaunching`, where this app builds its window. So on
+    /// every cold `open README.md` the file arrived, found
+    /// ``mainWindowController`` still `nil`, and was dropped on the floor: the
+    /// window came up on yesterday's restored session with the requested
+    /// document nowhere in it.
+    private(set) var pendingURLs: [URL] = []
+
     /// ADR-4's own JSON file. Injectable so tests and `mark-bench` do not
     /// touch the developer's real session.
     private let session: Session
@@ -58,13 +72,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let state = Log.signposter.beginInterval("didFinishLaunching")
 
+        // The first line in the log of every launch, so a report that arrives
+        // with a log attached says which build produced it.
+        Log.app.info("mark \(BuildInfo.summary, privacy: .public)")
         let core = (try? MarkCore.version()) ?? "unavailable"
         Log.app.info("mark-core \(core, privacy: .public)")
 
         let restored = restoresSession ? session.loadOrLogging() : nil
+        // Files from the command line *and* files from the launch Apple event:
+        // `open README.md` delivers the second, and until they were treated
+        // alike only the first could choose the sidebar's root.
+        let requested = launchFiles + pendingURLs.filter(\.isFileURL)
         let root =
-            launchFiles.first.map { $0.deletingLastPathComponent() }
-            ?? restored?.sidebarRoot.map { URL(fileURLWithPath: $0) }
+            requested.first.map { $0.deletingLastPathComponent() }
+            ?? restored?.sidebarRoot.map { URL(fileURLWithPath: $0) }.flatMap(Self.existing)
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 
         let controller = MainWindowController(root: root, session: session)
@@ -75,7 +96,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if let restored {
             Log.app.info("restoring \(restored.tabs.count) tabs from the session file")
             controller.restore(
-                restored, sidebarRoot: launchFiles.isEmpty ? nil : root)
+                restored, sidebarRoot: requested.isEmpty ? nil : root)
         }
 
         for url in launchFiles {
@@ -84,6 +105,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         router = CommandRouter(target: controller)
         startCommandSocket()
+
+        // After the router exists, because a queued `mark://` URL is routed
+        // through it. Draining is last so that a launch-event document opens
+        // *over* the restored session rather than under it.
+        let held = pendingURLs
+        pendingURLs = []
+        open(held, into: controller)
 
         Log.signposter.endInterval("didFinishLaunching", state)
     }
@@ -101,7 +129,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// exactly, including activating: a double-click in Finder is a person
     /// asking to look at something now.
     public func application(_ application: NSApplication, open urls: [URL]) {
-        guard let controller = mainWindowController else { return }
+        guard let controller = mainWindowController else {
+            // The cold-launch order, not an error: hold them until
+            // `applicationDidFinishLaunching` has a window to open them in.
+            pendingURLs.append(contentsOf: urls)
+            Log.app.info("holding \(urls.count) launch URL(s) until the window exists")
+            return
+        }
+        open(urls, into: controller)
+    }
+
+    /// - Parameter controller: passed in rather than read from
+    ///   ``mainWindowController``, so that the launch drain — which runs while
+    ///   the property is being set up — cannot take the queueing branch above
+    ///   and put back what it is draining.
+    private func open(_ urls: [URL], into controller: MainWindowController) {
         var openedFile = false
         for url in urls {
             if url.isFileURL {
@@ -119,6 +161,57 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if openedFile {
             controller.showWindow(activating: true)
         }
+    }
+
+    /// `url` if it is still there, else its nearest existing ancestor, else nil.
+    ///
+    /// Only ever applied to a root read back out of the session file, and only
+    /// there. ``Navigator`` deliberately *"never checks that a root exists"* —
+    /// a listing of nothing is the honest answer for a directory you navigated
+    /// to and then deleted. A root restored from a previous launch is the one
+    /// case where that reads as the app having lost its place instead: the
+    /// worktree it pointed at was deleted weeks ago, and the window comes back
+    /// rooted at a path with nothing in it and no way to tell why.
+    static func existing(_ url: URL) -> URL? {
+        let manager = FileManager.default
+        var candidate = url.standardizedFileURL
+        while true {
+            var isDirectory: ObjCBool = false
+            if manager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+                isDirectory.boolValue
+            {
+                return candidate
+            }
+            let parent = candidate.deletingLastPathComponent().standardizedFileURL
+            // `/`'s parent is `/`, which is the loop's only exit besides a hit.
+            guard parent.path != candidate.path else { return nil }
+            candidate = parent
+        }
+    }
+
+    /// The standard About panel, told which build it is describing.
+    ///
+    /// Not `orderFrontStandardAboutPanel(_:)` directly: left to itself the
+    /// panel pairs `CFBundleShortVersionString` with `CFBundleVersion`, which
+    /// this bundle sets to the same string — *"Version 0.2.0 (0.2.0)"*, on
+    /// every build ever made from that version, which is precisely the question
+    /// the app could not answer. The two option keys are AppKit's own:
+    /// `applicationVersion` is the one after "Version", `version` the
+    /// parenthesised build beside it. Filling the second with the commit is the
+    /// whole change.
+    @objc private func about(_ sender: Any?) {
+        NSApplication.shared.orderFrontStandardAboutPanel(options: Self.aboutOptions)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// Separated from ``about(_:)`` so it can be asserted on: what the panel
+    /// then does with these is AppKit's business, but *which build they name*
+    /// is this app's.
+    static var aboutOptions: [NSApplication.AboutPanelOptionKey: Any] {
+        [
+            .applicationVersion: BuildInfo.version,
+            .version: "\(BuildInfo.commit) \(BuildInfo.date)",
+        ]
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -216,8 +309,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(
-            withTitle: "About mark", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-            keyEquivalent: "")
+            withTitle: "About mark", action: #selector(about(_:)), keyEquivalent: ""
+        ).target = self
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Hide mark", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

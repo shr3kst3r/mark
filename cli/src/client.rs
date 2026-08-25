@@ -270,11 +270,6 @@ impl Client {
         Ok(client)
     }
 
-    /// Whether something is listening right now. Never launches.
-    pub fn is_app_running(&self) -> bool {
-        UnixStream::connect(&self.path).is_ok()
-    }
-
     /// Send `request`, and return the app's `result` on success.
     pub fn send(&self, request: &Request) -> Result<serde_json::Value, IpcError> {
         let (mut stream, reach) = self.connect()?;

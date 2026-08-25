@@ -167,7 +167,7 @@ Three things worth knowing:
   is the broken one.
 
 **Cask.** `brew upgrade --cask` will not do it. The cask's `version` is a literal
-`"0.1.0"` and its `sha256` is `:no_check`, so nothing Homebrew compares ever
+(`"0.2.0"`) and its `sha256` is `:no_check`, so nothing Homebrew compares ever
 changes and the cask is never outdated. Rebuild the zip and reinstall over it:
 
 ```sh
@@ -200,6 +200,54 @@ wire up the ones you use.
 
 Because the link points *into* the bundle, it breaks if you move or delete
 `target/mark.app`. Rebuilding in place is fine — the path does not change.
+
+## Which `mark.app` opens my files, and which build is it?
+
+Every `mark.app` — the installed one, and every `just build` in every worktree —
+carries the same `CFBundleIdentifier`, `dev.mark.app`. LaunchServices registers
+all of them and picks one for a double-click or an `open notes.md`, and its
+choice is not the one you last built. So "I opened a file and got behaviour I
+fixed an hour ago" is a real thing that happens, and it is not a mystery worth
+guessing at:
+
+```sh
+mark doctor | grep -E 'built from|app (build|path)'
+```
+
+`built from` is the CLI on your PATH. `app build` and `app path` are the app
+that actually answered — its bundle, and the commit it was built from. Two
+different commits on those lines is the whole diagnosis.
+
+**The formula's app is not registered until you symlink it.** Homebrew installs
+into the Cellar, and LaunchServices does not scan it — so out of the box the
+*only* `dev.mark.app` bundles it knows about are your `target/mark.app` build
+directories, and `open notes.md` picks one of those. This is what the formula's
+caveat is for:
+
+```sh
+ln -sfn "$(brew --prefix mark)/mark.app" /Applications/mark.app
+```
+
+To see every bundle LaunchServices knows about:
+
+```sh
+lsr=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$lsr" -dump | grep -E 'path:.*mark\.app' | sort -u
+```
+
+Expect that list to be longer than you think: it keeps registrations for
+directories that no longer exist, including Homebrew's own `/private/tmp` build
+dirs from past `--HEAD` installs. Nothing prunes them on its own. Rebuilding the
+database drops the dead entries and rescans:
+
+```sh
+"$lsr" -kill -r -domain local -domain system -domain user
+```
+
+While iterating on a worktree build, drive it explicitly rather than through
+LaunchServices' choice — `open -a "$PWD/target/mark.app" notes.md`, or `just run
+notes.md`, which execs the bundle's own Mach-O so its stdout and OSLog land in
+your terminal.
 
 ## Where the formula and cask live, and why
 

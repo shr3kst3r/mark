@@ -244,6 +244,56 @@ uninstall-cli prefix="":
 themes-import *args:
     python3 scripts/themes-import.py {{args}}
 
+# --- versioning --------------------------------------------------------
+
+# Set the workspace version, and Cargo.lock with it.
+#
+# The version is one number in `Cargo.toml` and everything downstream reads it:
+# both crates inherit it, `scripts/assemble-bundle.sh` greps it into
+# `CFBundleShortVersionString`, and `mark --version` and the About panel report
+# it. What identifies an individual build is the *commit*, stamped by
+# `core/build.rs` — so this is the deliberate marker ("that is a newer mark"),
+# not the identifier.
+#
+#   just bump patch      0.2.0 -> 0.2.1
+#   just bump minor      0.2.0 -> 0.3.0
+#   just bump major      0.2.0 -> 1.0.0
+#   just bump 0.4.2      exactly that
+#
+# Bump in the PR that changes behaviour, not in a release commit afterwards:
+# a `--HEAD` tap has no releases to hang one on.
+bump level="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+    IFS=. read -r major minor patch <<<"${current}"
+    case "{{level}}" in
+        major) next="$((major + 1)).0.0" ;;
+        minor) next="${major}.$((minor + 1)).0" ;;
+        patch) next="${major}.${minor}.$((patch + 1))" ;;
+        [0-9]*.[0-9]*.[0-9]*) next="{{level}}" ;;
+        *)
+            echo "just bump: '{{level}}' is not major, minor, patch, or an X.Y.Z version." >&2
+            exit 1 ;;
+    esac
+    # Anchored at the start of the line and applied once: the same three
+    # numbers appear in `[workspace.package]` and could appear in a dependency
+    # pin, and only the first is this project's own.
+    /usr/bin/sed -i '' "1,/^version = /s/^version = \"${current}\"/version = \"${next}\"/" Cargo.toml
+    # Cargo.lock records both crates' versions, and a lockfile left behind
+    # fails `cargo build --locked` in CI rather than in the editor.
+    cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace >/dev/null
+    echo "${current} -> ${next}"
+    echo
+    echo "Also update, if the version is quoted there:"
+    echo "  Casks/mark.rb        version"
+    echo "  packaging/mark.1     the .TH line"
+    grep -rn "${current}" Casks packaging skills 2>/dev/null | sed 's/^/  /' || true
+
+# What this build is: version, commit, and commit date.
+version: build-rust
+    @./target/release/mark-cli --version
+
 # --- measurement -------------------------------------------------------
 
 # Generate the corpus if needed, then check the committed perf thresholds.

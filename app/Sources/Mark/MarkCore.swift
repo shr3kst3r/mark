@@ -23,7 +23,7 @@ public enum MarkCore {
 
     // MARK: - Version
 
-    /// The core's version, e.g. `"0.1.0"`.
+    /// The core's version, e.g. `"0.2.0"`.
     public static func version() throws -> String {
         try string(function: "mark_version") { mark_version() }
     }

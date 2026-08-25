@@ -802,6 +802,11 @@ public final class CommandRouter {
                 "bundleIdentifier": .string(Bundle.main.bundleIdentifier ?? "none"),
                 "pid": .int(Int(ProcessInfo.processInfo.processIdentifier)),
                 "core": .string((try? MarkCore.version()) ?? "unavailable"),
+                // `mark doctor` prints this next to its own. A CLI and an app
+                // from different installs is the failure this makes visible,
+                // and until now the only symptom was behaviour that did not
+                // match the code in front of you.
+                "build": .string(BuildInfo.summary),
                 "socket": .string(socketPathForReport),
                 "tabs": .int(target.documentTabs().count),
                 "commands": .int(commandCount),

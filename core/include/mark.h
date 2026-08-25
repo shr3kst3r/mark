@@ -27,7 +27,7 @@
 extern "C" {
 #endif
 
-/* Core version, e.g. "0.1.0". Free with mark_free(). */
+/* Core version, e.g. "0.2.0". Free with mark_free(). */
 char *mark_version(void);
 
 /* Last error on this thread, or NULL. Free with mark_free(). */

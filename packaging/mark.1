@@ -10,7 +10,7 @@
 .\"
 .\" Preview it with:  man packaging/mark.1
 .\" Lint it with:     mandoc -T lint packaging/mark.1
-.TH MARK 1 "2026-08-25" "mark 0.1.0" "User Commands"
+.TH MARK 1 "2026-08-25" "mark 0.2.0" "User Commands"
 .SH NAME
 mark \- fast native markdown viewer for macOS, and its CLI
 .SH SYNOPSIS
@@ -112,6 +112,20 @@ length against the 104-byte limit, whether the app is running, the
 resolved from
 .IR $0 ,
 core version, theme directory, and syntect asset load time.
+.IP
+It also reports which build this is \(em the commit and commit date under
+.BR "built from" ,
+stamped in when the binary was compiled \(em and, when an app answers, the
+build and bundle path of
+.I that
+app. Since
+.B mark
+is installed from a Homebrew
+.B --HEAD
+tap, the version alone does not identify a build: every install between two
+version bumps reports the same one. Two different builds on those two lines is a
+CLI and an app from separate installs, which behaves like one product that is
+subtly wrong.
 .SS Remote
 .TP
 .BI "open " path " [--tab] [--json]"

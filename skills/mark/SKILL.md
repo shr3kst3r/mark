@@ -154,13 +154,20 @@ So you can write the `jq` without a probe run.
  "cache":{"hits":0,"misses":0,"entries":0,"evictions":0}, "rich_cache":{…}}
 
 // mark doctor --json        → one object
-{"core_version":"0.1.0", "cli_version":"0.1.0", "protocol_version":1,
+{"core_version":"0.2.0", "cli_version":"0.2.0",
+ "build_commit":"f63a7ca", "build_date":"2026-08-25", "protocol_version":1,
  "executable":…, "app_bundle":…, "syntect_asset_load_ms":0.59,
  "theme":"default-dark", "themes":17,
  "socket_path":"/var/…/mark-501.sock", "socket_path_bytes":62,
  "socket_path_limit":103, "socket_error":null,
- "app_running":false, "theme_dir":"~/.config/mark/themes"}
-// `app_running` is probed, never launched — asking cannot make it true
+ "app_running":true, "app_build":"0.2.0 (f63a7ca 2026-08-25)",
+ "app_path":"/opt/homebrew/opt/mark/mark.app",
+ "theme_dir":"~/.config/mark/themes"}
+// `app_running` is probed, never launched — asking cannot make it true.
+// `build_commit` identifies the build; the version alone does not, since every
+// `--HEAD` install between two bumps reports the same one. `app_build` and
+// `app_path` describe the app that answered, and are absent when none did —
+// which is how you catch a CLI and an app from two different installs.
 ```
 
 Socket commands print the app's reply verbatim:

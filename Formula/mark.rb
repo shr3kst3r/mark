@@ -122,6 +122,13 @@ class Mark < Formula
       Homebrew formulae do not install into /Applications. To put it there:
         ln -sfn "#{opt_prefix}/mark.app" /Applications/mark.app
 
+      Do that even if you live in the terminal. LaunchServices does not scan the
+      Cellar, so until this bundle is somewhere it looks, it is not registered —
+      and a double-click on a .md, or `open notes.md`, goes to whichever other
+      mark.app it does know about, which on a development machine is a stale
+      `target/mark.app`. `mark doctor` names the app that answered and the commit
+      it was built from, so you can tell.
+
       The `mark` CLI is on your PATH and drives the running app over a Unix
       socket at $TMPDIR/mark-$UID.sock:
         mark open README.md

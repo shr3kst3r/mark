@@ -16,7 +16,7 @@
 #       MacOS/mark-cli      <- cargo build --release
 #       Resources/          <- shell.html, shell.js, shell.css (+ the SwiftPM
 #                              resource bundle, so Bundle.module resolves)
-#       Resources/man/man1/mark.1        <- M10, installed by packaging/mark.rb
+#       Resources/man/man1/mark.1        <- M10, installed by Formula/mark.rb
 #       Resources/completions/           <- M10, zsh/bash/fish
 #
 # M4 adds ADR-3's `mark://` to CFBundleURLTypes and registers the assembled
@@ -25,7 +25,7 @@
 # mark.app the user happens to have.
 #
 # M10 puts the man page and the shell completions in `Resources`, so the bundle
-# is the single artifact both install paths read from: `packaging/mark.rb`
+# is the single artifact both install paths read from: `Formula/mark.rb`
 # installs them out of it, and `just install-cli` points at them for anyone not
 # using brew. They are documentation of the CLI that ships *next to* the CLI,
 # which is why they live in the bundle rather than only in `packaging/`.

@@ -1,4 +1,8 @@
-# Homebrew *cask* for mark — the alternative to packaging/mark.rb.
+# Homebrew *cask* for mark — the alternative to Formula/mark.rb.
+#
+# This file lives in `Casks/` because that is the only directory a tap's casks
+# are read from; anywhere else and `brew install --cask` reports that no cask
+# with the name exists.
 #
 # Use this one only if you want the app in /Applications the way a cask does it.
 # It installs a prebuilt bundle rather than compiling, which means the artifact
@@ -8,8 +12,8 @@
 # entirely by building locally.
 #
 #   just build && ditto -c -k --keepParent target/mark.app target/mark.zip
-#   brew tap shr3kst3r/mark /path/to/your/mark
-#   brew install --cask shr3kst3r/mark/mark
+#   brew tap shr3kst3r/mark https://github.com/shr3kst3r/mark
+#   MARK_ZIP="$PWD/target/mark.zip" brew install --cask shr3kst3r/mark/mark
 #
 cask "mark" do
   version "0.1.0"
@@ -19,12 +23,19 @@ cask "mark" do
   # which is fine, since this is never going upstream.
   sha256 :no_check
 
-  url "file:///path/to/your/mark/target/mark.zip"
+  # There is no published release artifact, so the zip is the one you just built
+  # with `ditto`. `MARK_ZIP` says where it is; the default assumes the checkout
+  # is next to this file, which holds when you tapped a local checkout and is
+  # wrong when you tapped the GitHub remote — hence the env var.
+  url "file://#{ENV.fetch("MARK_ZIP", "#{__dir__}/../target/mark.zip")}"
   name "mark"
   desc "Fast native macOS markdown viewer with a scriptable CLI"
   homepage "https://github.com/shr3kst3r/mark"
 
-  depends_on macos: ">= :sonoma"
+  # A bare symbol, not `">= :sonoma"`: a cask's `depends_on macos:` parses with
+  # a `>=` comparator already, and the string form is deprecated — it made every
+  # load of this file print Homebrew's "report this issue to the tap" warning.
+  depends_on macos: :sonoma
 
   app "mark.app"
 

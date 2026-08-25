@@ -1,5 +1,10 @@
 # Homebrew *formula* for mark — builds from source on your machine.
 #
+# This file lives in `Formula/` because that is where Homebrew looks. A tap's
+# formulae are found in `Formula/`, `HomebrewFormula/`, or the tap root, and
+# casks only in `Casks/` — a formula anywhere else (this one used to sit in
+# `packaging/`) is invisible, and `brew install` reports "No available formula".
+#
 # This is deliberately a formula and not a cask. Locally built code never gets a
 # `com.apple.quarantine` xattr, so Gatekeeper is never consulted: no Developer ID,
 # no notarization, no "damaged and can't be opened", and nothing to strip after
@@ -7,20 +12,26 @@
 # `--no-quarantine` was removed in Homebrew 4.7.
 #
 # Head-only, on purpose. There is no release tarball to point a stable `url` at,
-# and this is never going to a public tap — so every install is `--HEAD`:
+# so every install is `--HEAD`:
+#
+#   brew tap shr3kst3r/mark https://github.com/shr3kst3r/mark
+#   brew install --HEAD shr3kst3r/mark/mark
+#
+# There is no "install straight from the .rb file" path any more: Homebrew 6
+# refuses a formula that is not in a tap ("Homebrew requires formulae to be in a
+# tap, rejecting: ..."). Tapping is the only route, and tapping a local checkout
+# is the local-only one.
+#
+# **`--HEAD` builds what is committed and pushed, not what is in your working
+# tree.** Both forms clone `head` into Homebrew's cache and build that clone, so
+# uncommitted work is invisible to them. While iterating locally, use `just
+# build` plus `just install-cli`; `packaging/README.md` spells that path out.
+#
+# To build a local checkout through Homebrew instead of the GitHub remote, tap
+# the checkout itself — `brew tap` takes any transport git understands:
 #
 #   brew tap shr3kst3r/mark /path/to/your/mark
 #   brew install --HEAD shr3kst3r/mark/mark
-#
-# Or straight from the file, without a tap:
-#
-#   brew install --HEAD ./packaging/mark.rb
-#
-# **`--HEAD` builds what is committed, not what is in your working tree.** Both
-# forms clone the repo at `head` into Homebrew's cache and build that clone, so
-# uncommitted work is invisible to them — including, at the time of writing,
-# effectively all of it. Until the tree is committed, use `just build` plus
-# `just install-cli`; `packaging/README.md` spells that path out.
 #
 # Then, if you want it in /Applications (Homebrew formulae do not put it there):
 #
@@ -30,7 +41,9 @@ class Mark < Formula
   desc "Fast native macOS markdown viewer with a scriptable CLI"
   homepage "https://github.com/shr3kst3r/mark"
   license "MIT"
-  head "file:///path/to/your/mark", using: :git
+  # The GitHub remote, not a local path: a formula in a public repo has to be
+  # installable by anyone who taps it. Tap a local checkout to build that instead.
+  head "https://github.com/shr3kst3r/mark.git", branch: "main"
 
   depends_on "just" => :build
   depends_on "rust" => :build
@@ -55,7 +68,15 @@ class Mark < Formula
     # `just build` runs cargo, then swift, then assembles the bundle. Neither
     # toolchain can produce a runnable app on its own — that is ADR-1's
     # accepted cost, and `scripts/assemble-bundle.sh` is where it lives.
-    system "just", "build"
+    #
+    # `swift_build_flags=--disable-sandbox` is not optional here. Homebrew runs
+    # this install inside `sandbox-exec`, and SwiftPM shells out to
+    # `sandbox-exec` again to compile `Package.swift`. Sandboxes do not nest, so
+    # without it `swift build` dies on `sandbox_apply: Operation not permitted`
+    # before compiling a line. It is passed as a just variable and not through
+    # `ENV` because superenv scrubs the build environment to an allowlist and an
+    # env var set here never reaches the recipe.
+    system "just", "swift_build_flags=--disable-sandbox", "build"
 
     prefix.install "target/mark.app"
 

@@ -99,6 +99,20 @@ swift-test *args: build-rust
 # In `check` because the MSRV floor and any binary-size regression surface at
 # release-profile link time, not in a debug build.
 #
+# Extra flags for `swift build`, overridden on the command line — empty here so
+# the dev loop keeps SwiftPM's own sandbox:
+#
+#   just swift_build_flags=--disable-sandbox build
+#
+# `Formula/mark.rb` passes exactly that. Homebrew runs the whole install inside
+# `sandbox-exec` and SwiftPM shells out to `sandbox-exec` again to compile
+# `Package.swift`; sandboxes do not nest, so without the flag the build dies on
+# `sandbox_apply: Operation not permitted` before compiling a line. It is a just
+# variable rather than an environment variable on purpose — Homebrew's superenv
+# scrubs the build environment down to an allowlist, so an exported
+# `SWIFT_BUILD_FLAGS` never reaches the recipe (verified: it arrives empty).
+swift_build_flags := ""
+
 # Release build of the core staticlib and the CLI.
 build-rust:
     cargo build --release
@@ -111,7 +125,7 @@ cli *args:
 
 # Assemble mark.app from the two Mach-O executables (ADR-1).
 build: build-rust
-    cd app && swift build -c release
+    cd app && swift build -c release {{swift_build_flags}}
     ./scripts/assemble-bundle.sh release
 
 # The bundle's own Mach-O is exec'd directly rather than going through `open`,
@@ -264,7 +278,7 @@ bench-app: build-rust
         echo "generating the class-vs-inline highlighting pair..."
         (cd bench/highlight-format && cargo run --release -q -- ../corpus/1mb.md ../corpus/format)
     fi
-    (cd app && swift build -c release --product mark-bench --product mark)
+    (cd app && swift build -c release {{swift_build_flags}} --product mark-bench --product mark)
     # Both gates run even if the first fails. A memory regression hiding the
     # session round trip would mean fixing one thing and discovering the next
     # only on the following run.

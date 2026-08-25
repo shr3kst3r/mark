@@ -18,8 +18,15 @@ performance gates.
 ## Install
 
 ```sh
-brew tap shr3kst3r/mark /path/to/your/mark
+brew tap shr3kst3r/mark https://github.com/shr3kst3r/mark
 brew install --HEAD shr3kst3r/mark/mark
+```
+
+Updating needs `--fetch-HEAD`, because a head-only formula has no version
+number for Homebrew to compare and it will otherwise report nothing to do:
+
+```sh
+brew update && brew upgrade --fetch-HEAD mark
 ```
 
 The formula builds from source, which is the point: locally built code is never

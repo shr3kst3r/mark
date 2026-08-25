@@ -3,7 +3,7 @@
 # `spg` (https://github.com/shr3kst3r/spg) reads this file and, on
 # `spg install`, creates a symlink for each [links.*] entry, repairs them on
 # `spg sync`, and removes them on `spg uninstall`. It is unrelated to
-# packaging: `packaging/mark.rb` owns installing the app and putting `mark` on
+# packaging: `Formula/mark.rb` owns installing the app and putting `mark` on
 # your PATH; this file only says where the agent skill belongs.
 #
 # No [commands.*] tables, on purpose. The dev loop is the `just` recipes, which

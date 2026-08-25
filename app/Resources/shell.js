@@ -81,6 +81,8 @@
    */
   mark.setDocument = function (html, meta) {
     cancelFill();
+    // Every find range points into the nodes about to be thrown away.
+    findReset();
     container.scrollTop = 0;
     window.scrollTo(0, 0);
 
@@ -251,6 +253,7 @@
         var t0 = performance.now();
         var anchor = captureAnchor();
         cancelFill();
+        findReset();
 
         container.innerHTML = prefix;
         stats.replacements += 1;
@@ -335,6 +338,9 @@
   mark._patchNow = patchNow;
 
   function patchNow(scriptJSON, stampsJSON) {
+    // A patch replaces block elements, so any range into one of them is stale.
+    // The window controller re-runs the search afterwards if the bar is open.
+    findReset();
     var script, stamps;
     try {
       script = JSON.parse(scriptJSON);
@@ -656,6 +662,229 @@
       el.scrollIntoView({ block: "start", behavior: "auto" });
       return true;
     });
+  };
+
+  /* ---------------------------------------------------------------- finding */
+
+  /*
+   * Find-in-document, with every match highlighted at once.
+   *
+   * **Not `WKWebView.find`.** WebKit's own find highlights one match, has no
+   * notion of "3 of 12", and reports only whether it landed on something — so
+   * a bar that cycles and highlights all of them cannot be built on it.
+   *
+   * **And not `<mark>` elements either**, which is the other obvious way to
+   * highlight many matches and is the one ADR-2 forbids: the patcher diffs the
+   * block elements against the core's render, so wrapping matched text in new
+   * nodes would make the next keystroke diff a document against a highlighted
+   * copy of itself. The CSS Custom Highlight API paints ranges without
+   * touching the DOM at all, which is exactly the property needed here.
+   *
+   * Where that API is missing (it is Safari 17.2, so a macOS 14.0 or 14.1
+   * machine has none) the search still works and still cycles; only the
+   * highlight narrows to the current match, drawn as a selection. That is
+   * reported back as `highlightsAll: false` rather than being papered over.
+   */
+
+  var findRanges = [];
+  var findIndex = -1;
+
+  var findSupportsHighlights =
+    typeof CSS !== "undefined" &&
+    CSS.highlights &&
+    typeof window.Highlight === "function";
+
+  function findClearHighlights() {
+    if (!findSupportsHighlights) return;
+    CSS.highlights.delete("mk-find");
+    CSS.highlights.delete("mk-find-current");
+  }
+
+  /* Throw the ranges away. Called on every document change as well as by
+   * `clearFind`: a `Range` into a block the patcher has just replaced points at
+   * a node that is no longer in the tree, and painting it is undefined. */
+  function findReset() {
+    findRanges = [];
+    findIndex = -1;
+    findClearHighlights();
+  }
+
+  mark._findReset = findReset;
+
+  function findState() {
+    return {
+      total: findRanges.length,
+      index: findIndex,
+      highlightsAll: findSupportsHighlights
+    };
+  }
+
+  /*
+   * The container's text, flattened, with an index back to the nodes it came
+   * from.
+   *
+   * `innerText` would be simpler and is not usable: it is the *rendered* text
+   * with no way back to a node and offset, and a `Range` needs both.
+   */
+  function findTextIndex() {
+    var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+        var parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        var tag = parent.tagName;
+        /* A diagram's `<style>` and any `<script>` are text nodes that are not
+         * text the reader can see. */
+        if (tag === "STYLE" || tag === "SCRIPT") return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var nodes = [];
+    var starts = [];
+    var parts = [];
+    var length = 0;
+    var node;
+    while ((node = walker.nextNode())) {
+      nodes.push(node);
+      starts.push(length);
+      parts.push(node.nodeValue);
+      length += node.nodeValue.length;
+    }
+    return { nodes: nodes, starts: starts, text: parts.join("") };
+  }
+
+  /* The node and offset a position in the flattened text came from. */
+  function findLocate(map, position) {
+    var low = 0;
+    var high = map.starts.length - 1;
+    var found = 0;
+    while (low <= high) {
+      var mid = (low + high) >> 1;
+      if (map.starts[mid] <= position) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return { node: map.nodes[found], offset: position - map.starts[found] };
+  }
+
+  function findBuildRanges(needle, caseSensitive) {
+    var map = findTextIndex();
+    var hay = caseSensitive ? map.text : map.text.toLowerCase();
+    var pin = caseSensitive ? needle : needle.toLowerCase();
+    var ranges = [];
+    var from = 0;
+    for (;;) {
+      var at = hay.indexOf(pin, from);
+      if (at < 0) break;
+      var start = findLocate(map, at);
+      /* The end is located from the last character *inside* the match, so a
+       * match ending exactly on a node boundary does not resolve to offset 0
+       * of the next node. */
+      var last = findLocate(map, at + pin.length - 1);
+      var range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(last.node, last.offset + 1);
+      ranges.push(range);
+      /* Non-overlapping, which is how every find bar counts: "aa" occurs once
+       * in "aaa", not twice. */
+      from = at + pin.length;
+    }
+    return ranges;
+  }
+
+  function findPaint() {
+    if (!findSupportsHighlights) {
+      var selection = window.getSelection();
+      if (!selection) return;
+      selection.removeAllRanges();
+      if (findIndex >= 0) selection.addRange(findRanges[findIndex]);
+      return;
+    }
+    if (!findRanges.length) {
+      findClearHighlights();
+      return;
+    }
+    var all = new Highlight();
+    for (var i = 0; i < findRanges.length; i++) all.add(findRanges[i]);
+    CSS.highlights.set("mk-find", all);
+    if (findIndex < 0) {
+      CSS.highlights.delete("mk-find-current");
+      return;
+    }
+    var current = new Highlight(findRanges[findIndex]);
+    /* Painted over the "all matches" highlight rather than under it. */
+    current.priority = 1;
+    CSS.highlights.set("mk-find-current", current);
+  }
+
+  function findReveal() {
+    if (findIndex < 0) return;
+    var range = findRanges[findIndex];
+    var rect = range.getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) {
+      var element = range.startContainer.parentElement;
+      if (element) element.scrollIntoView({ block: "center", behavior: "auto" });
+      return;
+    }
+    /* Left where it is when it is comfortably on screen already — a bar that
+     * re-centred the page on every keystroke would make typing feel like the
+     * document was sliding around. */
+    var margin = Math.min(120, window.innerHeight * 0.2);
+    if (rect.top >= margin && rect.bottom <= window.innerHeight - margin) return;
+    window.scrollBy(0, rect.top - window.innerHeight / 2);
+  }
+
+  /* The match a browser would start on: the first one at or below the top of
+   * the viewport, so "find" continues from where the reader is reading rather
+   * than jumping to the top of the document. */
+  function findNearestToViewport() {
+    for (var i = 0; i < findRanges.length; i++) {
+      var rect = findRanges[i].getBoundingClientRect();
+      if (rect && rect.bottom > 0) return i;
+    }
+    return 0;
+  }
+
+  mark.find = function (needle, options) {
+    var caseSensitive = !!(options && options.caseSensitive);
+    return mark.ensureFullyRendered().then(function () {
+      findReset();
+      if (!needle) return findState();
+      findRanges = findBuildRanges(needle, caseSensitive);
+      findIndex = findRanges.length ? findNearestToViewport() : -1;
+      findPaint();
+      findReveal();
+      return findState();
+    });
+  };
+
+  /* Next (`+1`) or previous (`-1`) match, wrapping in both directions. */
+  mark.findStep = function (delta) {
+    if (!findRanges.length) return findState();
+    var count = findRanges.length;
+    findIndex = ((findIndex + delta) % count + count) % count;
+    findPaint();
+    findReveal();
+    return findState();
+  };
+
+  mark.findState = findState;
+
+  /* What the reader has selected, for "Use Selection for Find". */
+  mark.selectedText = function () {
+    var selection = window.getSelection();
+    return selection ? String(selection) : "";
+  };
+
+  /* Drop the highlights and any selection they left behind. */
+  mark.clearFind = function () {
+    findReset();
+    var selection = window.getSelection();
+    if (selection) selection.removeAllRanges();
+    return true;
   };
 
   /* Exposed for the scroll-anchor regression test, which needs to assert on

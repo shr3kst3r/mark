@@ -48,9 +48,24 @@ public struct DocumentMetadata: Sendable, Equatable {
     /// what M2 already puts in the window title.
     public let documentTitle: String?
 
-    public init(tasks: TaskCounts, documentTitle: String?) {
+    /// Every heading, in document order, with the anchors the rendered page
+    /// carries.
+    ///
+    /// Here rather than on ``DocumentView`` for the reason ADR-4 gives as a
+    /// constraint: *"no feature may assume a tab's web view exists"*. The
+    /// sidebar's table of contents is exactly such a feature — it draws for the
+    /// selected tab, and a tab can be selected before its document has painted
+    /// — so its input is the core's answer about the bytes, not a DOM query.
+    ///
+    /// Free, in the sense that matters: ``documentTitle`` was already a `toc`
+    /// call, and this keeps the result instead of throwing all but the first
+    /// entry away.
+    public let headings: [Heading]
+
+    public init(tasks: TaskCounts, documentTitle: String?, headings: [Heading] = []) {
         self.tasks = tasks
         self.documentTitle = documentTitle
+        self.headings = headings
     }
 
     /// The same, for bytes already in hand.
@@ -69,7 +84,8 @@ public struct DocumentMetadata: Sendable, Equatable {
                 open: tasks.filter { !$0.checked }.count,
                 total: tasks.count
             ),
-            documentTitle: heading?.isEmpty == true ? nil : heading
+            documentTitle: heading?.isEmpty == true ? nil : heading,
+            headings: headings
         )
     }
 
@@ -99,7 +115,8 @@ public struct DocumentMetadata: Sendable, Equatable {
                 open: tasks.filter { !$0.checked }.count,
                 total: tasks.count
             ),
-            documentTitle: heading?.isEmpty == true ? nil : heading
+            documentTitle: heading?.isEmpty == true ? nil : heading,
+            headings: headings
         )
     }
 }

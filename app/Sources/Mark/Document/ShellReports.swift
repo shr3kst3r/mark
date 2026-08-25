@@ -155,6 +155,61 @@ public struct EnsureReport: Sendable, Equatable {
     }
 }
 
+/// What a search of the rendered document found.
+///
+/// Three numbers rather than WebKit's one boolean, and each is a thing
+/// `WKWebView.find` cannot tell you:
+///
+/// * **``total``** — so the bar can say "12 matches" instead of leaving the
+///   reader to press Return until it wraps.
+/// * **``index``** — so it can say *which* one, which is the whole of
+///   "cycle through them".
+/// * **``highlightsAll``** — whether every match is painted or only the
+///   current one. False on macOS 14.0 and 14.1, whose WebKit predates the CSS
+///   Custom Highlight API. Reported rather than assumed, because a find bar
+///   that silently highlights one match on some machines and all of them on
+///   others is a bug report nobody can reproduce.
+public struct FindResult: Sendable, Equatable {
+
+    public let total: Int
+    /// Zero-based position of the current match, or `nil` when there is none.
+    public let index: Int?
+    public let highlightsAll: Bool
+
+    /// Nothing found. Named away from `none` on purpose: as a static on a
+    /// type that is routinely wrapped in an `Optional`, that spelling is
+    /// ambiguous with `Optional.none` at every call site — and the two mean
+    /// opposite things here, since `nil` is "no search has run".
+    public static let empty = FindResult(total: 0, index: nil, highlightsAll: false)
+
+    public init(total: Int, index: Int?, highlightsAll: Bool) {
+        self.total = total
+        self.index = index
+        self.highlightsAll = highlightsAll
+    }
+
+    public init(_ value: Any?) {
+        guard let d = value as? [String: Any] else {
+            self = .empty
+            return
+        }
+        total = PaintReport.int(d["total"])
+        // The page reports -1 for "no current match"; an `Int?` is what that
+        // means, and keeping the sentinel would put the check in every caller.
+        let reported = PaintReport.int(d["index"])
+        index = reported >= 0 ? reported : nil
+        highlightsAll = (d["highlightsAll"] as? Bool) ?? false
+    }
+
+    /// What the bar shows: "3 of 12", "Not found", or nothing at all before a
+    /// search has been run.
+    public var label: String? {
+        guard total > 0 else { return nil }
+        guard let index else { return "\(total) match\(total == 1 ? "" : "es")" }
+        return "\(index + 1) of \(total)"
+    }
+}
+
 /// The three WebKit capabilities ADR-2's design depends on being absent or
 /// present. `mark-bench` asserts on these so the assumptions stay checkable
 /// against a future WebKit rather than becoming folklore.

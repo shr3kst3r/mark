@@ -503,14 +503,79 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         return (result as? Bool) ?? false
     }
 
+    // MARK: - Finding
+
+    /// Find every occurrence of `text`, highlight them all, and go to one.
+    ///
+    /// Done in the page rather than through `WKWebView.find`, and the reason is
+    /// in ``FindResult``: WebKit's own find highlights one match, cannot say
+    /// "3 of 12", and reports only whether it landed on something.
+    ///
+    /// Forces the background fill first, for ADR-2's reason: a search that only
+    /// looked at the painted prefix would find nothing in the second half of a
+    /// long document and say so.
+    @discardableResult
+    public func find(_ text: String, caseSensitive: Bool = false) async -> FindResult {
+        guard !text.isEmpty else {
+            await clearFind()
+            return .empty
+        }
+        await ensureFullyRendered()
+        let result = try? await call(
+            "return window.mark.find(needle, { caseSensitive: caseSensitive });",
+            arguments: ["needle": text, "caseSensitive": caseSensitive])
+        return FindResult(result)
+    }
+
+    /// Move to the next or previous match, wrapping in both directions.
+    ///
+    /// Cheap on purpose: the ranges are already built, so cycling is a repaint
+    /// and a scroll rather than another walk of the document.
+    @discardableResult
+    public func stepFind(forward: Bool) async -> FindResult {
+        let result = try? await call(
+            "return window.mark.findStep(delta);", arguments: ["delta": forward ? 1 : -1])
+        return FindResult(result)
+    }
+
+    /// What the page thinks the current search is, without changing it.
+    public func findState() async -> FindResult {
+        FindResult(try? await call("return window.mark.findState();"))
+    }
+
+    /// Drop the highlights and the selection they left behind.
+    public func clearFind() async {
+        _ = try? await call("return window.mark.clearFind();")
+    }
+
+    /// What the reader has selected in the preview — ⌘E's half of Find.
+    public func selectedText() async -> String {
+        let result = try? await call("return window.mark.selectedText();")
+        return (result as? String) ?? ""
+    }
+
     /// Force the background fill to completion.
     ///
     /// ADR-2 constraint: *"Nothing may depend on the whole document being in
     /// the DOM without first awaiting or forcing completion of the background
     /// fill."* This is the one path; in-page search, "scroll to heading", and
     /// print all go through it.
+    ///
+    /// **Both halves of the fill, in order.** The page's pump is only the
+    /// second one: the tail is rendered by the core on ``fillTask`` and handed
+    /// to `appendTail` when that finishes, so a bare
+    /// `window.mark.ensureFullyRendered()` arriving before the handover drains
+    /// a pump that has been given nothing yet — and truthfully reports that it
+    /// forced nothing, because there was nothing there. That is how a search of
+    /// a freshly opened long document can miss text that is plainly in the
+    /// file, and it is the *"awaiting or"* the ADR puts in front of *"forcing"*.
+    ///
+    /// Costs nothing once the fill has landed, which is every call after the
+    /// first second of a document's life — a finished `Task`'s `value` is
+    /// already there.
     @discardableResult
     public func ensureFullyRendered() async -> EnsureReport? {
+        await fillTask?.value
         let result = try? await call("return window.mark.ensureFullyRendered();")
         return EnsureReport(result)
     }

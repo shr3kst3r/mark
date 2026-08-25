@@ -283,8 +283,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
         let findMenu = NSMenu(title: "Find")
-        // `tag` is how `performFindPanelAction:` is told *which* find action
-        // this is; without it every item means "show the find bar".
+        // `tag` is how the action is told *which* find this is; without it
+        // every item would mean "show the find bar".
+        //
+        // The selector is `MainWindowController`'s, not `NSTextView`'s, and
+        // that is the one deliberate exception to this menu being all
+        // inherited behaviour. There are two find bars now — the editor's,
+        // which is `NSTextView`'s and free, and the preview's, which searches
+        // a `WKWebView` and cannot be. `performFindPanelAction:` would be
+        // swallowed by whichever text view happened to hold the focus (the
+        // find field's own field editor included), so the fork is made once,
+        // explicitly, in `performFindAction(_:)`, which hands the editor's
+        // items straight back to `NSTextView`.
         let findActions: [(String, String, NSEvent.ModifierFlags, NSTextFinder.Action)] = [
             ("Find…", "f", [.command], .showFindInterface),
             ("Find Next", "g", [.command], .nextMatch),
@@ -295,7 +305,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         for (title, key, modifiers, action) in findActions {
             let item = findMenu.addItem(
                 withTitle: title,
-                action: #selector(NSTextView.performFindPanelAction(_:)),
+                action: #selector(MainWindowController.performFindAction(_:)),
                 keyEquivalent: key)
             item.keyEquivalentModifierMask = modifiers
             item.tag = action.rawValue
@@ -347,6 +357,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             withTitle: "Show Editor",
             action: #selector(MainWindowController.toggleEditorPane(_:)), keyEquivalent: "e"
         ).keyEquivalentModifierMask = [.command, .option]
+        // The sidebar's lower half. A toggle rather than a preference because
+        // it is a thing you want for a long document and not for a short one,
+        // and ⌃⌘S — which hides the whole sidebar — is too coarse to be the
+        // only answer.
+        viewMenu.addItem(
+            withTitle: "Show Table of Contents",
+            action: #selector(MainWindowController.toggleTableOfContents(_:)), keyEquivalent: "t"
+        ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 
         // M8's sidebar toggles. Both are `NSMenuItem`s with a checkmark rather

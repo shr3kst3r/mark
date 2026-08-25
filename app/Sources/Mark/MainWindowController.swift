@@ -22,11 +22,25 @@ import Foundation
 public final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     public let sidebar: TreeViewController
+
+    /// The sidebar's lower half: the front document's headings, clickable.
+    public let toc: TableOfContentsViewController
+
+    /// The two of them, stacked. One sidebar still, as ADR-4 requires.
+    public let sidebarPane: SidebarPaneController
+
     public let tabs: TabStore
     public let tabBar: TabBarView
 
     /// Where the resident web views live, stacked. Exactly one is unhidden.
     public let documentContainer: DocumentContainerView
+
+    /// ⌘F's bar, along the bottom of the preview. Hidden until asked for.
+    public let findBar: FindBar
+
+    /// The stacked web views with the find bar under them — the preview column
+    /// of ``editorSplit``.
+    public let previewPane: PreviewPaneView
 
     /// M9's third pane: the markdown source of the selected tab.
     ///
@@ -89,6 +103,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     public init(root: URL, session: Session = Session()) {
         self.session = session
         sidebar = TreeViewController(root: root)
+        toc = TableOfContentsViewController()
+        sidebarPane = SidebarPaneController(tree: sidebar, contents: toc)
         tabs = TabStore()
         tabBar = TabBarView(store: tabs)
         documentContainer = DocumentContainerView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
@@ -105,10 +121,19 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         editor.isHidden = true
         conflicts = ConflictController()
 
+        findBar = FindBar(
+            frame: NSRect(x: 0, y: 0, width: 900, height: FindBar.barHeight))
+        findBar.isHidden = true
+        previewPane = PreviewPaneView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 700),
+            findBar: findBar,
+            container: documentContainer
+        )
+
         editorSplit = NSSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
         editorSplit.isVertical = true
         editorSplit.dividerStyle = .thin
-        editorSplit.addSubview(documentContainer)
+        editorSplit.addSubview(previewPane)
         editorSplit.addSubview(editor)
 
         let documentArea = DocumentAreaView(
@@ -122,7 +147,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         documentController.view = documentArea
 
         let splitViewController = NSSplitViewController()
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarPane)
         sidebarItem.minimumThickness = 160
         sidebarItem.maximumThickness = 480
         sidebarItem.canCollapse = true
@@ -202,6 +227,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         documentArea.onDrop = { [weak self] urls in
             self?.sidebar.handleDrop(urls) ?? false
         }
+        // Picking a heading scrolls the preview to it — the sidebar's other
+        // half answers "which file", this one answers "where in it".
+        toc.onSelect = { [weak self] heading in
+            self?.scrollToHeading(heading)
+        }
+        findBar.onQueryChanged = { [weak self] query in
+            self?.search(query)
+        }
+        findBar.onNext = { [weak self] in self?.findNext() }
+        findBar.onPrevious = { [weak self] in self?.findPrevious() }
+        findBar.onClose = { [weak self] in self?.setFindBarVisible(false) }
         tabBar.reload()
         updateChrome()
     }
@@ -328,8 +364,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                     )
                     continue
                 }
-                _Concurrency.Task { @MainActor in
+                _Concurrency.Task { @MainActor [weak self] in
                     await view.apply(source: source)
+                    self?.refreshFind()
                 }
             }
         }
@@ -456,14 +493,27 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The one place the preview is fed while a tab is dirty, and it feeds it
     /// the **buffer**, never the file.
     private func updatePreview(of tab: DocumentTab, from source: String) {
+        // The outline is a function of the document, so it has to move when the
+        // document does. This is the only edit path that changes the headings
+        // without changing dirtiness — `onDirtyChanged` catches the first
+        // keystroke and the save, and every keystroke in between lands here.
+        // It costs the same background `toc` call the tab bar's badge already
+        // pays for, against the buffer rather than the file.
+        tab.refreshMetadata { [weak self] in
+            self?.tabBar.reload()
+            self?.updateTableOfContents()
+        }
         guard let view = tab.documentView else {
             // ADR-6's last constraint: *"the editor pane must not assume a
             // `WKWebView` exists"*. There is nothing to patch, and the tab
             // re-renders from the buffer when it rehydrates.
             return
         }
-        _Concurrency.Task { @MainActor in
+        _Concurrency.Task { @MainActor [weak self] in
             await view.apply(source: source)
+            // The patch replaced block elements, and every find range pointed
+            // into one of them.
+            self?.refreshFind()
         }
     }
 
@@ -488,6 +538,168 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         if saved > 0 { Log.core.info("flushed \(saved) dirty buffer(s)") }
         return saved
+    }
+
+    // MARK: - The table of contents
+
+    /// Show the selected document's headings in the sidebar's lower half.
+    ///
+    /// Called from ``updateChrome()``, which is the one place that already runs
+    /// on every tab switch, every tab-list change, and every metadata load —
+    /// so there is no second list of "things that should also refresh the
+    /// outline" to forget to update. ``TableOfContentsViewController/show(_:for:)``
+    /// compares before it rebuilds, so calling it that often costs an array
+    /// comparison rather than a reload.
+    private func updateTableOfContents() {
+        let tab = tabs.selected
+        toc.show(tab?.metadata?.headings ?? [], for: tab?.url)
+    }
+
+    /// Scroll the preview to `heading`.
+    ///
+    /// The same path `mark goto` takes — `shell.js`'s `scrollToAnchor`, which
+    /// forces ADR-2's background fill first, because a heading three quarters
+    /// of the way down a long document is not in the DOM until it does.
+    ///
+    /// Focus deliberately stays where it was. Clicking a heading and having the
+    /// window take the focus away would mean ↑/↓ stopped walking the outline
+    /// after the first use, which is the opposite of what a table of contents
+    /// is for.
+    public func scrollToHeading(_ heading: Heading) {
+        guard let view = documentView else { return }
+        Log.app.info("goto #\(heading.anchor, privacy: .public)")
+        _Concurrency.Task { @MainActor in
+            _ = try? await view.scrollToAnchor(heading.anchor)
+        }
+    }
+
+    // MARK: - Finding in the document
+
+    /// The string the preview is currently showing matches for.
+    private var findQuery = ""
+
+    /// Bumped on every search, so a slow answer for a query the reader has
+    /// already typed past cannot overwrite a newer one.
+    private var findGeneration = 0
+
+    public var isFindBarVisible: Bool { !findBar.isHidden }
+
+    /// Show or hide ⌘F's bar.
+    ///
+    /// Hiding it drops the highlights as well as the bar. Leaving twelve
+    /// yellow words behind after the bar has gone would look like the document
+    /// had been marked up rather than searched.
+    public func setFindBarVisible(_ visible: Bool) {
+        guard visible != isFindBarVisible else { return }
+        findBar.isHidden = !visible
+        previewPane.needsLayout = true
+        findBar.needsLayout = true
+        findBar.needsDisplay = true
+        guard !visible else { return }
+        findQuery = ""
+        findGeneration += 1
+        findBar.query = ""
+        findBar.report(nil)
+        if let view = documentView {
+            _Concurrency.Task { @MainActor in await view.clearFind() }
+            window?.makeFirstResponder(view.webView)
+        }
+    }
+
+    /// ⌘F.
+    public func showFindBar() {
+        setFindBarVisible(true)
+        previewPane.layoutSubtreeIfNeeded()
+        findBar.focus()
+    }
+
+    /// ⌘G, ↩, and the bar's down arrow.
+    public func findNext() {
+        advance(forward: true)
+    }
+
+    /// ⇧⌘G, ⇧↩, and the bar's up arrow.
+    public func findPrevious() {
+        advance(forward: false)
+    }
+
+    /// Move to the next or previous match, wrapping at both ends.
+    ///
+    /// A step through ranges the page has already built, not another search —
+    /// which is what makes holding ⌘G down feel like cycling rather than like
+    /// re-running a query twelve times.
+    private func advance(forward: Bool) {
+        guard isFindBarVisible, !findQuery.isEmpty else {
+            // ⌘G with nothing to repeat is a request for the bar, not a beep.
+            showFindBar()
+            return
+        }
+        guard let view = documentView else { return }
+        findGeneration += 1
+        let generation = findGeneration
+        _Concurrency.Task { @MainActor [weak self] in
+            let result = await view.stepFind(forward: forward)
+            guard let self, generation == self.findGeneration else { return }
+            self.findBar.report(result)
+        }
+    }
+
+    /// ⌘E — take the query from what the reader has selected in the preview.
+    public func useSelectionForFind() {
+        guard let view = documentView else { return }
+        _Concurrency.Task { @MainActor [weak self] in
+            let selection = await view.selectedText()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let self, !selection.isEmpty else { return }
+            self.setFindBarVisible(true)
+            self.findBar.query = selection
+            self.search(selection)
+        }
+    }
+
+    /// Search the preview, highlight every match, and report the position.
+    private func search(_ query: String) {
+        findQuery = query
+        findGeneration += 1
+        let generation = findGeneration
+        guard let view = documentView else {
+            findBar.report(query.isEmpty ? nil : FindResult.empty)
+            return
+        }
+        guard !query.isEmpty else {
+            findBar.report(nil)
+            _Concurrency.Task { @MainActor in await view.clearFind() }
+            return
+        }
+        _Concurrency.Task { @MainActor [weak self] in
+            let result = await view.find(query)
+            guard let self, generation == self.findGeneration else { return }
+            self.findBar.report(result)
+        }
+    }
+
+    /// Run the current search again, because the document underneath it moved.
+    ///
+    /// Every range the page holds points into a block element, and a patch
+    /// replaces block elements — so an edit, an external change, or a tab
+    /// switch leaves the highlights stale. `shell.js` drops them on every
+    /// document mutation; this is what puts them back.
+    private func refreshFind() {
+        guard isFindBarVisible, !findQuery.isEmpty else { return }
+        search(findQuery)
+    }
+
+    /// Whether the caret is in the editor pane's text view.
+    ///
+    /// The fork every Find menu item takes. ADR-6 chose `NSTextView` for the
+    /// editor *"precisely so that undo, Find & Replace, spellcheck and text
+    /// substitution come for free"*, so when the editor has the focus its own
+    /// find bar is the right answer and this window has nothing to add.
+    var editorHasFocus: Bool {
+        guard isEditorVisible, let responder = window?.firstResponder as? NSView else {
+            return false
+        }
+        return responder === editor.textView || responder.isDescendant(of: editor.textView)
     }
 
     // MARK: - Session
@@ -575,6 +787,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         window?.title = selected?.title ?? "mark"
         window?.representedURL = selected?.url
         emptyStateLabel.isHidden = !tabs.isEmpty
+        updateTableOfContents()
         if tabBar.isHidden != tabs.isEmpty {
             tabBar.isHidden = tabs.isEmpty
             tabBar.superview?.needsLayout = true
@@ -694,6 +907,9 @@ extension MainWindowController: TabStoreDelegate {
         }
         tabBar.reload()
         updateChrome()
+        // The bar stays open across a switch, and its highlights were the
+        // other document's. The new document has none until this runs.
+        refreshFind()
         saveSessionSoon()
     }
 }
@@ -1083,6 +1299,40 @@ extension MainWindowController: NSMenuItemValidation {
         sidebar.focusPathBar()
     }
 
+    /// ⌃⌘T — show or hide the sidebar's table of contents.
+    @objc public func toggleTableOfContents(_ sender: Any?) {
+        sidebarPane.setContentsVisible(!sidebarPane.isContentsVisible)
+    }
+
+    /// Every item in the Edit ▸ Find submenu, told apart by `tag`.
+    ///
+    /// A selector of our own rather than `performFindPanelAction:`, and the
+    /// difference matters. That selector is `NSTextView`'s, so AppKit dispatches
+    /// it to the first responder that implements it — which, with the caret in
+    /// a search field or the focus anywhere near a text view, is never this
+    /// window. Routing every Find item here instead makes the fork explicit and
+    /// puts it in one place: the editor's text view when it has the focus, the
+    /// preview otherwise.
+    @objc public func performFindAction(_ sender: Any?) {
+        let tag = (sender as? NSMenuItem)?.tag
+        let action = tag.flatMap(NSTextFinder.Action.init(rawValue:)) ?? .showFindInterface
+        if editorHasFocus {
+            editor.textView.performFindPanelAction(sender)
+            return
+        }
+        switch action {
+        case .showFindInterface: showFindBar()
+        case .hideFindInterface: setFindBarVisible(false)
+        case .nextMatch: findNext()
+        case .previousMatch: findPrevious()
+        case .setSearchString: useSelectionForFind()
+        default:
+            // Replace and its relatives belong to the editor. The preview is
+            // rendered output; there is nothing there to write through to.
+            NSSound.beep()
+        }
+    }
+
     /// ⌥⌘F — put the caret in the sidebar's filter field.
     @objc public func focusSidebarFilter(_ sender: Any?) {
         guard let field = sidebar.filterField else { return }
@@ -1161,6 +1411,24 @@ extension MainWindowController: NSMenuItemValidation {
             return tabs.selected != nil && tabs.selected?.isDirty != true
         case #selector(closeTab(_:)):
             return tabs.selected != nil
+        case #selector(toggleTableOfContents(_:)):
+            item.state = sidebarPane.isContentsVisible ? .on : .off
+            return true
+        case #selector(performFindAction(_:)):
+            // The editor's find bar can do everything `NSTextFinder` defines,
+            // including Replace; the preview's can do the four that make sense
+            // for something you cannot type into.
+            if editorHasFocus { return true }
+            switch NSTextFinder.Action(rawValue: item.tag) ?? .showFindInterface {
+            case .showFindInterface, .setSearchString:
+                return tabs.selected != nil
+            case .nextMatch, .previousMatch:
+                return tabs.selected != nil && !findQuery.isEmpty
+            case .hideFindInterface:
+                return isFindBarVisible
+            default:
+                return false
+            }
         case #selector(navigateToParent(_:)):
             return sidebar.navigator.canGoUp
         case #selector(navigateBack(_:)):
@@ -1232,6 +1500,80 @@ extension MainWindowController: @MainActor NSSplitViewDelegate {
 
 // MARK: - Layout
 
+/// How far down a piece of chrome has to start to clear the title bar.
+///
+/// The window carries `.fullSizeContentView` (M2's choice, unchanged here), so
+/// the content view extends *under* the title bar and a bar at y = 0 is drawn
+/// behind the traffic lights and the window title. The first screenshot of M3
+/// showed the first tab as a smear behind the title text; no test caught it,
+/// and none would have.
+///
+/// `safeAreaInsets` is the documented answer and is the first thing tried. It
+/// is **0** for the content item: `NSSplitViewController` applies the title-bar
+/// allowance to its *sidebar* item and leaves the other flush with the top of
+/// the content view. So the allowance is derived from the window directly when
+/// AppKit does not supply one, and only for a view that really does reach the
+/// top.
+///
+/// - Parameter view: a **flipped** view, so that its (0, 0) is its top-left.
+@MainActor
+func titlebarInset(for view: NSView) -> CGFloat {
+    if view.safeAreaInsets.top > 0 { return view.safeAreaInsets.top }
+    guard let window = view.window, let content = window.contentView else { return 0 }
+    let titlebar = content.bounds.height - window.contentLayoutRect.height
+    guard titlebar > 0 else { return 0 }
+    // The caller is flipped, so its origin in the content view's unflipped
+    // coordinates is the max-y edge.
+    let top = view.convert(NSPoint.zero, to: content)
+    return top.y >= content.bounds.maxY - 0.5 ? titlebar : 0
+}
+
+/// The preview column: the stacked web views, with ⌘F's bar along the bottom.
+///
+/// The find bar belongs to the *preview*, not to the window, which is why it
+/// lives here rather than beside the tab bar: with the editor pane open the two
+/// halves have separate find bars — this one, and `NSTextView`'s own — and a
+/// bar spanning both would be claiming to search text it has never looked at.
+@MainActor
+public final class PreviewPaneView: NSView {
+
+    private let findBar: FindBar
+    /// Typed as `NSView` for the same reason ``DocumentAreaView``'s is: this
+    /// view's job is two frames and a subtraction.
+    private let container: NSView
+
+    /// **Order matters, and it cost a debugging session to find out.** The
+    /// container holds `WKWebView`s, which are layer-*hosted*: their layer is
+    /// composited by WebKit, and a sibling added before them is painted over
+    /// wholesale — not clipped to the overlap, painted over. The find bar added
+    /// first drew nothing at all on screen while rendering perfectly in an
+    /// offscreen snapshot, which is exactly how that failure presents.
+    public init(frame: NSRect, findBar: FindBar, container: NSView) {
+        self.findBar = findBar
+        self.container = container
+        super.init(frame: frame)
+        addSubview(container)
+        addSubview(findBar)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("PreviewPaneView is created in code, not from a nib")
+    }
+
+    public override var isFlipped: Bool { true }
+
+    public override func layout() {
+        let barHeight = findBar.isHidden ? 0 : FindBar.barHeight
+        container.frame = NSRect(
+            x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - barHeight))
+        findBar.frame = NSRect(
+            x: 0, y: bounds.height - FindBar.barHeight, width: bounds.width,
+            height: FindBar.barHeight)
+        super.layout()
+    }
+}
+
 /// The document half of the split: the tab bar on top, the web views below.
 ///
 /// Frame-based rather than autolayout for the same reason the stacked document
@@ -1287,32 +1629,8 @@ public final class DocumentAreaView: NSView {
 
     public override var isFlipped: Bool { true }
 
-    /// How far down the tab bar has to start to clear the title bar.
-    ///
-    /// The window carries `.fullSizeContentView` (M2's choice, unchanged
-    /// here), so the content view extends *under* the title bar and a tab bar
-    /// at y = 0 is drawn behind the traffic lights and the window title. The
-    /// first screenshot of this milestone showed the first tab as a smear
-    /// behind the title text; no test caught it, and none would have.
-    ///
-    /// `safeAreaInsets` is the documented answer and is **0** here:
-    /// `NSSplitViewController` applies the title-bar allowance to its *sidebar*
-    /// item, and the content item's view is left flush with the top of the
-    /// content view. So the allowance is derived from the window directly, and
-    /// only when this view really does reach the top.
-    var titlebarInset: CGFloat {
-        if safeAreaInsets.top > 0 { return safeAreaInsets.top }
-        guard let window, let content = window.contentView else { return 0 }
-        let titlebar = content.bounds.height - window.contentLayoutRect.height
-        guard titlebar > 0 else { return 0 }
-        // This view is flipped, so its (0, 0) is the top-left; in the content
-        // view's unflipped coordinates that is the max-y edge.
-        let top = convert(NSPoint.zero, to: content)
-        return top.y >= content.bounds.maxY - 0.5 ? titlebar : 0
-    }
-
     public override func layout() {
-        let top = titlebarInset
+        let top = titlebarInset(for: self)
         let barHeight = tabBar.isHidden ? 0 : TabBarView.barHeight
         tabBar.frame = NSRect(
             x: 0, y: top, width: bounds.width, height: TabBarView.barHeight)

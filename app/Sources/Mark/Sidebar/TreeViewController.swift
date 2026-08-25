@@ -821,9 +821,14 @@ public final class SidebarContainerView: NSView {
     public override func layout() {
         backing.frame = bounds
         // `NSSplitViewController` applies the title-bar allowance to its
-        // *sidebar* item, so unlike `DocumentAreaView` this really does get a
-        // non-zero `safeAreaInsets.top` and does not have to derive one.
-        let top = safeAreaInsets.top
+        // *sidebar* item, and since the sidebar became a split of its own this
+        // view is that item's *grandchild* rather than its view. AppKit
+        // propagates the safe area down, so the inset normally arrives here
+        // anyway; `titlebarInset(for:)` is the belt to that braces, and the
+        // reason it is a shared function is that getting this wrong is
+        // invisible until someone runs the app and finds the breadcrumb bar
+        // drawn behind the traffic lights.
+        let top = titlebarInset(for: self)
         let filterHeight: CGFloat = 24
         breadcrumbBar.frame = NSRect(
             x: 0, y: top, width: bounds.width, height: BreadcrumbBar.barHeight)

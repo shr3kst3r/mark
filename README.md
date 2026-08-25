@@ -3,16 +3,17 @@
 A fast native markdown viewer and editor for macOS, with a headless CLI that is
 fast enough to call in a loop.
 
-Three panes in one window — a directory sidebar, a rendered preview, and an
-optional source editor. Tabs. Sixteen themes that follow the system appearance
-instantly. Math and Mermaid diagrams rendered ahead of time in Rust, so a
-document ships no JavaScript. Click a checkbox and it writes one byte to your
-file; edit in the third pane and autosave writes 800 ms after you stop typing.
-The `mark` CLI does everything the window does, and drives the running app over
-a Unix socket.
+Three panes in one window — a directory sidebar that also holds the front
+document's table of contents, a rendered preview, and an optional source editor.
+Tabs. Find-in-document that highlights every match at once. Sixteen themes that
+follow the system appearance instantly. Math and Mermaid diagrams rendered ahead
+of time in Rust, so a document ships no JavaScript. Click a checkbox and it
+writes one byte to your file; edit in the third pane and autosave writes 800 ms
+after you stop typing. The `mark` CLI does everything the window does, and
+drives the running app over a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-382 Rust tests, 292 Swift tests, 43 integration checks, and committed
+400 Rust tests, 376 Swift tests, 43 integration checks, and committed
 performance gates.
 
 ## Install
@@ -84,6 +85,25 @@ destination is refused rather than overwritten.
 > the path bar does — laying out, truncating, navigating — reads a directory,
 > which is what keeps it affordable on the 608k-file tree the sidebar is built
 > against.
+
+**Under the tree, the front document's table of contents.** Its headings,
+nested by level, following whichever tab is selected — click one and the
+preview scrolls to it, the same jump `mark goto '#install'` makes. It costs no
+extra file read: the headings come from the `toc` call the tab bar's badge
+already pays for, so a tab whose web view has been torn down still has a correct
+outline. ⌃⌘T hides the pane; ⌃⌘S still hides the whole sidebar. Drag the divider
+to say how the two halves share the height.
+
+**Find in the document** with ⌘F, in a bar along the bottom edge. Every match is
+highlighted at once and the current one is picked out; ⌘G and ⇧⌘G — or ↩, ⇧↩,
+and the bar's own arrows — cycle through them, wrapping at both ends, and the
+bar says which of how many you are on. It searches the *rendered* text, so a
+link's target and a task's `- [ ]` are not matches. The highlights are painted
+with the CSS Custom Highlight API rather than with `<mark>` elements, which is
+what lets them coexist with the block patcher: no node is added to the document,
+so an edit still diffs against the core's render rather than against a
+marked-up copy of it. On macOS 14.0 and 14.1, whose WebKit predates that API,
+the search and the cycling work and only the current match is highlighted.
 
 **Tabs**, in a hand-built bar with per-tab open-task badges, drag reordering, and
 the accessibility roles VoiceOver needs. Only the three most recently used tabs

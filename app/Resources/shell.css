@@ -91,6 +91,33 @@ body.mk-doc {
   margin: 0 0 1rem;
 }
 
+/*
+ * Find-in-document (`shell.js`'s `mark.find`).
+ *
+ * `::highlight()` paints ranges the page registered with `CSS.highlights`
+ * without a single node being added to the document — which is the whole
+ * reason find is built on the Custom Highlight API rather than on `<mark>`
+ * elements. ADR-2's patcher diffs these blocks against the core's render, and
+ * a highlight made of real elements would make it diff the document against a
+ * marked-up copy of itself.
+ *
+ * The two base16 slots rather than named roles, because every theme has all
+ * sixteen and only some define an "accent" that reads as a highlight: `0A` is
+ * the yellow every base16 palette carries, `09` its orange. `00` is the
+ * background, and it is the text colour here precisely because these two are
+ * light in dark themes and dark in light ones — the pair inverts with the
+ * theme without a second rule.
+ */
+::highlight(mk-find) {
+  background-color: var(--mk-s0A);
+  color: var(--mk-s00);
+}
+
+::highlight(mk-find-current) {
+  background-color: var(--mk-s09);
+  color: var(--mk-s00);
+}
+
 .mk-h {
   line-height: 1.25;
   margin: 1.8rem 0 0.6rem;

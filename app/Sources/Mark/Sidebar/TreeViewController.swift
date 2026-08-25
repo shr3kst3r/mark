@@ -309,6 +309,57 @@ public final class TreeViewController: NSViewController {
         return select(node)
     }
 
+    // MARK: - Following the front document
+
+    /// Set while the tree is moving its own selection to the front document,
+    /// so ``outlineViewSelectionDidChange(_:)`` does not report that selection
+    /// back as a file the user picked.
+    private var isFollowing = false
+
+    /// Keep the tree's selection on the document the window is showing.
+    ///
+    /// Called on every tab switch, so switching files with ⌃⇥, the tab bar, or
+    /// `mark select` moves the sidebar to that file — expanding the
+    /// directories between the root and it and scrolling the row into view —
+    /// rather than leaving the tree pointing at whatever was clicked last.
+    ///
+    /// Deliberately **not** ``reveal(_:)``, in the two ways that matter:
+    ///
+    /// * **It never moves the root.** The root is a place the reader chose, it
+    ///   is recorded in the session file, and it has a history behind ⌘[. A
+    ///   file outside it deselects instead, because a tab switch is not an
+    ///   instruction about where to be — and a pair of tabs in different
+    ///   directories would otherwise yank the root back and forth on every
+    ///   ⌃⇥ and fill the back stack doing it. ⌘⇧O is still there for *"go and
+    ///   get it, wherever it is"*.
+    /// * **It never clears the filter.** A filter is a thing you are doing;
+    ///   the tree following along behind you is not a reason to cancel it.
+    ///
+    /// Costs one directory read per level between the root and the file, and
+    /// nothing at all when the row is already selected — which is the common
+    /// case of clicking a file in the tree, since that selection is what
+    /// opened the tab.
+    ///
+    /// - Returns: whether the file's row is now the selection.
+    @discardableResult
+    public func follow(_ url: URL?) -> Bool {
+        guard let outlineView else { return false }
+        let target = url?.standardizedFileURL
+        if let target, selectedNode?.url.standardizedFileURL == target { return true }
+
+        isFollowing = true
+        defer { isFollowing = false }
+
+        guard let target, let node = expandChain(to: target), select(node) else {
+            // The tree cannot show it — it is outside the root, or hidden by a
+            // toggle or the filter — so it must not go on claiming to be
+            // showing something else.
+            outlineView.deselectAll(nil)
+            return false
+        }
+        return true
+    }
+
     /// ⌘⌥R — hand the file to Finder.
     public func revealInFinder(_ url: URL?) {
         guard let url else { return }
@@ -569,6 +620,10 @@ extension TreeViewController: NSOutlineViewDelegate {
     }
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
+        // A selection the tree made itself, following the front document, is
+        // not the user asking for a file: reporting it would ask the tab store
+        // to open the very tab whose switch caused it.
+        guard !isFollowing else { return }
         guard let node = outlineView.item(atRow: outlineView.selectedRow) as? TreeNode else {
             return
         }

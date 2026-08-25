@@ -100,6 +100,10 @@ struct SessionTests {
         relaunched.restore(snapshot)
         #expect(relaunched.sidebar.root.standardizedFileURL == fixture.directory.standardizedFileURL)
         #expect(relaunched.tabs.tabs.map(\.title) == ["a.md"])
+        // The tree follows the front document (issue #7), and a restore is the
+        // first switch of the launch — so a relaunch comes back with the
+        // reopened document selected rather than with nothing selected.
+        #expect(relaunched.sidebar.selectedNode?.url.lastPathComponent == "a.md")
     }
 
     /// The M8 gate: *"breadcrumb, root, and history survive a session

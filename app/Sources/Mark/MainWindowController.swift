@@ -657,6 +657,11 @@ extension MainWindowController: TabStoreDelegate {
             view.isHidden = false
         }
         Log.signposter.endInterval("tab switch", state)
+        // The sidebar follows the selection too, so the tree is always
+        // pointing at the document on screen (issue #7). Outside the signpost
+        // interval on purpose: ADR-4's 0.05 ms is the show/hide, and folding a
+        // directory read into that number would make it stop meaning anything.
+        sidebar.follow(tab?.url)
         // The editor follows the selection. A tab that has never been edited
         // gets its buffer here, but only while the pane is open — an unopened
         // editor reads no files and allocates no buffers.

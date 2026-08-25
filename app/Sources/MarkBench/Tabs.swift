@@ -395,6 +395,11 @@ func runTabGates(corpus: URL) async {
     print("Tab switch — show/hide of a resident view, no re-injection:")
     var showHide = Stat()
     var fullSelect = Stat()
+    // Issue #7's addition to the switch: the sidebar selecting the row of the
+    // document being switched to. It is inside `select + bar + chrome` below,
+    // so the gate already covers it; it is broken out because "the switch got
+    // slower" is not a useful thing to learn without knowing which half did.
+    var sidebarFollow = Stat()
     let tabs = harness.store.tabs
     for round in 0..<6 {
         for (index, tab) in tabs.enumerated() {
@@ -412,14 +417,25 @@ func runTabGates(corpus: URL) async {
             tab.documentView?.isHidden = false
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
 
+            // The sidebar's share, measured from a cleared selection so it
+            // does the real work rather than the already-on-that-row no-op the
+            // switch above just left it in.
+            harness.controller.sidebar.follow(nil)
+            let followStarted = DispatchTime.now().uptimeNanoseconds
+            harness.controller.sidebar.follow(tab.url)
+            let followElapsed =
+                Double(DispatchTime.now().uptimeNanoseconds - followStarted) / 1e6
+
             if round > 0 {
                 showHide.add(elapsed)
                 fullSelect.add(selectElapsed)
+                sidebarFollow.add(followElapsed)
             }
         }
     }
     row("show/hide only", showHide)
     row("select + bar + chrome", fullSelect)
+    row("of which, sidebar follow", sidebarFollow)
     line("research §2.7 measured", "0.05 ms median, 0.23 ms worst")
     require(
         showHide.median <= tabSwitchLimitMs,

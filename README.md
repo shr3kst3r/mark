@@ -12,7 +12,7 @@ The `mark` CLI does everything the window does, and drives the running app over
 a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-382 Rust tests, 276 Swift tests, 43 integration checks, and committed
+382 Rust tests, 292 Swift tests, 43 integration checks, and committed
 performance gates.
 
 ## Install
@@ -56,9 +56,11 @@ Xcode.
 walks ahead of what you have expanded, honours `.gitignore`, and computes per-file
 `3/7` open-task badges in the background rather than on the walk. ⌘↑ moves the
 root to the parent, ⌘[ and ⌘] go back and forward through where you have been,
-and the breadcrumb bar's components are clickable. ⌘⇧O reveals the front
-document in the tree; ⌘⌥R reveals it in Finder. Drop a folder on the window to
-root there.
+and the breadcrumb bar's components are clickable. The tree follows the front
+document: switch tabs and the sidebar expands to that file and selects it,
+without moving the root or clearing your filter. ⌘⇧O is the deliberate version
+that does move the root, for a file outside it; ⌘⌥R reveals it in Finder. Drop a
+folder on the window to root there.
 
 **Tabs**, in a hand-built bar with per-tab open-task badges, drag reordering, and
 the accessibility roles VoiceOver needs. Only the three most recently used tabs

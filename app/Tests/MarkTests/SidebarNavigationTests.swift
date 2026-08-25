@@ -283,6 +283,87 @@ struct SidebarNavigationTests {
         #expect(controller.root.path == fixture.root.path)
     }
 
+    // MARK: - Following the front document
+
+    /// Issue #7: *"When switching files, the tree should jump to that file."*
+    @Test("following the front document expands to it and selects it")
+    func followSelectsTheFrontDocument() throws {
+        let fixture = try SidebarFixture()
+        let (controller, lister) = make(fixture)
+        lister.reset()
+
+        #expect(controller.follow(fixture.url("docs/deep/buried.md")))
+        #expect(controller.selectedNode?.url.lastPathComponent == "buried.md")
+        // Same bound as reveal: one read per level between the root and the
+        // file, and nothing else. `docs` and `docs/deep`.
+        #expect(
+            lister.listings == [fixture.url("docs").path, fixture.url("docs/deep").path],
+            "follow read \(lister.listings)")
+
+        // Following the row that is already selected reads nothing at all,
+        // which is the common case: clicking a file in the tree is what
+        // selected it and what opened the tab.
+        lister.reset()
+        #expect(controller.follow(fixture.url("docs/deep/buried.md")))
+        #expect(lister.count == 0, "a redundant follow read \(lister.listings)")
+    }
+
+    /// The one deliberate difference from ⌘⇧O. A tab switch is not an
+    /// instruction about where the sidebar should be rooted, and two tabs in
+    /// different directories would otherwise drag the root back and forth on
+    /// every ⌃⇥.
+    @Test("following a file outside the root deselects instead of moving the root")
+    func followNeverMovesTheRoot() throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        #expect(controller.follow(fixture.url("top.md")))
+        #expect(controller.selectedNode?.url.lastPathComponent == "top.md")
+
+        let outside = fixture.elsewhere.appendingPathComponent("outside.md")
+        #expect(!controller.follow(outside))
+        #expect(controller.root.path == fixture.root.path, "follow moved the root")
+        #expect(controller.navigator.back.isEmpty, "follow pushed history")
+        // And it does not go on pointing at the file the reader has switched
+        // away from.
+        #expect(controller.selectedNode == nil)
+    }
+
+    /// The other difference: ``TreeViewController/reveal(_:)`` clears a filter
+    /// that hides its target, because the user asked for that row by name. A
+    /// filter is a thing you are doing, and the tree keeping up with you is not
+    /// a reason to cancel it.
+    @Test("following does not clear the filter the way reveal does")
+    func followLeavesTheFilterAlone() throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        controller.filter = "zzzz-matches-nothing"
+        #expect(!controller.follow(fixture.url("docs/guide.md")))
+        #expect(controller.filter == "zzzz-matches-nothing")
+        #expect(controller.selectedNode == nil)
+    }
+
+    /// The feedback loop this would otherwise be: the tree follows a tab
+    /// switch, the selection it makes is reported as the user picking a file,
+    /// and the store is asked to open the tab it just switched to.
+    @Test("the selection a follow makes is not reported back as a file the user picked")
+    func followDoesNotReportASelection() throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        var opened: [URL] = []
+        controller.onSelect = { opened.append($0) }
+
+        #expect(controller.follow(fixture.url("docs/guide.md")))
+        #expect(opened.isEmpty, "follow asked for \(opened.map(\.lastPathComponent)) to be opened")
+
+        // The user picking that same row still does report it — the follow
+        // suppressed one selection, not the delegate.
+        let guide = try #require(node(controller, named: "guide.md"))
+        let row = controller.outlineView.row(forItem: guide)
+        controller.outlineView.deselectAll(nil)
+        controller.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        #expect(opened.map(\.lastPathComponent) == ["guide.md"])
+    }
+
     // MARK: - Badges
 
     /// The gate: *"badges appear progressively without blocking the tree, and

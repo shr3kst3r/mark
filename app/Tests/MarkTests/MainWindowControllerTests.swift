@@ -149,6 +149,60 @@ struct MainWindowControllerTests {
         #expect(controller.sidebar.navigator.canGoBack)
     }
 
+    /// Issue #7: *"When switching files, the tree should jump to that file."*
+    ///
+    /// Through the store rather than through ``TreeViewController/follow(_:)``
+    /// directly, because the wiring is the thing that was missing: ⌃⇥, the tab
+    /// bar, `mark select`, and a close picking a successor all switch tabs by
+    /// the same route, and the sidebar has to follow all four.
+    @Test("switching tabs moves the sidebar's selection to the new document")
+    func sidebarFollowsTheSelectedTab() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        _ = controller.sidebar.view
+
+        controller.open(fixture.file(named: "a.md"))
+        #expect(controller.sidebar.selectedNode?.url.lastPathComponent == "a.md")
+        controller.open(fixture.file(named: "b.md"))
+        #expect(controller.sidebar.selectedNode?.url.lastPathComponent == "b.md")
+
+        controller.tabs.selectPrevious()
+        #expect(controller.sidebar.selectedNode?.url.lastPathComponent == "a.md")
+
+        // The selection the tree made must not come back round as "the user
+        // picked this file": two tabs went in, two tabs are open, in order.
+        #expect(controller.tabs.tabs.map(\.url.lastPathComponent) == ["a.md", "b.md"])
+    }
+
+    /// The sidebar root is a place the reader chose, it is in the session file,
+    /// and ⌘[ goes back through it. ⌘⇧O moves it on demand
+    /// (``revealFromOutsideTheRoot``); a tab switch does not.
+    @Test("a tab outside the sidebar's root clears the selection instead of moving it")
+    func sidebarFollowStopsAtTheRoot() throws {
+        let fixture = try TabFixture()
+        let elsewhere = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mark-elsewhere-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+        let outside = elsewhere.appendingPathComponent("outside.md")
+        try "# outside\n\n- [ ] a task\n".write(to: outside, atomically: true, encoding: .utf8)
+
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        _ = controller.sidebar.view
+        controller.open(fixture.file(named: "a.md"))
+        controller.open(outside)
+
+        #expect(
+            controller.sidebar.root.standardizedFileURL == fixture.directory.standardizedFileURL,
+            "a tab switch moved the sidebar root")
+        #expect(!controller.sidebar.navigator.canGoBack, "a tab switch pushed history")
+        #expect(controller.sidebar.selectedNode == nil)
+
+        // Switching back to a document the tree *can* show selects it again.
+        controller.tabs.select(controller.tabs.tab(for: fixture.file(named: "a.md")))
+        #expect(controller.sidebar.selectedNode?.url.lastPathComponent == "a.md")
+    }
+
     /// Plan §2 M8: *"drop a folder onto the window to set the root"*. Both
     /// halves of the window answer.
     @Test("dropping a folder on either half of the window sets the sidebar root")

@@ -22,11 +22,12 @@ brew tap shr3kst3r/mark https://github.com/shr3kst3r/mark
 brew install --HEAD shr3kst3r/mark/mark
 ```
 
-Updating needs `--fetch-HEAD`, because a head-only formula has no version
-number for Homebrew to compare and it will otherwise report nothing to do:
+Updating needs the full name and `--fetch-HEAD`. `mark` on its own is a
+different formula in homebrew-core, and a head-only formula has no version
+number for Homebrew to compare, so the short command reports nothing to do:
 
 ```sh
-brew update && brew upgrade --fetch-HEAD mark
+brew update && brew upgrade --fetch-HEAD shr3kst3r/mark/mark
 ```
 
 The formula builds from source, which is the point: locally built code is never

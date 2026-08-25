@@ -67,6 +67,16 @@ built. `MARK_ZIP` is where it looks; without it the cask falls back to
 `../target/mark.zip` relative to itself, which only resolves when you tapped a
 local checkout.
 
+The first attempt will refuse:
+
+```
+Error: Refusing to load cask shr3kst3r/mark/mark from untrusted tap shr3kst3r/mark.
+```
+
+Homebrew will not run a cask from a third-party tap until you say so, because a
+cask can run arbitrary code — this one's `postflight` does. `brew trust
+shr3kst3r/mark` clears it. The formula is not subject to this.
+
 Puts the app in `/Applications` the way a cask does, with no build dependencies.
 But a downloaded artifact can be quarantined, `--no-quarantine` was removed in
 Homebrew 4.7, and an ad-hoc-signed quarantined app reports "damaged and can't be
@@ -78,24 +88,46 @@ A cask can install a man page (`manpage`) but has no stanza for shell
 completions, so it prints how to link them instead. One more reason the formula
 is the recommended path.
 
+## `mark` is also a formula in homebrew-core
+
+A different one — a tool that syncs markdown to Confluence. It owns the short
+name, so always say `shr3kst3r/mark/mark`:
+
+```
+$ brew info --formula mark
+==> mark: stable 16.12.1 (bottled), HEAD
+Sync your markdown files with Confluence pages
+```
+
+`brew install mark`, `brew upgrade mark`, and `brew reinstall mark` all resolve
+to that one and not to this one, even while this one is the version installed.
+Homebrew tries its loaders in a fixed order and the homebrew-core API loader runs
+before the ones that would consider a tap or an installed keg, so there is no
+state you can get into where the bare name means ours.
+
+The one thing that does work unqualified is `brew --prefix mark`, and only by
+coincidence: both formulae are named `mark`, so both answer
+`$(brew --prefix)/opt/mark`, which is where our keg is linked. Do not read
+anything into that.
+
 ## Updating
 
 Which command depends on which of the three paths you installed by, and the
 formula's is not the obvious one.
 
 **Formula.** `brew update` refreshes the tap; `--fetch-HEAD` is what makes the
-upgrade look at the upstream repo:
+upgrade look at the upstream repo. Spell the name out in full:
 
 ```sh
 brew update
-brew upgrade --fetch-HEAD mark
+brew upgrade --fetch-HEAD shr3kst3r/mark/mark
 ```
 
-Without `--fetch-HEAD`, `brew upgrade mark` and `brew outdated` both report
-nothing to do no matter how far behind you are. A head-only formula has no
-version number that moves, so Homebrew treats any installed HEAD keg as current
-unless you explicitly ask it to go and compare commits — `head_version_outdated?`
-returns false before it ever looks at the remote. It is not a bug and there is no
+Without `--fetch-HEAD`, `brew upgrade` and `brew outdated` both report nothing to
+do no matter how far behind you are. A head-only formula has no version number
+that moves, so Homebrew treats any installed HEAD keg as current unless you
+explicitly ask it to go and compare commits — `head_version_outdated?` returns
+false before it ever looks at the remote. It is not a bug and there is no
 warning; it just silently does nothing.
 
 Two things worth knowing:
@@ -103,8 +135,9 @@ Two things worth knowing:
 - `brew update` is what picks up changes to the *formula*, since the tap is a
   clone. New commits to `mark` itself only need `--fetch-HEAD`.
 - To rebuild at the same commit — after a toolchain upgrade, say — use
-  `brew reinstall --HEAD mark`. Homebrew keeps the previous keg until the new
-  build succeeds, so a failed rebuild leaves the working install alone.
+  `brew reinstall --HEAD shr3kst3r/mark/mark`. Homebrew keeps the previous keg
+  until the new build succeeds, so a failed rebuild leaves the working install
+  alone.
 
 **Cask.** `brew upgrade --cask` will not do it. The cask's `version` is a literal
 `"0.1.0"` and its `sha256` is `:no_check`, so nothing Homebrew compares ever

@@ -130,7 +130,31 @@ explicitly ask it to go and compare commits — `head_version_outdated?` returns
 false before it ever looks at the remote. It is not a bug and there is no
 warning; it just silently does nothing.
 
-Two things worth knowing:
+`--fetch-HEAD` only works because the formula says `using: :git`, and that is
+worth spelling out because the failure it avoids looks exactly like success.
+Homebrew picks a download strategy from the URL, and a bare
+`https://github.com/<user>/<repo>.git` gets `GitHubGitDownloadStrategy`, which
+resolves "the latest commit" by asking the GitHub REST API rather than by
+fetching. It sends that request unauthenticated — `GitHub.last_commit` calls
+curl with an `Accept` header and nothing else, so `HOMEBREW_GITHUB_API_TOKEN`
+does not enter into it — and this repo is private, so the API answers 404. The
+strategy then falls back to `git rev-parse HEAD` in Homebrew's cached clone of
+the repo, and nothing on that path ever fetches, so the cache still holds the
+commit you last installed. "Latest HEAD" comes back equal to the installed HEAD
+and you get:
+
+```
+Warning: shr3kst3r/mark/mark HEAD-5bb4c6a already installed
+```
+
+forever, however far behind you are. `brew outdated --fetch-HEAD` disagrees and
+correctly says you are behind — it reaches that answer down a different code
+path — which is how this got noticed. `using: :git` forces the plain
+`GitDownloadStrategy`, whose `commit_outdated?` runs a real `git fetch` with
+your credentials and compares real commits. Making the repo public would also
+fix it; the formula does not rely on that happening.
+
+Three things worth knowing:
 
 - `brew update` is what picks up changes to the *formula*, since the tap is a
   clone. New commits to `mark` itself only need `--fetch-HEAD`.
@@ -138,6 +162,9 @@ Two things worth knowing:
   `brew reinstall --HEAD shr3kst3r/mark/mark`. Homebrew keeps the previous keg
   until the new build succeeds, so a failed rebuild leaves the working install
   alone.
+- If you are stuck on the old formula, `brew update` first. The `using: :git`
+  fix lives in the formula, so an upgrade run against the tap you already have
+  is the broken one.
 
 **Cask.** `brew upgrade --cask` will not do it. The cask's `version` is a literal
 `"0.1.0"` and its `sha256` is `:no_check`, so nothing Homebrew compares ever

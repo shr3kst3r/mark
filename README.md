@@ -30,6 +30,11 @@ number for Homebrew to compare, so the short command reports nothing to do:
 brew update && brew upgrade --fetch-HEAD shr3kst3r/mark/mark
 ```
 
+`brew update` first is not optional. It is what refreshes the tap, and until the
+tap is refreshed Homebrew resolves the head with a strategy that cannot see past
+its own cache on a private repo — the upgrade then says `already installed` no
+matter how far behind you are. `packaging/README.md` has the details.
+
 The formula builds from source, which is the point: locally built code is never
 quarantined, so Gatekeeper is never consulted — no Developer ID, no
 notarization, no "damaged and can't be opened". It installs the app, puts `mark`

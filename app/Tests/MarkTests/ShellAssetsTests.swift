@@ -85,6 +85,73 @@ struct ShellAssetsTests {
         #expect(ShellAssets.shellURL.scheme == ShellAssets.scheme)
     }
 
+    // MARK: - The installed-app trap
+
+    /// `Bundle.module` is a loaded gun in this target, and the safety is that
+    /// nothing pulls the trigger.
+    ///
+    /// SwiftPM generates it as a `static let` whose initialiser calls
+    /// `fatalError` when it cannot find `Mark_MarkKit.bundle`, and it looks in
+    /// exactly two places: the *root* of `Bundle.main` — `mark.app/`, not
+    /// `mark.app/Contents/Resources/`, which is where
+    /// `scripts/assemble-bundle.sh` puts it — and the absolute `.build` path of
+    /// whatever machine compiled the binary. In this checkout that second path
+    /// exists, so a reference to `Bundle.module` runs fine here and kills the
+    /// app the moment it is installed anywhere else. That shipped: every
+    /// `brew install --HEAD` of mark died on launch with
+    /// `could not load resource bundle`, while `just build` in a worktree was
+    /// fine, because the build directory it named was still on disk.
+    ///
+    /// ``ShellAssets/moduleBundle`` does the same search over `Bundle(url:)`,
+    /// which returns `nil` instead of trapping. Use that.
+    @Test("no MarkKit source references Bundle.module")
+    func sourceNeverTouchesBundleModule() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // MarkTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // app
+            .appendingPathComponent("Sources/Mark")
+        let files = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" } ?? []
+        #expect(!files.isEmpty, "found no Swift sources under \(sources.path)")
+
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            // Explaining the trap in a comment is the point of the comment, so
+            // only code counts.
+            for (number, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated()
+            {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///"), !trimmed.hasPrefix("*")
+                else { continue }
+                let site = "\(file.lastPathComponent):\(number + 1)"
+                #expect(
+                    !trimmed.contains("Bundle.module"),
+                    """
+                    \(site) reads Bundle.module, which fatalErrors in an installed app. \
+                    Use ShellAssets.moduleBundle instead.
+                    """)
+            }
+        }
+    }
+
+    /// The lookup has to be anchored to a bundle that actually holds MarkKit.
+    /// Under `swift test` that is `MarkPackageTests.xctest`, *not*
+    /// `Bundle.main` — which is SwiftPM's helper binary off in
+    /// `/Library/Developer/CommandLineTools`. Getting this wrong does not fail
+    /// a test; it hangs the entire suite before its first line of output, since
+    /// a web view awaiting a shell page that never arrives never returns.
+    @Test("the resource bundle is found from wherever the code is loaded")
+    func moduleBundleResolves() throws {
+        let bundle = try #require(
+            ShellAssets.moduleBundle, "Mark_MarkKit.bundle was not found from any anchor")
+        for name in ShellAssets.served.keys {
+            #expect(bundle.url(forResource: name, withExtension: nil) != nil, "\(name) missing")
+        }
+    }
+
     // MARK: - ADR-2 bans, asserted against the shipped source
 
     /// > **`content-visibility: auto` is not to be reintroduced** without a

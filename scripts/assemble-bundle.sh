@@ -15,7 +15,7 @@
 #       MacOS/mark          <- swift build -c release
 #       MacOS/mark-cli      <- cargo build --release
 #       Resources/          <- shell.html, shell.js, shell.css (+ the SwiftPM
-#                              resource bundle, so Bundle.module resolves)
+#                              resource bundle, found via Bundle.main.resourceURL)
 #       Resources/man/man1/mark.1        <- M10, installed by Formula/mark.rb
 #       Resources/completions/           <- M10, zsh/bash/fish
 #
@@ -128,10 +128,17 @@ cp "${root}/packaging/completions/_mark" \
    "${root}/packaging/completions/mark.fish" \
    "${bundle}/Contents/Resources/completions/"
 
-# ...and SwiftPM's generated resource bundle, so `Bundle.module` resolves in the
-# assembled app too. Belt and braces: it means the same asset lookup works under
-# `swift run`, `swift test`, and here, with no build-configuration branch in the
-# Swift code.
+# ...and SwiftPM's generated resource bundle, as a second copy of the same three
+# assets. `ShellAssets` finds it here through `Bundle.main.resourceURL`, which is
+# what makes one asset lookup work under `swift run`, `swift test`, and here,
+# with no build-configuration branch in the Swift code.
+#
+# Note that plain `Bundle.module` would *not* find it here. SwiftPM's generated
+# accessor looks at `Bundle.main.bundleURL/Mark_MarkKit.bundle` — the root of the
+# .app, not `Contents/Resources` — and at the absolute `.build` path of whatever
+# machine compiled the binary, and calls `fatalError` when both miss. Copying to
+# the .app root instead would satisfy it, at the cost of an unsealed file outside
+# `Contents/`; `ShellAssets.moduleBundle` does the lookup by hand instead.
 resource_bundle="${root}/app/.build/${configuration}/Mark_MarkKit.bundle"
 if [[ -d "${resource_bundle}" ]]; then
     cp -R "${resource_bundle}" "${bundle}/Contents/Resources/"

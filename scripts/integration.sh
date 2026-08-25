@@ -16,6 +16,8 @@
 #   8. the 104-byte trap — the socket path assertion fires rather than truncating
 #   9. the file watcher — an atomic-rename save and a CLI write are both seen by
 #                         a running app (M5; ADR-2's FSEvents-not-kqueue choice)
+#  10. the installed shape — the bundle launches with SwiftPM's build directory
+#                         gone, which is every machine except the one that built it
 #
 # Isolation. The app is launched through LaunchServices, which does **not** give
 # us a way to point it at a private $TMPDIR — the socket is `$TMPDIR/mark-$UID`
@@ -92,8 +94,16 @@ quit_app() {
     return 0
 }
 
+# Set by gate 12 while SwiftPM's resource bundle is moved aside, so an
+# interrupted run does not leave the developer's build directory short a
+# directory that `swift build` would then have to regenerate.
+stashed_resource_bundle=""
+
 cleanup() {
     quit_app
+    if [[ -n "${stashed_resource_bundle}" && -d "${stashed_resource_bundle}.integration-hidden" ]]; then
+        mv "${stashed_resource_bundle}.integration-hidden" "${stashed_resource_bundle}"
+    fi
     rm -rf "${work}"
 }
 trap cleanup EXIT
@@ -617,6 +627,63 @@ then
     pass "UserNotificationCenter predates this run: no alert was raised during it"
 else
     fail "UserNotificationCenter started during this run — something put a dialog on screen"
+fi
+
+# --------------------------------------------------------------- gate 12 ----
+gate "12. the installed shape: the bundle launches with the build directory gone"
+# The gate that was missing, and the reason a broken bundle shipped anyway.
+#
+# SwiftPM's generated `Bundle.module` accessor looks for `Mark_MarkKit.bundle`
+# in two places and calls `fatalError` when both miss: the *root* of `mark.app`
+# (not `Contents/Resources`, which is where `assemble-bundle.sh` puts it) and
+# the absolute `.build` path of whatever machine compiled the binary. In this
+# checkout that second path exists, so every gate above passed against a bundle
+# that died on launch the moment it was installed anywhere else — a `brew
+# install`, a copy to /Applications, another machine.
+#
+# So: hide the build directory's copy and launch the app again. Nothing outside
+# the bundle may be load-bearing.
+resource_bundle=""
+for candidate in "${root}"/app/.build/*/release/Mark_MarkKit.bundle; do
+    [[ -d "${candidate}" ]] && resource_bundle="${candidate}" && break
+done
+
+if [[ -z "${resource_bundle}" ]]; then
+    note "no SwiftPM resource bundle in app/.build — nothing to hide, gate skipped"
+else
+    quit_app
+    stashed_resource_bundle="${resource_bundle}"
+    mv "${resource_bundle}" "${resource_bundle}.integration-hidden"
+
+    # Launched directly rather than through `open`, because that is the only way
+    # to see the app's stderr — and a `fatalError` in a static initialiser is
+    # stderr and an exit, with no crash report and no window.
+    rm -f "${socket}"
+    "${app_binary}" >"${work}/gate12.log" 2>&1 &
+    app_direct_pid=$!
+
+    if wait_for_app; then
+        pass "the app launched and bound its socket with app/.build hidden"
+        if "${cli}" open "${work}/cold.md" >/dev/null 2>&1 &&
+            tab_paths | grep -qx "${work}/cold.md"; then
+            pass "it renders a document from the bundle's own resources"
+        else
+            fail "the app is up but cannot open a document without app/.build"
+        fi
+    else
+        fail "the app did not come up with app/.build hidden — the bundle is not self-contained"
+        if [[ -s "${work}/gate12.log" ]]; then
+            head -3 "${work}/gate12.log" | sed 's/^/        /' >&2
+        elif kill -0 "${app_direct_pid}" 2>/dev/null; then
+            note "the process is alive but never bound the socket"
+        else
+            note "the process exited without writing anything to stderr"
+        fi
+    fi
+
+    quit_app
+    mv "${resource_bundle}.integration-hidden" "${resource_bundle}"
+    stashed_resource_bundle=""
 fi
 
 # ------------------------------------------------------------------ done ----

@@ -42,17 +42,81 @@ public enum ShellAssets {
     /// `mark.app/Contents/Resources` once `scripts/assemble-bundle.sh` has run,
     /// and from SwiftPM's generated resource bundle under `swift run` and
     /// `swift test`.
+    ///
+    /// `Bundle.main` is tried on its own and returned from before
+    /// ``moduleBundle`` is ever mentioned. That ordering is load-bearing, not
+    /// style: SwiftPM generates `Bundle.module` as a `static let` whose
+    /// initialiser calls `fatalError` when it cannot find
+    /// `Mark_MarkKit.bundle`, and it looks in exactly two places —
+    /// `Bundle.main.bundleURL/Mark_MarkKit.bundle` (the *root* of `mark.app`,
+    /// not `Contents/Resources`) and the absolute `.build` path baked in at
+    /// compile time. In an installed app neither exists: the bundle is at
+    /// `Contents/Resources/`, and the build directory belonged to the machine
+    /// or the Homebrew sandbox that compiled it. Writing the two bundles as one
+    /// array — `for bundle in [Bundle.main, Bundle.module]` — evaluates both
+    /// elements before the loop body runs, so the shipped app crashed on its
+    /// first shell asset even though `Bundle.main` held the answer.
     public static func data(named name: String) -> Data? {
-        for bundle in [Bundle.main, Bundle.module] {
-            if let url = bundle.url(forResource: name, withExtension: nil),
-                let data = try? Data(contentsOf: url)
-            {
-                return data
-            }
+        if let data = data(named: name, in: Bundle.main) {
+            return data
+        }
+        if let bundle = moduleBundle, let data = data(named: name, in: bundle) {
+            return data
         }
         Log.shell.error("shell asset \(name, privacy: .public) not found in any bundle")
         return nil
     }
+
+    private static func data(named name: String, in bundle: Bundle) -> Data? {
+        guard let url = bundle.url(forResource: name, withExtension: nil) else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// Anchors ``moduleBundle`` to the bundle MarkKit's own code was loaded
+    /// from, which is not always `Bundle.main`.
+    private final class BundleFinder {}
+
+    /// SwiftPM's generated resource bundle, or `nil` when there is not one.
+    ///
+    /// Internal rather than private so `ShellAssetsTests` can assert it
+    /// resolves. That assertion is worth the exposure: when it does not
+    /// resolve, the test suite hangs before its first line of output rather
+    /// than failing.
+    ///
+    /// `Bundle.module` cannot be asked whether it exists — reading it either
+    /// answers or kills the process — so this does the same search over
+    /// `Bundle(url:)`, which returns `nil` instead of trapping.
+    ///
+    /// Two anchors, because `Bundle.main` is not always the thing that holds
+    /// MarkKit. In `mark.app` it is, and `resourceURL` is the
+    /// `Contents/Resources` copy `scripts/assemble-bundle.sh` writes. Under
+    /// `swift test`, though, `Bundle.main` is SwiftPM's *test helper* over in
+    /// `/Library/Developer/CommandLineTools/usr/libexec/swift/pm/` — nothing of
+    /// ours is anywhere near it — while `Bundle(for: BundleFinder.self)` is
+    /// `MarkPackageTests.xctest`, whose parent directory is the `.build`
+    /// configuration directory the resource bundle sits in. Leaving that anchor
+    /// out does not fail loudly: the shell page never loads, the first `await`
+    /// on a rendered web view never returns, and the whole suite hangs with no
+    /// output at all.
+    static let moduleBundle: Bundle? = {
+        let name = "Mark_MarkKit.bundle"
+        let anchors = [Bundle.main, Bundle(for: BundleFinder.self)]
+        // `resourceURL` first (an assembled .app or .xctest), then the bundle
+        // itself (`swift run`, `mark-bench` — a bare executable's bundleURL is
+        // the directory it sits in), then the parent (`swift test`, where the
+        // resource bundle is a sibling of the .xctest).
+        let candidates = anchors.flatMap { anchor -> [URL] in
+            [
+                anchor.resourceURL,
+                anchor.bundleURL,
+                anchor.bundleURL.deletingLastPathComponent(),
+            ].compactMap { $0?.appendingPathComponent(name) }
+        }
+        for url in candidates {
+            if let bundle = Bundle(url: url) { return bundle }
+        }
+        return nil
+    }()
 }
 
 /// Serves the shell's three assets, and nothing else.

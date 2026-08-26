@@ -88,6 +88,12 @@ without moving the root or clearing your filter. ⌘⇧O is the deliberate versi
 that does move the root, for a file outside it; ⌘⌥R reveals it in Finder. Drop a
 folder on the window to root there.
 
+⌘O and ⌘T are the same open panel — several files at once, starting in the
+folder you are reading, and a folder itself is a valid choice that roots the
+tree there. Both offer **every** extension mark counts as markdown — `.md`,
+`.markdown`, `.mdown`, `.mkd`, `.mdx` — rather than the two macOS happens to
+have a content type for.
+
 **The path bar** above the tree is a real path bar rather than a row of links.
 Each component is clickable; the chevron after one lists that folder's
 subfolders, with the one you are in checked, so moving sideways from
@@ -224,6 +230,14 @@ you have unsaved changes, autosave pauses and you are asked — keep mine, take
 theirs, or show me the diff — and nothing is written until you answer. The pane
 starts hidden: a document opens read-only until you ask to edit it, and the app
 remembers that you asked.
+
+**Making one.** ⇧⌘N names a new document in a save panel, creates it, and opens
+it with the editor already focused — there is no untitled buffer to lose,
+because mark never holds a document that has no file. A name with no markdown
+extension gets `.md` appended. ⌘N is still a new window. Right-click a crumb in
+the path bar for **New Document Here…**, which starts the panel in that folder.
+The write goes through the same locked, atomic path autosave uses, so aiming it
+at a file another mark has unsaved changes to is refused rather than clobbered.
 
 **Checkboxes.** Clicking one in the preview writes one byte to the file — the
 character between the brackets — via temp-file-plus-rename. The document is

@@ -4,12 +4,13 @@
 
 # ADR index
 
-7 active · 4 superseded
+8 active · 4 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-08-26-new-documents-are-files-on-disk](2026-08-26-new-documents-are-files-on-disk.md) | Name a new document before it exists, so mark never holds a document that has no file | Accepted | app, editor, tabs, sidebar | — | 2026-08-26 |
 | [2026-08-26-markdown-reference-window](2026-08-26-markdown-reference-window.md) | Ship the markdown reference as a document mark renders, in a window of its own that is budgeted like a tab | Proposed | app, render, cli | — | 2026-08-26 |
 | [2026-08-26-editor-groups-per-pane-tab-bars](2026-08-26-editor-groups-per-pane-tab-bars.md) | Give each pane its own tab bar and its own tabs, so a split window is two editor groups rather than one tab bar pointing at two documents | Accepted | app, tabs, sidebar, ipc | — | 2026-08-26 |
 | [2026-08-25-flock-write-locking](2026-08-25-flock-write-locking.md) | Take an flock(2) write lock on a dirty document, and keep the conflict prompt for editors that ignore it | Accepted | app, editor, core, cli | — | 2026-08-25 |

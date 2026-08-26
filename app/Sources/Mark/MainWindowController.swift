@@ -247,6 +247,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onActivate = { [weak self] url in
             self?.open(url)
         }
+        sidebar.onNewDocument = { [weak self] directory in
+            self?.newDocument(in: directory)
+        }
         // M8: the root, the history, and the two listing toggles all live in
         // the session file, so anything that moves them schedules a save.
         sidebar.onStateChange = { [weak self] in
@@ -1687,17 +1690,187 @@ extension MainWindowController: CommandTarget {
 /// does not conform to it and an `override` here compiles as nothing.
 extension MainWindowController: NSMenuItemValidation {
 
-    /// ⌘T. A viewer has no blank document to open, so "New Tab" is the open
-    /// panel — the tab is what you get, and the file is what you choose.
+    // MARK: - New documents (2026-08-26-new-documents-are-files-on-disk)
+
+    /// ⇧⌘N. Name a document, then make it.
+    ///
+    /// The ADR's shape, and the reason it is a panel rather than a blank
+    /// buffer:
+    ///
+    /// > **mark never holds a document that has no file.** There is no untitled
+    /// > state, no URL-less tab, and no `SessionTab` without a path.
+    ///
+    /// ⌘N is deliberately still New Window. It is a shipped, documented
+    /// shortcut, and moving it for a new feature would break every reader's
+    /// hands to save one keystroke.
+    ///
+    /// A `representedObject` carrying a URL means the breadcrumb's "New
+    /// Document Here…", which knows the directory it wants; the menu-bar item
+    /// carries none and means "where I am reading".
+    @objc public func newDocument(_ sender: Any?) {
+        let directory =
+            ((sender as? NSMenuItem)?.representedObject as? URL)
+            ?? tabs.selected?.url.deletingLastPathComponent()
+            ?? sidebar.root
+        newDocument(in: directory)
+    }
+
+    /// Run the save panel, then create what it names.
+    ///
+    /// Split from ``createDocument(at:)`` because `runModal()` cannot run in a
+    /// test, and because the breadcrumb needs the same act with a different
+    /// starting directory.
+    public func newDocument(in directory: URL) {
+        let panel = MarkdownPanel.save(
+            startingIn: directory, named: MarkdownPanel.defaultDocumentName)
+        guard panel.runModal() == .OK, let chosen = panel.url else { return }
+        // The panel's answer is not necessarily the file to write — see
+        // ``MarkdownPanel/target(forChosen:)``, which is where the
+        // appended-extension collision is caught.
+        switch MarkdownPanel.target(forChosen: chosen) {
+        case .nameTaken(let url):
+            presentNameTaken(url)
+        case .create(let url):
+            do {
+                try createDocument(at: url)
+            } catch {
+                presentCreationFailure(error, at: url)
+            }
+        }
+    }
+
+    /// Create an empty document at `url` and open it.
+    ///
+    /// **The write goes through the core**, which is not incidental:
+    /// `2026-08-25-flock-write-locking` requires that *"every path that writes
+    /// a user's document takes the lock first. No exceptions, including future
+    /// features."* `MarkCore.save` is `write_atomically`, which acquires the
+    /// `flock`, writes a temp file and renames it over the target — and which
+    /// already treats a target that does not exist as
+    /// `LockState::DocumentAbsent` rather than an error, so creating a file and
+    /// overwriting one are the same call. The Replace case a save panel can
+    /// produce is therefore refused, correctly, by machinery that predates this
+    /// feature.
+    ///
+    /// The editor is shown and takes the keyboard. That is this route only:
+    /// *"a document opens read-only until you ask to edit it"* still holds
+    /// everywhere else, and making a file is asking.
+    @discardableResult
+    public func createDocument(at url: URL) throws -> DocumentTab {
+        try MarkCore.save("", to: url.path)
+        Log.app.info("created \(url.lastPathComponent, privacy: .public)")
+
+        // Permanent, not preview: a file the reader has just named is the most
+        // deliberate act there is.
+        let tab = openInFocusedGroup(url)
+        setEditorVisible(true)
+        window?.makeFirstResponder(editor.textView)
+        // Editor visibility is session state, and nothing else here writes it.
+        saveSessionSoon()
+        // The same reason `TreeViewController.drop(_:into:move:)` refreshes: a
+        // listing that does not show the new file reads as the act having
+        // failed. The tree follows the front document on its own, so a file
+        // made outside the root still opens — it just does not move the root,
+        // which is ⌘⇧O's job and nothing else's.
+        sidebar.refresh()
+        return tab
+    }
+
+    /// The name the reader typed became one that is already taken.
+    ///
+    /// Separate from ``presentCreationFailure(_:at:)`` because it is not a
+    /// failure of the write — nothing was attempted. The alert offers to open
+    /// the file instead, which is almost always what the reader wants once they
+    /// know it is there.
+    private func presentNameTaken(_ url: URL) {
+        Log.app.info(
+            "not creating \(url.lastPathComponent, privacy: .public): the name is taken")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(url.lastPathComponent)” already exists."
+        alert.informativeText =
+            "Nothing was written. Type the full name, including the extension, to replace it."
+        alert.addButton(withTitle: "Open It")
+        alert.addButton(withTitle: "Cancel")
+        let open: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.open(url)
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: open)
+        } else {
+            open(alert.runModal())
+        }
+    }
+
+    /// Say why a document could not be made.
+    ///
+    /// An alert rather than the `NSSound.beep()` the drop path uses. A drop
+    /// that beeps has a visible cause — the file is still under the cursor,
+    /// the destination is on screen. A menu item that beeps looks broken, and
+    /// the two reasons this fails are both worth reading: another `mark` holds
+    /// the target, or the volume would not take the write.
+    ///
+    /// The core's own message is the alert's body. It already names the holding
+    /// process and its pid, and phrases the advice carefully — see
+    /// `LockError`'s `Display` — so rewording it here would only make it worse.
+    private func presentCreationFailure(_ error: any Error, at url: URL) {
+        let detail = (error as? CoreError)?.detail ?? String(describing: error)
+        Log.app.error(
+            "could not create \(url.path, privacy: .public): \(detail, privacy: .public)")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not create “\(url.lastPathComponent)”."
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// ⌘T. "New Tab" is an open panel — the tab is what you get, and the file
+    /// is what you choose.
+    ///
+    /// It used to say *"a viewer has no blank document to open"*, which stopped
+    /// being true when `2026-08-26-new-documents-are-files-on-disk` gave the
+    /// File menu ⇧⌘N. This item keeps its meaning anyway: ⌘T is for a document
+    /// that already exists, ⇧⌘N is for one that does not.
     @objc public func newTab(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.plainText, .text]
-        panel.allowsOtherFileTypes = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        panel.directoryURL = tabs.selected?.url.deletingLastPathComponent() ?? sidebar.root
+        let panel = MarkdownPanel.open(
+            startingIn: tabs.selected?.url.deletingLastPathComponent() ?? sidebar.root)
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls { open(url) }
+        openFromPanel(panel.urls)
+    }
+
+    /// Open what an open panel handed back.
+    ///
+    /// Shared by ⌘T and ⌘O so the two cannot drift apart again. A folder roots
+    /// the sidebar instead of opening a tab, through the method that already
+    /// knows M8's *"a directory is a place, not a document"* — the same
+    /// behaviour `mark open notes/` and a folder dropped on the window have.
+    ///
+    /// The throw is a path that disappeared between the panel listing it and
+    /// this line. Worth a log, not worth stopping the rest of a multiple
+    /// selection for.
+    public func openFromPanel(_ urls: [URL]) {
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(
+                atPath: url.path, isDirectory: &isDirectory)
+            guard exists && isDirectory.boolValue else {
+                open(url)
+                continue
+            }
+            do {
+                _ = try openDocument(at: url, background: false)
+            } catch {
+                Log.app.error(
+                    "open panel: \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     /// ⌘W closes the *tab*, matching every tab bar on the platform. The window
@@ -2047,6 +2220,11 @@ extension MainWindowController: NSMenuItemValidation {
             return tabs.selected != nil && tabs.selected?.isDirty != true
         case #selector(closeTab(_:)):
             return tabs.selected != nil
+        case #selector(newDocument(_:)):
+            // Unconditional, unlike every other item here. It needs no tab and
+            // no group — a window with nothing open at all is exactly where
+            // someone reaches for it.
+            return true
         case #selector(toggleTableOfContents(_:)):
             item.state = sidebarPane.isContentsVisible ? .on : .off
             return true

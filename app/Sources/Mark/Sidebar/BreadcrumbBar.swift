@@ -68,6 +68,14 @@ public final class BreadcrumbBar: NSView {
     /// ⌘⌥R, from the context menu.
     public var onRevealInFinder: ((URL) -> Void)?
 
+    /// "New Document Here…", from the context menu.
+    ///
+    /// The crumb names a directory, which is the one thing ⇧⌘N otherwise has
+    /// to guess — so this is the accurate way to say "make a note *in this
+    /// folder*", and it costs a menu item rather than a feature
+    /// (`2026-08-26-new-documents-are-files-on-disk`).
+    public var onNewDocument: ((URL) -> Void)?
+
     /// Files were dropped onto a crumb: `(destination, dropped, move)`. `move`
     /// is true when the user held ⌘. Returns whether the drop was accepted.
     public var onDropFiles: ((URL, [URL], Bool) -> Bool)?
@@ -449,6 +457,13 @@ public final class BreadcrumbBar: NSView {
         guard crumbs.indices.contains(index) else { return nil }
         let crumb = crumbs[index]
         let menu = NSMenu()
+        let new = NSMenuItem(
+            title: "New Document Here…", action: #selector(newDocumentChosen(_:)),
+            keyEquivalent: "")
+        new.target = self
+        new.representedObject = crumb.url
+        menu.addItem(new)
+        menu.addItem(.separator())
         if index != crumbs.count - 1 {
             let go = NSMenuItem(
                 title: "Go Here", action: #selector(menuItemChosen(_:)), keyEquivalent: "")
@@ -680,6 +695,11 @@ public final class BreadcrumbBar: NSView {
     @objc private func revealChosen(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
         onRevealInFinder?(url)
+    }
+
+    @objc private func newDocumentChosen(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        onNewDocument?(url)
     }
 
     // MARK: - Button configuration

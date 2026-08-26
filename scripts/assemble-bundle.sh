@@ -157,6 +157,54 @@ cat >"${bundle}/Contents/Info.plist" <<PLIST
             </array>
         </dict>
     </array>
+    <!--
+      \`2026-08-26-new-documents-are-files-on-disk\`. mark treats five
+      extensions as markdown (\`core/src/tree.rs::MARKDOWN\`), but only two of
+      them — .md and .markdown — have a UTI anyone has declared. macOS
+      synthesises a \`dyn.…\` type for .mdown, .mkd and .mdx that conforms to
+      \`public.data\` and nothing else, so without this block Finder offers no
+      "Open With mark" for them and an NSOpenPanel filtering by content type
+      draws them greyed out.
+
+      **Imported, not exported.** \`net.daringfireball.markdown\` is not ours to
+      define; \`UTImportedTypeDeclarations\` is the key for extending a type
+      someone else owns, and \`UTExportedTypeDeclarations\` here would be a claim
+      we have no standing to make.
+
+      What this costs, stated plainly: once LaunchServices registers this
+      bundle, .mdown/.mkd/.mdx are markdown machine-wide and mark is their
+      default opener — the same claim \`CFBundleDocumentTypes\` above already
+      makes for .md. Rebuilding without this block undoes it.
+
+      Note that the app's *own* panels do not rely on any of this. A bundle's
+      declarations are inert until LaunchServices has seen it, so a UTType
+      filter would behave differently under \`swift test\` than in
+      /Applications; \`MarkdownPanel\` asks the extension list directly. This
+      block is for Finder.
+    -->
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>  <string>net.daringfireball.markdown</string>
+            <key>UTTypeDescription</key> <string>Markdown Document</string>
+            <key>UTTypeIconFile</key>    <string>mark-document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>md</string>
+                    <string>markdown</string>
+                    <string>mdown</string>
+                    <string>mkd</string>
+                    <string>mdx</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

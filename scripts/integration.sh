@@ -821,6 +821,36 @@ else
     pass "the plain-text document type has no icon of its own"
 fi
 
+# `2026-08-26-new-documents-are-files-on-disk`. Only .md and .markdown have a
+# UTI anyone declared; without the imported declaration the other three are
+# `dyn.…` types conforming to public.data, and Finder offers no "Open With
+# mark" for them. Asserted against `core/src/tree.rs::MARKDOWN` — the list the
+# app itself uses — so the bundle cannot drift away from it silently.
+# Extracted one level above `public.filename-extension`: a plutil keypath
+# splits on `.`, and that key has two of them in its own name.
+ut_extensions="$(plutil -extract \
+    UTImportedTypeDeclarations.0.UTTypeTagSpecification json -o - \
+    "${bundle}/Contents/Info.plist" 2>/dev/null || true)"
+missing_ut=()
+for ext in md markdown mdown mkd mdx; do
+    [[ "${ut_extensions}" == *"\"${ext}\""* ]] || missing_ut+=("${ext}")
+done
+ut_id="$(plutil -extract UTImportedTypeDeclarations.0.UTTypeIdentifier raw \
+    "${bundle}/Contents/Info.plist" 2>/dev/null || true)"
+if [[ ${#missing_ut[@]} -eq 0 && "${ut_id}" == "net.daringfireball.markdown" ]]; then
+    pass "the imported markdown type declares all five extensions"
+else
+    fail "imported markdown type is '${ut_id:-<absent>}', missing: ${missing_ut[*]:-none}"
+fi
+
+# Imported, not exported: `net.daringfireball.markdown` is not ours to define.
+if plutil -extract UTExportedTypeDeclarations raw \
+    "${bundle}/Contents/Info.plist" >/dev/null 2>&1; then
+    fail "the bundle exports a type declaration; markdown is imported, not ours"
+else
+    pass "no exported type declarations"
+fi
+
 gate "16. the bundle carries the markdown reference, and it still renders"
 # Help ▸ Markdown Reference (`2026-08-26-markdown-reference-window`) is a
 # *document* in `Contents/Resources`, so the way it breaks is a dropped `cp` in

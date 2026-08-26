@@ -378,9 +378,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
 
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
+        // `2026-08-26-new-documents-are-files-on-disk`. First in the menu,
+        // where every document app puts the item that makes one.
+        //
+        // The ellipsis is load-bearing and `New Window` next to it deliberately
+        // has none: this opens a save panel, because the ADR decides mark never
+        // holds a document that has no file, so a new document is named before
+        // it exists.
+        //
+        // **⇧⌘N, not ⌘N.** ⌘N has meant New Window since
+        // `2026-08-26-multiple-windows-and-split-panes` and the README
+        // documents it; a new feature does not get to move a shortcut people
+        // already have in their hands. VS Code's ⌘N/⇧⌘N split is the other
+        // convention, and it was considered and declined at the gate.
+        fileMenu.addItem(
+            withTitle: "New Document…", action: #selector(MainWindowController.newDocument(_:)),
+            keyEquivalent: "N"
+        ).keyEquivalentModifierMask = [.command, .shift]
         // `2026-08-26-multiple-windows-and-split-panes`. ⌘N is the platform's
         // "another one of these", and until that ADR there was nothing for it
-        // to mean — a viewer has no blank document to make.
+        // to mean.
         fileMenu.addItem(
             withTitle: "New Window", action: #selector(MainWindowController.newWindow(_:)),
             keyEquivalent: "n")
@@ -689,13 +706,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         return true
     }
 
+    /// ⌘O.
+    ///
+    /// This used to be a second, weaker open panel: one file at a time, no
+    /// folders, and starting wherever AppKit happened to have been last, while
+    /// ⌘T two lines above it allowed several and started in the folder being
+    /// read. Same act, two behaviours, and the one people reach for first was
+    /// the poorer of them. Both now go through ``MarkdownPanel``.
+    ///
+    /// What comes back is handled by
+    /// ``MainWindowController/openFromPanel(_:)``, shared with ⌘T, which is
+    /// also where a chosen folder becomes a sidebar root rather than a tab.
     @objc private func openDocument(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.plainText, .text]
-        panel.allowsOtherFileTypes = true
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        windows?.keyController?.open(url)
+        guard let controller = windows?.keyController else { return }
+        let panel = MarkdownPanel.open(
+            startingIn: controller.tabs.selected?.url.deletingLastPathComponent()
+                ?? controller.sidebar.root)
+        guard panel.runModal() == .OK else { return }
+        controller.openFromPanel(panel.urls)
     }
 }
 

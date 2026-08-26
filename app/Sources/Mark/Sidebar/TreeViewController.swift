@@ -76,6 +76,11 @@ public final class TreeViewController: NSViewController {
     /// save. The filter is deliberately not one of those things.
     public var onStateChange: (() -> Void)?
 
+    /// "New Document Here…" was chosen on a crumb, naming that directory.
+    /// Passed straight through to the window, which owns the panel and the
+    /// creation (`2026-08-26-new-documents-are-files-on-disk`).
+    public var onNewDocument: ((URL) -> Void)?
+
     public private(set) var outlineView: NSOutlineView!
     public private(set) var breadcrumbBar: BreadcrumbBar!
     public private(set) var filterField: NSSearchField!
@@ -212,6 +217,7 @@ public final class TreeViewController: NSViewController {
         breadcrumbBar.onForward = { [weak self] in self?.navigateForward() }
         breadcrumbBar.childDirectories = { [weak self] url in self?.subdirectories(of: url) ?? [] }
         breadcrumbBar.onRevealInFinder = { [weak self] url in self?.revealInFinder(url) }
+        breadcrumbBar.onNewDocument = { [weak self] url in self?.onNewDocument?(url) }
         breadcrumbBar.onDropFiles = { [weak self] destination, urls, move in
             self?.drop(urls, into: destination, move: move) ?? false
         }

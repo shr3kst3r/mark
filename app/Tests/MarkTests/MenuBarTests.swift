@@ -100,6 +100,41 @@ struct MenuBarTests {
         }
     }
 
+    /// `2026-08-26-new-documents-are-files-on-disk`.
+    ///
+    /// Three separate claims, and each has been wrong somewhere before:
+    ///
+    /// * **⌘N is still New Window.** The ADR declines VS Code's ⌘N/⇧⌘N split
+    ///   because ⌘N is shipped and documented. This is the assertion that stops
+    ///   a later "tidy-up" from taking it.
+    /// * **New Document… is first in File**, where every document app on this
+    ///   platform puts the item that makes one.
+    /// * **The ellipsis is there.** It opens a save panel — the ADR's whole
+    ///   shape is that a document is named before it exists — and an item that
+    ///   opens a panel without saying so is a small lie the platform has a
+    ///   convention for telling.
+    ///
+    /// `keyEquivalentsAreUnique` above already guarantees ⇧⌘N collides with
+    /// nothing; this pins what it is.
+    @Test("New Document… is first in File on ⇧⌘N, and ⌘N still makes a window")
+    func newDocumentIsFirstInFile() throws {
+        let delegate = AppDelegate()
+        let menu = delegate.buildMainMenu()
+
+        let file = try #require(
+            menu.items.compactMap(\.submenu).first { $0.title == "File" })
+
+        let first = try #require(file.items.first)
+        #expect(first.title == "New Document…")
+        #expect(first.keyEquivalent == "N")
+        #expect(first.keyEquivalentModifierMask == [.command, .shift])
+        #expect(first.action == #selector(MainWindowController.newDocument(_:)))
+
+        let newWindow = try #require(file.items.first { $0.title == "New Window" })
+        #expect(newWindow.keyEquivalent == "n")
+        #expect(newWindow.keyEquivalentModifierMask == [.command])
+    }
+
     /// **Help ▸ Markdown Reference** on ⇧⌘/
     /// (`2026-08-26-markdown-reference-window`).
     ///

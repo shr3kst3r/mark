@@ -92,20 +92,28 @@ struct WindowCoordinatorTests {
         #expect(source.store.displayedTabs.allSatisfy { $0 !== tab })
     }
 
-    /// Detaching the right-hand pane's document collapses the split it leaves
-    /// behind, rather than leaving half a window blank.
-    @Test("popping the split's right pane out collapses the split")
-    func detachingSecondaryCollapsesTheSplit() throws {
+    /// Popping out the *only* document of the right-hand group empties that
+    /// group, and an empty group is a group that closed.
+    @Test("popping out a group's last document collapses the split")
+    func detachingAGroupsLastTabCollapsesTheSplit() throws {
         let source = try TabHarness(files: ["a.md", "b.md"])
+        let groups = source.makeGroups()
+        let collapser = GroupCollapser(groups: groups)
+        source.store.delegate = collapser
+        groups.configureStore = { [hydrator = source.hydrator] store in
+            store.hydrator = hydrator
+            store.delegate = collapser
+        }
         let destination = try TabHarness(governor: source.store.governor)
-        source.store.splitRight()
-        let right = try #require(source.store.secondary)
+        #expect(groups.splitRight())
+        let alone = try #require(groups.groups[1].selected)
 
-        let moved = source.store.detach(right)
+        let moved = groups.groups[1].detach(alone)
         destination.store.adopt(moved.tab, view: moved.view)
 
-        #expect(!source.store.isSplit)
-        #expect(source.store.focus == .primary)
+        #expect(!groups.isSplit)
+        #expect(groups.focusIndex == 0)
+        #expect(groups.focused.count == 1)
     }
 
     /// A tab that is not in this store is not this store's to give away.
@@ -266,19 +274,68 @@ struct MultiWindowSessionTests {
 
     /// The split has to come back, or "two side by side" is a thing you set up
     /// again on every launch.
-    @Test("a split survives a store round trip")
-    func splitRoundTripsThroughAStore() throws {
+    @Test("two groups survive a session round trip")
+    func groupsRoundTripThroughASession() throws {
         let harness = try TabHarness(files: ["a.md", "b.md", "c.md"])
-        let store = harness.store
-        store.splitRight()
-        let expectedSecondary = try #require(store.secondary).url
+        let groups = harness.makeGroups()
+        #expect(groups.splitRight())
+        let expectedRight = try #require(groups.groups[1].selected).url
+        let expectedLeft = groups.groups[0].tabs.map(\.url)
 
-        let snapshot = store.snapshotWindow(sidebarRoot: harness.fixture.directory)
-        let restored = try TabHarness()
-        restored.store.restore(snapshot)
+        let snapshot = groups.snapshotWindow(sidebarRoot: harness.fixture.directory)
+        let restoredHarness = try TabHarness()
+        let restored = restoredHarness.makeGroups()
+        restored.restore(snapshot)
 
-        #expect(restored.store.isSplit)
-        #expect(restored.store.secondary?.url == expectedSecondary)
-        #expect(restored.store.primary !== restored.store.secondary)
+        #expect(restored.isSplit)
+        #expect(restored.groups.count == 2)
+        #expect(restored.groups[1].tabs.map(\.url) == [expectedRight])
+        #expect(restored.groups[0].tabs.map(\.url) == expectedLeft)
+        #expect(restored.focusIndex == groups.focusIndex)
+    }
+
+    /// **The migration the ADR promises.** A session file from the one-bar
+    /// build says "these are the window's tabs, and tab *n* is also on the
+    /// right"; it comes back as two groups, with that document alone in the
+    /// second.
+    @Test("a one-bar session file restores as two groups")
+    func oneBarSessionMigratesToGroups() throws {
+        let harness = try TabHarness()
+        let files = ["a.md", "b.md", "c.md"].map { harness.file(named: $0) }
+        let legacy = SessionWindow(
+            tabs: files.map { SessionTab(path: $0.path, scrollOffset: 0) },
+            selectedIndex: 0,
+            secondaryIndex: 2,
+            focus: "secondary"
+        )
+        #expect(legacy.groups == nil, "the field this migration exists for is absent")
+
+        let groups = harness.makeGroups()
+        groups.restore(legacy)
+
+        #expect(groups.isSplit)
+        #expect(groups.groups[0].tabs.map(\.url) == [files[0], files[1]])
+        #expect(groups.groups[1].tabs.map(\.url) == [files[2]])
+        #expect(groups.focusIndex == 1, "\"secondary\" is the second group")
+        #expect(groups.groups[0].selected?.url == files[0])
+    }
+
+    /// A file naming the same tab as selected *and* secondary asked the one-bar
+    /// model for one document in two panes. It is repaired to one group, which
+    /// costs a pane and never a document.
+    @Test("a one-bar session naming one tab twice restores unsplit")
+    func oneBarSessionNamingOneTabTwiceIsRepaired() throws {
+        let harness = try TabHarness()
+        let files = ["a.md", "b.md"].map { harness.file(named: $0) }
+        let legacy = SessionWindow(
+            tabs: files.map { SessionTab(path: $0.path, scrollOffset: 0) },
+            selectedIndex: 1,
+            secondaryIndex: 1
+        )
+        let groups = harness.makeGroups()
+        groups.restore(legacy)
+
+        #expect(!groups.isSplit)
+        #expect(groups.focused.tabs.map(\.url) == files)
     }
 }

@@ -59,7 +59,7 @@ public final class WindowCoordinator {
     }
 
     public func controller(holding tab: DocumentTab) -> MainWindowController? {
-        controllers.first { $0.tabs.tabs.contains(tab) }
+        controllers.first { $0.groups.index(of: tab) != nil }
     }
 
     // MARK: - Making and losing windows
@@ -136,11 +136,16 @@ public final class WindowCoordinator {
     public func popOut(_ tab: DocumentTab, from source: MainWindowController)
         -> MainWindowController?
     {
-        guard source.tabs.tabs.contains(tab) else { return nil }
+        // Whichever of the source window's groups holds it, not the focused
+        // one: with two groups (`2026-08-26-editor-groups-per-pane-tab-bars`)
+        // the tab bar's context menu can pop out a document from the half that
+        // is not being acted on, and detaching from the wrong store would leave
+        // the tab in one group and its view in another.
+        guard let owner = source.groups.group(of: tab) else { return nil }
 
         let root = tab.url.deletingLastPathComponent()
         source.releaseClaims(on: tab)
-        let moved = source.tabs.detach(tab)
+        let moved = owner.detach(tab)
         source.syncWatchedFiles()
 
         let destination = makeWindow(root: root, collapsedSidebar: true)

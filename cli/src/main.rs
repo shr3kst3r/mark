@@ -827,34 +827,37 @@ fn cmd_tab(action: &TabAction) -> Result<(), CliError> {
             if tabs.is_empty() {
                 emitln!(out, "no tabs are open")?;
             }
-            // The window column appears only when there is more than one
-            // window (2026-08-26-multiple-windows-and-split-panes). A `w0` on
-            // every row of a single-window listing would be a column of
-            // constants, and every existing script's parse would shift for
+            // The location column appears only when there is more than one
+            // place a tab can be: more than one window, or a window split into
+            // two editor groups (2026-08-26-editor-groups-per-pane-tab-bars).
+            // A `w0L` on every row of a single-group listing would be a column
+            // of constants, and every existing script's parse would shift for
             // nothing. Absent entirely from an older app's reply, which reads
-            // here as one window.
+            // here as one window with one group.
             let windows: std::collections::BTreeSet<i64> = tabs
                 .iter()
                 .filter_map(|tab| tab["window"].as_i64())
                 .collect();
-            let show_windows = windows.len() > 1;
+            let split = tabs
+                .iter()
+                .any(|tab| tab["group"].as_i64().is_some_and(|group| group > 0));
+            let show_windows = windows.len() > 1 || split;
             for tab in &tabs {
                 let tasks = match (tab["openTasks"].as_i64(), tab["totalTasks"].as_i64()) {
                     (Some(open), Some(total)) if total > 0 => format!("{open}/{total}"),
                     _ => String::new(),
                 };
-                // `w0/2` rather than a bare index: the number means nothing on
-                // its own, and the pane is what says *which half* of a split
-                // window a document is in.
-                let window = if show_windows {
-                    match (tab["window"].as_i64(), tab["pane"].as_str()) {
-                        (Some(w), Some("secondary")) => format!("w{w}R "),
-                        (Some(w), Some(_)) => format!("w{w}L "),
-                        (Some(w), None) => format!("w{w}  "),
-                        (None, _) => "     ".to_string(),
-                    }
-                } else {
-                    String::new()
+                // `w0L` rather than a bare index: the number means nothing on
+                // its own, and the group is what says *which half* of a split
+                // window a document is in. Unlike the pane it replaces, every
+                // tab has one — a group is a set of tabs, not a slot on screen
+                // — so a tab that is merely open still says where it lives.
+                let window = match (show_windows, tab["window"].as_i64(), tab["group"].as_i64()) {
+                    (false, _, _) => String::new(),
+                    (true, Some(w), Some(0)) => format!("w{w}L "),
+                    (true, Some(w), Some(_)) => format!("w{w}R "),
+                    (true, Some(w), None) => format!("w{w}  "),
+                    (true, None, _) => "     ".to_string(),
                 };
                 emitln!(
                     out,

@@ -140,14 +140,15 @@ activates the app.
 .TP
 .BR "tab list" " [--json]"
 Every open tab, in every window: index, title, open/total tasks, and whether it
-currently holds a web view. With more than one window open, each row is
-prefixed by its window and pane \(em
+currently holds a web view. With more than one window open, or a window split
+into two editor groups, each row is prefixed by its window and group \(em
 .BR w0L ", " w0R
 \(em where
 .B L
 and
 .B R
-are the two halves of a split. The index is per window, which is what
+are the two halves of a split. Every tab has a group, whether or not it is the
+one on screen there. The index is per window, across its groups in order, which is what
 .B tab select
 takes.
 .TP
@@ -282,7 +283,7 @@ Set to 1 and the app neither restores nor saves a session.
 How many tabs keep a live web view, across every window. Default 3; each one
 costs about 52 MB, so the app's footprint is roughly 100 MB plus 52 MB per
 resident tab. Opening a window does not raise the budget. A tab that is on
-screen \(em either pane of a split, in any window \(em or has unsaved changes is
+screen \(em either group of a split, in any window \(em or has unsaved changes is
 never dehydrated, so the working set can exceed this; see
 .B doctor
 for what it actually is.

@@ -93,7 +93,7 @@ struct MenuBarTests {
         walk(menu)
 
         for expected in [
-            "Split Right", "Close Split", "Focus Other Pane",
+            "Split Right", "Close Split", "Focus Other Pane", "Move Tab to Other Pane",
             "New Window", "Move Tab to New Window",
         ] {
             #expect(titles.contains(expected), "\(expected) is not in the menu bar")

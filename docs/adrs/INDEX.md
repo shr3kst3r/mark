@@ -4,13 +4,13 @@
 
 # ADR index
 
-6 active · 3 superseded
+6 active · 4 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
-| [2026-08-26-multiple-windows-and-split-panes](2026-08-26-multiple-windows-and-split-panes.md) | Allow more than one window and two documents on screen at once, with residency budgeted across the whole app rather than per window | Accepted | app, tabs, sidebar, ipc | — | 2026-08-26 |
+| [2026-08-26-editor-groups-per-pane-tab-bars](2026-08-26-editor-groups-per-pane-tab-bars.md) | Give each pane its own tab bar and its own tabs, so a split window is two editor groups rather than one tab bar pointing at two documents | Accepted | app, tabs, sidebar, ipc | — | 2026-08-26 |
 | [2026-08-25-flock-write-locking](2026-08-25-flock-write-locking.md) | Take an flock(2) write lock on a dirty document, and keep the conflict prompt for editors that ignore it | Accepted | app, editor, core, cli | — | 2026-08-25 |
 | [2026-08-24-rust-side-math-and-diagrams](2026-08-24-rust-side-math-and-diagrams.md) | Render math to MathML and Mermaid to SVG in Rust, shipping no JavaScript | Accepted | render, core, build | — | 2026-08-24 |
 | [2026-08-24-rust-core-swift-appkit-shell](2026-08-24-rust-core-swift-appkit-shell.md) | Build the document core in Rust and the shell in Swift/AppKit, joined by a small C ABI | Accepted | core, app, cli | — | 2026-08-24 |
@@ -24,6 +24,7 @@ forward whatever the chain concluded.
 
 | ADR | Title | Superseded by | Date |
 | --- | --- | --- | --- |
-| [2026-08-24-tab-residency-and-memory-model](superseded/2026-08-24-tab-residency-and-memory-model.md) | Keep one window and a custom tab bar, but hold only 3 web views resident — a tab costs ~52 MB, not ~1.2 MB | [2026-08-26-multiple-windows-and-split-panes](2026-08-26-multiple-windows-and-split-panes.md) | 2026-08-24 |
+| [2026-08-26-multiple-windows-and-split-panes](superseded/2026-08-26-multiple-windows-and-split-panes.md) | Allow more than one window and two documents on screen at once, with residency budgeted across the whole app rather than per window | [2026-08-26-editor-groups-per-pane-tab-bars](2026-08-26-editor-groups-per-pane-tab-bars.md) | 2026-08-26 |
+| [2026-08-24-tab-residency-and-memory-model](superseded/2026-08-24-tab-residency-and-memory-model.md) | Keep one window and a custom tab bar, but hold only 3 web views resident — a tab costs ~52 MB, not ~1.2 MB | [2026-08-26-multiple-windows-and-split-panes](superseded/2026-08-26-multiple-windows-and-split-panes.md) | 2026-08-24 |
 | [2026-08-24-single-window-custom-tab-bar](superseded/2026-08-24-single-window-custom-tab-bar.md) | Use one window with a custom tab bar and N resident web views, not native NSWindow tabbing | [2026-08-24-tab-residency-and-memory-model](superseded/2026-08-24-tab-residency-and-memory-model.md) | 2026-08-24 |
 | [2026-08-24-editing-pane-and-autosave](superseded/2026-08-24-editing-pane-and-autosave.md) | Edit markdown in a native NSTextView pane, with the buffer as truth while dirty and debounced autosave | [2026-08-25-flock-write-locking](2026-08-25-flock-write-locking.md) | 2026-08-24 |

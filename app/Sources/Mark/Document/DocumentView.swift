@@ -127,6 +127,11 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     public override init(frame: NSRect) {
         super.init(frame: frame)
         bridge.delegate = self
+        // Layer-backed on purpose: see the note on ``updateLayer()``. Without
+        // it AppKit has nowhere to put the background colour, and drawing it
+        // instead reaches the other pane.
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         let webView = WebViewFactory.makeWebView(bridge: bridge)
         webView.navigationDelegate = self
@@ -791,13 +796,24 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// `WebViewFactory` turns the web view's own background off so the shell's
     /// first paint does not flash white, which leaves this view to paint it.
     ///
-    /// The colour is dynamic — it holds both halves of the theme pair — so an
-    /// appearance change re-resolves it with nothing observing anything. All
-    /// this override does is ask for a redraw when the effective appearance
-    /// moves, because a `CGColor` baked into a layer would not follow.
-    public override func draw(_ dirtyRect: NSRect) {
-        ThemeController.shared.backgroundColor.setFill()
-        dirtyRect.fill()
+    /// **This is a layer background, not a `draw(_:)` fill, and the difference
+    /// is a two-pane window that shows one document.** A `WKWebView` is
+    /// layer-hosted, and the note in ``PreviewPaneView`` records what that does
+    /// to a sibling: drawing is composited over the whole of it, *not clipped
+    /// to the overlap*. Filling this view's `dirtyRect` therefore painted over
+    /// the **other** pane's web view as well as behind this one's page —
+    /// invisible with one document on screen, and with two it left the loser
+    /// blank while every frame, layer and `visibilityState` said it was there
+    /// (`WKWebView.takeSnapshot` returned the page, correctly rendered, from a
+    /// pane showing nothing). A layer background cannot leave its own bounds.
+    ///
+    /// The colour is dynamic — it holds both halves of the theme pair — so
+    /// ``updateLayer()`` re-resolves it against the effective appearance rather
+    /// than baking one `CGColor` in for the life of the view.
+    public override var wantsUpdateLayer: Bool { true }
+
+    public override func updateLayer() {
+        layer?.backgroundColor = ThemeController.shared.backgroundColor.cgColor
     }
 
     public override func viewDidChangeEffectiveAppearance() {

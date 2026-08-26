@@ -78,7 +78,7 @@ Xcode.
 
 ## The app
 
-**One window, three panes.** The sidebar is a lazy directory tree: it never
+**One window, three columns.** The sidebar is a lazy directory tree: it never
 walks ahead of what you have expanded, honours `.gitignore`, and computes per-file
 `3/7` open-task badges in the background rather than on the walk. ⌘↑ moves the
 root to the parent, and ⌘[ and ⌘] go back and forward through where you have
@@ -142,6 +142,25 @@ tab, double-click the file in the tree, drag the tab somewhere, or type into it.
 open permanent tabs directly. `mark tab list` marks the preview tab with `~`,
 and VoiceOver reads it as "preview", because italic is not a thing a screen
 reader can see. Which tab was the preview one comes back after a relaunch.
+
+**Two documents side by side, each with its own tabs.** ⌘\ moves the current
+document into a second editor group beside the first: two tab bars, two sets of
+tabs, one divider you can drag. A group owns its tabs, so the halves keep
+separate reading lists — the notes on the left, the file you are checking them
+against on the right — and clicking a tab, or clicking into a document, decides
+which half the menus, ⌘F and the editor act on. The other bar dims; that is the
+only focus indicator there is. ⌥⌘\ swaps which half you are acting on, ⇧⌘\ puts
+everything back in one group **keeping every document**, and a tab dragged across
+the divider — or **View ▸ Move Tab to Other Pane** — changes sides. Closing a
+group's last tab closes the group. `mark tab list` prefixes each row with `w0L`
+or `w0R` so a script can see which half a document is in.
+
+**More than one window.** ⌘N opens another window on the same folder; ⌃⌘N moves
+the current tab into a window of its own, carrying its rendered DOM, its scroll
+position and any unsaved text with it. Every window is the same class — same
+sidebar, tabs, groups, find bar, editor and themes — and the resident-web-view
+budget is the *application's*, not each window's, so opening windows does not
+multiply what mark costs.
 
 > **What tabs cost, since the number here was wrong once.** Every `WKWebView`
 > gets its own WebContent process at ~52 MB, so the budget is a formula rather

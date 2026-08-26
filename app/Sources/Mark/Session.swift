@@ -79,6 +79,42 @@ public struct SessionSidebarOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// One editor group — a pane's own tabs and its own selection.
+///
+/// New with `2026-08-26-editor-groups-per-pane-tab-bars`, and the third
+/// additive layer in this file: the flat ``SessionState`` fields describe the
+/// first window, ``SessionWindow/tabs`` describes that window's first group,
+/// and this describes every group. Each layer exists so a build that predates
+/// the one above it restores something rather than nothing.
+public struct SessionGroup: Codable, Equatable, Sendable {
+    public var tabs: [SessionTab]
+    public var selectedIndex: Int?
+
+    public init(tabs: [SessionTab] = [], selectedIndex: Int? = nil) {
+        self.tabs = tabs
+        self.selectedIndex = selectedIndex
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tabs, selectedIndex
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try container.decodeIfPresent([SessionTab].self, forKey: .tabs) ?? []
+        selectedIndex = try container.decodeIfPresent(Int.self, forKey: .selectedIndex)
+    }
+
+    /// The selection, or the first tab, or nothing — never an index the list
+    /// does not have.
+    public var repairedSelectedIndex: Int? {
+        guard let selectedIndex, tabs.indices.contains(selectedIndex) else {
+            return tabs.isEmpty ? nil : 0
+        }
+        return selectedIndex
+    }
+}
+
 /// One window, as the session file records it.
 ///
 /// New with `2026-08-26-multiple-windows-and-split-panes`. Everything here used
@@ -96,12 +132,28 @@ public struct SessionWindow: Codable, Equatable, Sendable {
 
     /// The split's right-hand pane, as an index into ``tabs``.
     ///
-    /// Absent means the window was not split, which is what every session file
-    /// written before this feature says by omission.
+    /// Written by `2026-08-26-multiple-windows-and-split-panes`' one-bar model,
+    /// where the split was one tab shown beside another rather than a group of
+    /// its own. **Read on restore, never written again**
+    /// (`2026-08-26-editor-groups-per-pane-tab-bars`): a file with this field
+    /// and no ``groups`` comes back as two groups, the named tab alone in the
+    /// second. Absent means the window was not split.
     public var secondaryIndex: Int?
 
-    /// Which pane was focused: ``Pane``'s raw value. Absent means primary.
+    /// Which group has the focus, as an index into ``groups``.
+    ///
+    /// A string because it used to be ``Pane``'s raw value, and a session file
+    /// written by the one-bar build says `"primary"` or `"secondary"`. Both
+    /// spellings are read; only the index is written.
     public var focus: String?
+
+    /// This window's editor groups, left to right.
+    ///
+    /// Absent in every file written before
+    /// `2026-08-26-editor-groups-per-pane-tab-bars`, which is what
+    /// ``effectiveGroups`` migrates. Present, it is the truth and ``tabs``
+    /// duplicates its first entry.
+    public var groups: [SessionGroup]?
 
     /// Where the divider sat, as a fraction of the window's width.
     public var splitFraction: Double?
@@ -127,6 +179,7 @@ public struct SessionWindow: Codable, Equatable, Sendable {
         selectedIndex: Int? = nil,
         secondaryIndex: Int? = nil,
         focus: String? = nil,
+        groups: [SessionGroup]? = nil,
         splitFraction: Double? = nil,
         frame: String? = nil,
         sidebarCollapsed: Bool? = nil,
@@ -140,6 +193,7 @@ public struct SessionWindow: Codable, Equatable, Sendable {
         self.selectedIndex = selectedIndex
         self.secondaryIndex = secondaryIndex
         self.focus = focus
+        self.groups = groups
         self.splitFraction = splitFraction
         self.frame = frame
         self.sidebarCollapsed = sidebarCollapsed
@@ -151,7 +205,7 @@ public struct SessionWindow: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case tabs, selectedIndex, secondaryIndex, focus, splitFraction, frame
+        case tabs, selectedIndex, secondaryIndex, focus, groups, splitFraction, frame
         case sidebarCollapsed, sidebarRoot, sidebarBack, sidebarForward, sidebarOptions
         case editorVisible
     }
@@ -162,6 +216,7 @@ public struct SessionWindow: Codable, Equatable, Sendable {
         selectedIndex = try container.decodeIfPresent(Int.self, forKey: .selectedIndex)
         secondaryIndex = try container.decodeIfPresent(Int.self, forKey: .secondaryIndex)
         focus = try container.decodeIfPresent(String.self, forKey: .focus)
+        groups = try container.decodeIfPresent([SessionGroup].self, forKey: .groups)
         splitFraction = try container.decodeIfPresent(Double.self, forKey: .splitFraction)
         frame = try container.decodeIfPresent(String.self, forKey: .frame)
         sidebarCollapsed = try container.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed)
@@ -173,19 +228,68 @@ public struct SessionWindow: Codable, Equatable, Sendable {
         editorVisible = try container.decodeIfPresent(Bool.self, forKey: .editorVisible)
     }
 
-    /// The pane arrangement this window describes, repaired if the file lies.
+    /// The split's right-hand tab as the one-bar model recorded it, repaired if
+    /// the file lies.
     ///
     /// A hand-edited or truncated file can name a `secondaryIndex` that is out
     /// of range, or the same index as `selectedIndex` — which would put one tab
-    /// in both panes, the one thing
-    /// `2026-08-26-multiple-windows-and-split-panes` forbids outright. Repaired
-    /// to "not split" rather than refused, matching this file's existing
-    /// posture on a second preview tab: a bad session file costs the user a
-    /// pane, never their documents.
+    /// in two places, which is still forbidden. Repaired to "not split" rather
+    /// than refused, matching this file's posture on a second preview tab: a bad
+    /// session file costs the user a pane, never their documents.
     public var repairedSecondaryIndex: Int? {
         guard let secondaryIndex, tabs.indices.contains(secondaryIndex) else { return nil }
         guard secondaryIndex != selectedIndex else { return nil }
         return secondaryIndex
+    }
+
+    /// The groups to restore: ``groups`` when the file has it, otherwise the
+    /// one-bar model's fields read as groups.
+    ///
+    /// The migration is the whole of this property's reason to exist. A file
+    /// from the one-bar build says "these are the window's tabs, and tab *n* is
+    /// also on the right" — so the tab named by ``repairedSecondaryIndex``
+    /// becomes a second group holding it alone, and everything else stays in
+    /// the first. That is the arrangement the user was looking at when the file
+    /// was written, expressed in the model that replaced it.
+    ///
+    /// Empty groups are dropped rather than restored: a group with no tabs is
+    /// not a state this model has, and a window with no tabs at all is one
+    /// empty group, not two.
+    public var effectiveGroups: [SessionGroup] {
+        if let groups {
+            let kept = groups.filter { !$0.tabs.isEmpty }
+            return kept.isEmpty ? [SessionGroup()] : Array(kept.prefix(2))
+        }
+        guard let secondary = repairedSecondaryIndex else {
+            return [SessionGroup(tabs: tabs, selectedIndex: selectedIndex)]
+        }
+        var first: [SessionTab] = []
+        var selected: Int?
+        for (index, tab) in tabs.enumerated() where index != secondary {
+            if index == selectedIndex { selected = first.count }
+            first.append(tab)
+        }
+        return [
+            SessionGroup(tabs: first, selectedIndex: selected ?? (first.isEmpty ? nil : 0)),
+            SessionGroup(tabs: [tabs[secondary]], selectedIndex: 0),
+        ]
+    }
+
+    /// Which group had the focus, as an index into ``effectiveGroups``.
+    ///
+    /// Reads both spellings: an index written by this model, and the one-bar
+    /// build's `"primary"` / `"secondary"`. Out of range means the first group,
+    /// because a focused group that does not exist would leave every menu item
+    /// greyed out.
+    public var focusedGroupIndex: Int {
+        guard let focus else { return 0 }
+        let index: Int
+        switch focus {
+        case "primary": index = 0
+        case "secondary": index = 1
+        default: index = Int(focus) ?? 0
+        }
+        return effectiveGroups.indices.contains(index) ? index : 0
     }
 }
 

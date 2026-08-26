@@ -575,14 +575,20 @@ public struct TabSummary: Equatable, Sendable {
     /// `mark-bench`.
     public var window: Int?
 
-    /// Which pane, when the window is split: ``Pane``'s raw value, or `nil` for
-    /// a tab that is not on screen.
-    public var pane: String?
+    /// Which editor group holds this tab: `0` for the left, `1` for the right
+    /// half of a split (`2026-08-26-editor-groups-per-pane-tab-bars`).
+    ///
+    /// Replaces the one-bar model's `pane`, which named the *side a document
+    /// was displayed on* and was null for every tab that was merely open. A
+    /// group is a set of tabs, so every tab in a window has one, and "which
+    /// half of the window is this in" is answerable for all of them rather than
+    /// for the one or two on screen.
+    public var group: Int?
 
     public init(
         index: Int, path: String, title: String, selected: Bool, resident: Bool,
         preview: Bool = false, openTasks: Int? = nil, totalTasks: Int? = nil,
-        window: Int? = nil, pane: String? = nil
+        window: Int? = nil, group: Int? = nil
     ) {
         self.index = index
         self.path = path
@@ -593,7 +599,7 @@ public struct TabSummary: Equatable, Sendable {
         self.openTasks = openTasks
         self.totalTasks = totalTasks
         self.window = window
-        self.pane = pane
+        self.group = group
     }
 
     public var json: JSONValue {
@@ -612,7 +618,7 @@ public struct TabSummary: Equatable, Sendable {
         // wire, which is what `2026-08-24-cli-app-unix-socket-ipc` requires of
         // a protocol change that does not bump the version.
         if let window { object["window"] = .int(window) }
-        if let pane { object["pane"] = .string(pane) }
+        if let group { object["group"] = .int(group) }
         return .object(object)
     }
 }

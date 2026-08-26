@@ -262,9 +262,9 @@ struct FindBarWindowTests {
         // at all on screen while rendering perfectly offscreen until this was
         // the other way round.
         let panes = controller.previewPane.subviews
-        let container = try #require(panes.firstIndex { $0 === controller.documentContainer })
+        let groups = try #require(panes.firstIndex { $0 === controller.groupSplit })
         let bar = try #require(panes.firstIndex { $0 === controller.findBar })
-        #expect(bar > container, "the find bar is under the web view in z-order")
+        #expect(bar > groups, "the find bar is under the web view in z-order")
 
         controller.window?.setContentSize(NSSize(width: 1168, height: 700))
         controller.window?.contentView?.layoutSubtreeIfNeeded()
@@ -272,9 +272,12 @@ struct FindBarWindowTests {
         controller.previewPane.layoutSubtreeIfNeeded()
         let pane = controller.previewPane.bounds
         #expect(controller.findBar.frame.maxY == pane.maxY, "the bar is on the bottom edge")
+        // One find bar per window, under **every** group
+        // (`2026-08-26-editor-groups-per-pane-tab-bars`): ⌘F acts on the
+        // document being acted on, and the focused group is what says which.
         #expect(
-            controller.documentContainer.frame.maxY == controller.findBar.frame.minY,
-            "the document ends where the bar begins")
+            controller.groupSplit.frame.maxY == controller.findBar.frame.minY,
+            "the groups end where the bar begins")
     }
 
     @Test("⌘F shows the bar and Done hides it")

@@ -81,27 +81,32 @@ struct ResidencyTests {
     @Test("a displayed tab that is not selected is never evicted")
     func displayedTabsSurviveEviction() throws {
         let harness = try TabHarness(residentLimit: 2)
+        let groups = harness.makeGroups()
         let store = harness.store
         store.open(harness.file(named: "a.md"))
-        let selected = store.open(harness.file(named: "b.md"))
-        // `splitRight` puts the most recently used *other* tab on the right and
-        // leaves the focus alone, so `right` is displayed and not selected —
-        // exactly the state the third exemption exists for.
-        #expect(store.splitRight())
-        let right = try #require(store.secondary)
+        store.open(harness.file(named: "b.md"))
+        // With groups, "displayed and not selected" is a *window* state rather
+        // than a store one: the unfocused group's selection is on screen, and
+        // `selected` — the thing every menu item means — is the focused
+        // group's. Exactly the state the third exemption exists for.
+        #expect(groups.splitRight())
+        #expect(groups.focusOther())
+        let unfocused = try #require(groups.unfocused?.selected)
 
-        #expect(store.selected === selected)
-        #expect(right !== selected)
-        #expect(store.displayedTabs.count == 2)
+        #expect(groups.focused.selected !== unfocused)
+        #expect(groups.displayedTabs.count == 2)
 
-        // Enough new tabs to overflow twice over. The split's right-hand pane
-        // is not the selected tab, so only the displayed-tab rule saves it.
+        // Enough new tabs to overflow twice over, opened into the focused
+        // group. The other group's document is not the tab any menu acts on, so
+        // only the displayed-tab rule saves it.
         for url in try harness.fixture.makeDocuments(count: 4, prefix: "flood") {
-            store.open(url)
+            groups.focused.open(url)
         }
 
-        #expect(right.state.isResident, "the other pane's document was dehydrated under the reader")
-        #expect(right.isDisplayed)
+        #expect(
+            unfocused.state.isResident,
+            "the other group's document was dehydrated under the reader")
+        #expect(unfocused.isDisplayed)
     }
 
     /// The limit is a target that on-screen work outranks — stated in the ADR
@@ -110,13 +115,13 @@ struct ResidencyTests {
     func displayedTabsMayExceedTheLimit() throws {
         let governor = ResidencyGovernor(limit: 1)
         let harness = try TabHarness(governor: governor)
-        let store = harness.store
-        store.open(harness.file(named: "a.md"))
-        store.open(harness.file(named: "b.md"))
-        #expect(store.splitRight())
+        let groups = harness.makeGroups()
+        harness.store.open(harness.file(named: "a.md"))
+        harness.store.open(harness.file(named: "b.md"))
+        #expect(groups.splitRight())
 
-        let left = try #require(store.primary)
-        let right = try #require(store.secondary)
+        let left = try #require(groups.groups[0].selected)
+        let right = try #require(groups.groups[1].selected)
         #expect(left.state.isResident)
         #expect(right.state.isResident)
         #expect(governor.residentCount == 2, "a limit of 1 cannot mean one blank pane")

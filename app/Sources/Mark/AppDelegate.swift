@@ -513,9 +513,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 
-        // `2026-08-26-multiple-windows-and-split-panes`: two documents on
-        // screen, one tab bar, and a focused pane that says which one the bar
-        // and the find bar act on. ⌘\ and its two modifiers were free.
+        // `2026-08-26-editor-groups-per-pane-tab-bars`: two editor groups, each
+        // with its own tabs and its own bar, and a focused one that says which
+        // documents every other menu item here means. ⌘\ and its two modifiers
+        // were free.
         viewMenu.addItem(
             withTitle: "Split Right", action: #selector(MainWindowController.splitRight(_:)),
             keyEquivalent: "\\")
@@ -527,6 +528,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             withTitle: "Focus Other Pane",
             action: #selector(MainWindowController.focusOtherPane(_:)), keyEquivalent: "\\")
         focusPaneItem.keyEquivalentModifierMask = [.command, .option]
+        // No key equivalent, and deliberately: ⌘\ already answers "show me
+        // two", and this is the accessible half of dragging a tab across the
+        // divider rather than a second way to split.
+        viewMenu.addItem(
+            withTitle: "Move Tab to Other Pane",
+            action: #selector(MainWindowController.moveToOtherPane(_:)), keyEquivalent: "")
         viewMenu.addItem(.separator())
 
         // M7's catalogue, in the menu bar. A group of its own because it is the

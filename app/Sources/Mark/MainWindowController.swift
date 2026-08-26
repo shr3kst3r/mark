@@ -29,11 +29,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The two of them, stacked. One sidebar still, as ADR-4 requires.
     public let sidebarPane: SidebarPaneController
 
-    public let tabs: TabStore
-    public let tabBar: TabBarView
+    /// This window's editor groups: one, or two when split
+    /// (`2026-08-26-editor-groups-per-pane-tab-bars`).
+    public let groups: TabGroups
 
-    /// Where the resident web views live, stacked. Exactly one is unhidden.
-    public let documentContainer: DocumentContainerView
+    /// The focused group's documents.
+    ///
+    /// Deliberately still called `tabs`, and still the thing every menu item,
+    /// the window title, the find bar, the editor binding and every socket
+    /// command mean. With one group this is exactly what it always was; with
+    /// two, "the tabs" is a question about the focused group and this is the
+    /// answer. It is what keeps the ~40 call sites that ask for `tabs.selected`
+    /// from each having to decide which group they meant.
+    public var tabs: TabStore { groups.focused }
+
+    /// The focused group's tab bar.
+    public var tabBar: TabBarView { area(at: groups.focusIndex).tabBar }
+
+    /// Where the focused group's resident web views live.
+    public var documentContainer: DocumentContainerView { area(at: groups.focusIndex).container }
+
+    /// One area per group: a tab bar with that group's documents under it.
+    ///
+    /// Parallel to ``TabGroups/groups`` by index, and rebuilt whenever the
+    /// arrangement changes. Kept as its own array rather than hung off the
+    /// stores so that a store — which knows nothing about AppKit — stays that
+    /// way.
+    public private(set) var areas: [DocumentAreaView] = []
+
+    /// The areas side by side, with the divider between them.
+    public let groupSplit: GroupSplitView
 
     /// ⌘F's bar, along the bottom of the preview. Hidden until asked for.
     public let findBar: FindBar
@@ -99,10 +124,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// its metadata through the core without a DOM being involved at all.
     private var watcher: FileWatcher!
 
-    /// Shown when every tab has been closed. The window stays — it still has
-    /// the sidebar, which is the entire reason ADR-4 chose one window over N.
-    private let emptyStateLabel: NSTextField
-
     /// The selected tab's view, or `nil` when nothing is open.
     ///
     /// Optional on purpose. In M2 this was a stored, always-present property;
@@ -117,15 +138,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar = TreeViewController(root: root)
         toc = TableOfContentsViewController()
         sidebarPane = SidebarPaneController(tree: sidebar, contents: toc)
-        tabs = TabStore()
-        tabBar = TabBarView(store: tabs)
-        documentContainer = DocumentContainerView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
-
-        emptyStateLabel = NSTextField(labelWithString: "No document open")
-        emptyStateLabel.font = .systemFont(ofSize: 15)
-        emptyStateLabel.textColor = .tertiaryLabelColor
-        emptyStateLabel.alignment = .center
-        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+        groups = TabGroups()
+        groupSplit = GroupSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
 
         editor = EditorPane(frame: NSRect(x: 0, y: 0, width: 380, height: 700))
         // Hidden by default: ADR-6 says *"the pane is collapsible and hidden by
@@ -139,7 +153,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         previewPane = PreviewPaneView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 700),
             findBar: findBar,
-            container: documentContainer
+            container: groupSplit
         )
 
         editorSplit = NSSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
@@ -148,15 +162,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         editorSplit.addSubview(previewPane)
         editorSplit.addSubview(editor)
 
-        let documentArea = DocumentAreaView(
+        let body = WindowBodyView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 700),
-            tabBar: tabBar,
-            container: editorSplit
+            content: editorSplit
         )
-        documentContainer.addSubview(emptyStateLabel)
 
         let documentController = NSViewController()
-        documentController.view = documentArea
+        documentController.view = body
 
         let splitViewController = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarPane)
@@ -203,19 +215,21 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         editorSplit.delegate = self
         conflicts.use(presenter: AlertConflictPresenter(window: window))
 
-        NSLayoutConstraint.activate([
-            emptyStateLabel.centerXAnchor.constraint(equalTo: documentContainer.centerXAnchor),
-            emptyStateLabel.centerYAnchor.constraint(equalTo: documentContainer.centerYAnchor),
-        ])
-
         // Before the store gets a delegate, so no tab can exist — and therefore
         // no `tabStoreDidChangeTabs` can reach ``syncWatchedFiles()`` — while
         // this is still nil.
         watcher = FileWatcher { [weak self] change in
             self?.documentChangedOnDisk(change)
         }
-        tabs.delegate = self
-        tabs.hydrator = self
+        // Before any group can exist, so a store made by a split arrives wired
+        // rather than being wired by whoever remembered to.
+        groups.delegate = self
+        groups.configureStore = { [weak self] store in
+            store.delegate = self
+            store.hydrator = self
+        }
+        groups.configureStore?(groups.focused)
+        rebuildAreas()
         // Single click skims, double click keeps — VS Code's preview tab, and
         // the reason clicking down a directory of notes leaves one tab rather
         // than one per file. The two callbacks differ only in that flag; both
@@ -235,16 +249,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // dirty tab"*. The sidebar's badge is a task count computed from a file
         // read, so it asks here first and counts the buffer's tasks instead.
         sidebar.badges.dirtySource = { [weak self] url in
-            self?.tabs.tab(for: url)?.authoritativeSource
+            self?.tab(for: url)?.authoritativeSource
         }
-        documentArea.onDrop = { [weak self] urls in
+        body.onDrop = { [weak self] urls in
             self?.sidebar.handleDrop(urls) ?? false
         }
-        documentContainer.onSplitFractionChanged = { [weak self] _ in
+        groupSplit.onSplitFractionChanged = { [weak self] fraction in
+            self?.groups.splitFraction = fraction
             self?.saveSessionSoon()
-        }
-        documentContainer.onPaneClicked = { [weak self] pane in
-            self?.tabs.moveFocus(to: pane)
         }
         // Picking a heading scrolls the preview to it — the sidebar's other
         // half answers "which file", this one answers "where in it".
@@ -278,19 +290,151 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         Log.app.info(
             "open \(url.lastPathComponent, privacy: .public)\(preview ? " (preview)" : "", privacy: .public)"
         )
-        tabs.open(url, preview: preview)
+        openInFocusedGroup(url, preview: preview)
     }
 
-    /// Move the focus to whichever pane is showing `tab`.
+    /// Open `url` in the focused group — unless it is already open in the other
+    /// one, in which case go there.
+    ///
+    /// **The window-level half of "a document is open in at most one place"**
+    /// (`2026-08-26-editor-groups-per-pane-tab-bars`). ``TabStore/open(_:)``
+    /// re-selects a document it already holds, but a store only knows its own
+    /// group: with two of them, every route in — the sidebar, ⌘T, a drop,
+    /// `mark open`, `mark://`, a file opened by LaunchServices at launch —
+    /// would otherwise make a second tab and a second `WKWebView` for a
+    /// document already on screen in the other half of the window. That is
+    /// ~52 MB and two DOMs for one file, which the ADR forbids outright.
+    ///
+    /// Found in the other group, this focuses it there rather than refusing:
+    /// the reader asked to see a document, and it is already visible.
+    @discardableResult
+    func openInFocusedGroup(_ url: URL, preview: Bool = false) -> DocumentTab {
+        let standardized = url.standardizedFileURL
+        if let existing = tab(for: standardized),
+            groups.group(of: existing) !== groups.focused
+        {
+            Log.tabs.info(
+                "\(existing.title, privacy: .public) is already open in the other group; going there"
+            )
+            select(existing)
+            return existing
+        }
+        return tabs.open(url, preview: preview)
+    }
+
+    /// Move the focus to whichever group holds `tab`.
     ///
     /// The destination of ``DocumentView/onFocus``: the reader clicked into a
-    /// document, and the window has to decide that document is now the one the
-    /// tab bar, the find bar and the menus act on.
-    func focusPane(showing tab: DocumentTab) {
-        guard let pane = Pane.allCases.first(where: { tabs.panes.tab(in: $0) === tab }) else {
-            return
+    /// document, and the window has to decide that document's group is now the
+    /// one the menus, the find bar and the editor act on.
+    func focusGroup(holding tab: DocumentTab) {
+        guard let index = groups.index(of: tab) else { return }
+        groups.focus(index)
+    }
+
+    /// The area for the group at `index`.
+    ///
+    /// Clamped rather than trapping: `areas` is rebuilt from ``groups`` on every
+    /// arrangement change, and a caller asking during that rebuild should get
+    /// the window's remaining group rather than a crash.
+    func area(at index: Int) -> DocumentAreaView {
+        areas[min(max(0, index), areas.count - 1)]
+    }
+
+    /// Select `tab` in whichever group holds it, and act on that group.
+    ///
+    /// The window-level counterpart to ``TabStore/select(_:)``: a command or a
+    /// menu item naming a document in the other half of a split means "show me
+    /// that", and showing it without moving the focus would leave the next
+    /// action landing in the group the reader is no longer looking at.
+    public func select(_ tab: DocumentTab) {
+        guard let index = groups.index(of: tab) else { return }
+        groups.focus(index)
+        groups.groups[index].select(tab)
+    }
+
+    /// Close `tab` in whichever group holds it.
+    public func close(_ tab: DocumentTab) {
+        groups.group(of: tab)?.close(tab)
+    }
+
+    /// The tab open on `url` **anywhere in this window**, in either group.
+    ///
+    /// Every socket command, the sidebar's dirty-source lookup and the watcher
+    /// all ask this rather than the focused group: a document open in the other
+    /// half of a split is open in this window, and answering "no tab is open on
+    /// that" about a document plainly on screen is the confusion
+    /// `2026-08-26-editor-groups-per-pane-tab-bars` has to avoid.
+    public func tab(for url: URL) -> DocumentTab? {
+        let standardized = url.standardizedFileURL
+        return groups.allTabs.first { $0.url == standardized }
+    }
+
+    /// The container the group holding `tab` draws into.
+    func container(for tab: DocumentTab) -> DocumentContainerView {
+        guard let index = groups.index(of: tab) else { return documentContainer }
+        return area(at: index).container
+    }
+
+    /// Rebuild one area per group, keeping the areas that already exist.
+    ///
+    /// Kept rather than remade, because an area owns a
+    /// ``DocumentContainerView`` full of resident web views: rebuilding it would
+    /// dehydrate every document in the group to reparent them, which is ~4.7 ms
+    /// each and loses their DOM — for a divider moving.
+    private func rebuildAreas() {
+        areas = groups.groups.map { store in
+            if let existing = areas.first(where: { $0.tabBar.store === store }) { return existing }
+            return makeArea(for: store)
         }
-        tabs.moveFocus(to: pane)
+        groupSplit.show(areas)
+        groupSplit.splitFraction = groups.splitFraction
+        refreshAreas()
+    }
+
+    /// Point every area at its group's current selection and focus state.
+    private func refreshAreas() {
+        for (index, store) in groups.groups.enumerated() where areas.indices.contains(index) {
+            let area = areas[index]
+            area.tabBar.isActive = index == groups.focusIndex
+            area.tabBar.reload()
+            let bar = store.isEmpty
+            if area.tabBar.isHidden != bar {
+                area.tabBar.isHidden = bar
+                area.needsLayout = true
+            }
+            area.container.show(store.selected?.documentView)
+        }
+        groupSplit.needsLayout = true
+    }
+
+    private func makeArea(for store: TabStore) -> DocumentAreaView {
+        let bar = TabBarView(store: store)
+        bar.onFocusRequested = { [weak self, weak store] in
+            guard let self, let store else { return }
+            self.groups.focus(store)
+        }
+        bar.onDragOut = { [weak self] tab, locationInWindow in
+            self?.moveTabByDrag(tab, to: locationInWindow) ?? false
+        }
+        let container = DocumentContainerView(
+            frame: NSRect(x: 0, y: 0, width: 450, height: 700))
+        container.onFocusRequested = { [weak self, weak store] in
+            guard let self, let store else { return }
+            self.groups.focus(store)
+        }
+        return DocumentAreaView(tabBar: bar, container: container)
+    }
+
+    /// A tab dropped out of its bar. Moves it if the drop landed in the other
+    /// group's half of the split.
+    private func moveTabByDrag(_ tab: DocumentTab, to locationInWindow: NSPoint) -> Bool {
+        guard groups.isSplit, let source = groups.index(of: tab) else { return false }
+        let point = groupSplit.convert(locationInWindow, from: nil)
+        guard let target = groupSplit.areaIndex(at: point), target != source else { return false }
+        guard groups.moveToOtherGroup(tab) else { return false }
+        saveSessionSoon()
+        return true
     }
 
     /// Point the sidebar somewhere else, recording it in the history.
@@ -345,7 +489,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// `mark://`, session restore — is watched by construction and there is no
     /// second list to forget to update.
     func syncWatchedFiles() {
-        watcher.setWatched(Set(tabs.tabs.map(\.url)))
+        // Every group's documents, not the focused one's: a file open in the
+        // other half of a split is on screen, and a window that stopped
+        // watching it would show a stale document with no way to know.
+        watcher.setWatched(Set(groups.allTabs.map(\.url)))
     }
 
     /// A watched file changed on disk.
@@ -363,7 +510,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func documentChangedOnDisk(_ change: FileChange) {
         externalChangesSeen += 1
         let url = change.url.standardizedFileURL
-        let matching = tabs.tabs.filter { $0.url == url }
+        let matching = groups.allTabs.filter { $0.url == url }
         guard !matching.isEmpty else {
             // The tab closed between the scan and this hop to the main actor.
             Log.watch.debug("change for \(url.lastPathComponent, privacy: .public); no tab open")
@@ -416,8 +563,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 }
 
                 tab.refreshMetadata { [weak self, weak tab] in
-                    guard let self, let tab, self.tabs.tabs.contains(tab) else { return }
-                    self.tabBar.reload()
+                    guard let self, let tab, let index = self.groups.index(of: tab),
+                        self.areas.indices.contains(index)
+                    else { return }
+                    self.areas[index].tabBar.reload()
                 }
                 guard let view = tab.documentView else {
                     Log.watch.debug(
@@ -601,7 +750,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     @discardableResult
     public func flushDirtyBuffers() -> Int {
         var saved = 0
-        for tab in tabs.tabs {
+        // Every group, because unsaved work is not a question about which half
+        // of the window is being looked at.
+        for tab in groups.allTabs {
             guard let buffer = tab.buffer, buffer.isDirty else { continue }
             if buffer.isConflicted {
                 // Never resolve a conflict by writing — not even at quit.
@@ -807,19 +958,16 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// This window's state, for the coordinator to assemble with the others.
     public func windowSnapshot() -> SessionWindow {
         let sidebarState = sidebar.snapshot()
+        // The groups, then this window's own chrome on top of them. The
+        // duplication between `groups[0]` and the flat `tabs` field is
+        // deliberate and lives in ``TabGroups/snapshotWindow(sidebarRoot:)``.
+        var entry = groups.snapshotWindow(sidebarRoot: nil)
         return SessionWindow(
-            tabs: tabs.tabs.map {
-                SessionTab(
-                    path: $0.url.path,
-                    scrollOffset: $0.documentView?.scrollOffset ?? $0.scrollOffset,
-                    title: $0.metadata?.documentTitle,
-                    preview: $0.isPreview
-                )
-            },
-            selectedIndex: tabs.selectedIndex,
-            secondaryIndex: tabs.secondary.flatMap { tabs.index(of: $0) },
-            focus: tabs.focus.rawValue,
-            splitFraction: Double(documentContainer.splitFraction),
+            tabs: entry.tabs,
+            selectedIndex: entry.selectedIndex,
+            focus: entry.focus,
+            groups: entry.groups,
+            splitFraction: entry.splitFraction,
             frame: window.map { NSStringFromRect($0.frame) },
             sidebarCollapsed: isSidebarCollapsed,
             sidebarRoot: sidebar.root.path,
@@ -873,12 +1021,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 )
             )
         }
-        if let fraction = state.splitFraction {
-            documentContainer.splitFraction = CGFloat(fraction)
-        }
         restoreFrame(state.frame)
         setSidebarCollapsed(state.sidebarCollapsed ?? false)
-        tabs.restore(state)
+        // The groups, the split and the divider all come from here — including
+        // a file written by the one-bar build, whose `secondaryIndex` comes back
+        // as a second group holding that document alone
+        // (``SessionWindow/effectiveGroups``).
+        groups.restore(state)
         // After the tabs, because showing the pane binds the selected tab's
         // buffer and there is no selection until `restore` has made one. A
         // session with no tabs restores no pane either: an editor bound to
@@ -944,12 +1093,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         let selected = tabs.selected
         window?.title = selected?.title ?? "mark"
         window?.representedURL = selected?.url
-        emptyStateLabel.isHidden = !tabs.isEmpty
         updateTableOfContents()
-        if tabBar.isHidden != tabs.isEmpty {
-            tabBar.isHidden = tabs.isEmpty
-            tabBar.superview?.needsLayout = true
-        }
+        refreshAreas()
         // Only the window in front owns the menu bar. Without the guard, a
         // background window refreshing its badges would retitle ⌘1–⌘9 with
         // *its* tabs while the user is looking at another window's.
@@ -990,13 +1135,16 @@ extension MainWindowController: TabHydrator {
 
     /// Hydration. Every web view made in the app is made here.
     public func makeDocumentView(for tab: DocumentTab) -> DocumentView {
-        let view = DocumentView(frame: documentContainer.bounds)
-        // Frame-based rather than autoresizing, because the container now
-        // places its views rather than stacking them: a split gives the two
-        // displayed views half the width each, and an autoresizing mask would
+        // The container of the group that holds this tab, not the focused
+        // group's: splitting hydrates into a group the focus is about to move
+        // to, and a window with two groups has two places a document can live.
+        let container = container(for: tab)
+        let view = DocumentView(frame: container.bounds)
+        // Frame-based rather than autoresizing, because the container gives its
+        // displayed view the bounds itself, and an autoresizing mask would
         // fight `DocumentContainerView.layout()` for the frame on every resize.
         view.isHidden = true
-        documentContainer.addSubview(view)
+        container.addSubview(view)
         wire(view, to: tab)
         view.open(
             tab.url, source: tab.authoritativeSource, restoringScrollTo: tab.scrollOffset)
@@ -1030,7 +1178,7 @@ extension MainWindowController: TabHydrator {
         // taking first-responder rather than from a mouse event we never see.
         view.onFocus = { [weak self, weak tab] in
             guard let self, let tab else { return }
-            self.focusPane(showing: tab)
+            self.focusGroup(holding: tab)
         }
         // ADR-6: *"nothing may read the file for rendering […] on a dirty
         // tab"*. Rehydration is a render, so a dirty tab is rehydrated from its
@@ -1053,8 +1201,9 @@ extension MainWindowController: TabHydrator {
     /// move at all without being dehydrated, which
     /// `2026-08-25-flock-write-locking` forbids.
     public func adopt(_ view: DocumentView, for tab: DocumentTab) {
+        let container = container(for: tab)
         view.isHidden = true
-        documentContainer.addSubview(view)
+        container.addSubview(view)
         wire(view, to: tab)
         // The buffer's callbacks captured the old window too, and one of them
         // is load-bearing in a way that fails silently — see `wire(_:to:)` for
@@ -1062,7 +1211,7 @@ extension MainWindowController: TabHydrator {
         if let buffer = tab.buffer {
             wire(buffer, to: tab)
         }
-        documentContainer.needsLayout = true
+        container.needsLayout = true
     }
 }
 
@@ -1095,42 +1244,40 @@ extension MainWindowController: TabStoreDelegate {
     }
 
     public func tabStoreDidChangeTabs(_ store: TabStore) {
-        tabBar.reload()
+        if let index = groups.groups.firstIndex(where: { $0 === store }),
+            areas.indices.contains(index)
+        {
+            areas[index].tabBar.reload()
+        }
         updateChrome()
         syncWatchedFiles()
         saveSessionSoon()
     }
 
-    /// Which document is in which pane, and which pane is being acted on.
+    /// A group's selection moved.
     ///
-    /// The switch itself is still a show/hide, measured at 0.05 ms median
-    /// because that is all it is: no re-injection, no re-layout of the
-    /// document, no scroll restoration. Splitting adds a second view to the
-    /// same operation rather than a different one.
-    public func tabStore(_ store: TabStore, didChangePanes panes: PaneArrangement) {
-        let state = Log.signposter.beginInterval("tab switch")
-        documentContainer.show(
-            primary: panes.primary?.documentView,
-            secondary: panes.secondary?.documentView)
-        documentContainer.focusedPane = panes.focus
-        Log.signposter.endInterval("tab switch", state)
-        tabBar.reload()
-        updateChrome()
-        // The bar stays open across a split, and its highlights belonged to
-        // whichever document was being searched.
-        refreshFind()
-        saveSessionSoon()
-    }
-
-    /// The selection moved within the focused pane.
+    /// The switch itself is a show/hide, measured at 0.05 ms median because
+    /// that is all it is: no re-injection, no re-layout of the document, no
+    /// scroll restoration.
+    ///
+    /// Everything after the container is guarded on **which group** fired it.
+    /// The window title, the sidebar's follow, the table of contents, the
+    /// editor binding and the find bar all describe the document being acted
+    /// on, and a selection in the group that does not have the focus is not
+    /// that: a tab closing in the other half of a split must not retitle the
+    /// window or rebind the editor.
     public func tabStore(_ store: TabStore, didSelect tab: DocumentTab?, previous: DocumentTab?) {
-        // The pane contents are set by `didChangePanes`, which the store fires
-        // first. This one is about everything that follows *the selection*
-        // rather than the layout.
-        documentContainer.show(
-            primary: store.panes.primary?.documentView,
-            secondary: store.panes.secondary?.documentView)
-        documentContainer.focusedPane = store.focus
+        let state = Log.signposter.beginInterval("tab switch")
+        if let index = groups.groups.firstIndex(where: { $0 === store }),
+            areas.indices.contains(index)
+        {
+            areas[index].container.show(tab?.documentView)
+            areas[index].tabBar.reload()
+        }
+        Log.signposter.endInterval("tab switch", state)
+        saveSessionSoon()
+        guard store === groups.focused else { return }
+
         // The sidebar follows the selection too, so the tree is always
         // pointing at the document on screen (issue #7). Outside the signpost
         // interval on purpose: ADR-4's 0.05 ms is the show/hide, and folding a
@@ -1146,10 +1293,64 @@ extension MainWindowController: TabStoreDelegate {
                 editor.bind(nil)
             }
         }
-        tabBar.reload()
         updateChrome()
         // The bar stays open across a switch, and its highlights were the
         // other document's. The new document has none until this runs.
+        refreshFind()
+    }
+
+    /// A group ran out of documents.
+    ///
+    /// `2026-08-26-editor-groups-per-pane-tab-bars`: *"closing the last tab in
+    /// a group collapses the split"*. A window with one group keeps it and shows
+    /// its empty state — the sidebar is still there, which is the whole reason a
+    /// mark window is heavier than a bare document viewer.
+    public func tabStoreDidEmpty(_ store: TabStore) {
+        guard groups.collapseIfEmpty(store) else {
+            updateChrome()
+            return
+        }
+        saveSessionSoon()
+    }
+}
+
+// MARK: - TabGroupsDelegate
+
+extension MainWindowController: TabGroupsDelegate {
+
+    /// A group was added or removed.
+    ///
+    /// The areas are rebuilt from the arrangement — kept where they already
+    /// exist, so a split does not dehydrate anything — and the window's chrome
+    /// follows, because a collapse can change which document is being acted on.
+    public func tabGroupsDidChangeLayout(_ groups: TabGroups) {
+        rebuildAreas()
+        syncWatchedFiles()
+        updateChrome()
+        // The find bar spans the window and belongs to the focused group; a
+        // split that arrives or leaves changes which document that is, and its
+        // highlights were the other one's.
+        refreshFind()
+        saveSessionSoon()
+    }
+
+    /// The focus moved to the other group.
+    ///
+    /// Nothing about either group's tabs changed, so this is only the two bars'
+    /// active state and everything downstream of "which document is being acted
+    /// on": the title, the table of contents, the editor binding and the find
+    /// bar.
+    public func tabGroupsDidMoveFocus(_ groups: TabGroups) {
+        refreshAreas()
+        sidebar.follow(tabs.selected?.url)
+        if isEditorVisible {
+            if let tab = tabs.selected {
+                bindEditor(to: tab)
+            } else {
+                editor.bind(nil)
+            }
+        }
+        updateChrome()
         refreshFind()
         saveSessionSoon()
     }
@@ -1202,8 +1403,8 @@ extension MainWindowController: CommandTarget {
         // whatever they are looking at. Re-selecting afterwards is cheap: the
         // new tab is already hydrated and the switch is a show/hide (ADR-4).
         let previous = background ? tabs.selected : nil
-        let tab = tabs.open(url)
-        if let previous, previous != tab { tabs.select(previous) }
+        let tab = openInFocusedGroup(url)
+        if let previous, previous != tab { select(previous) }
         if !background { showWindow(activating: false) }
         return .tab(summary(for: tab))
     }
@@ -1217,9 +1418,13 @@ extension MainWindowController: CommandTarget {
     /// window" is exactly the thing they are trying to discover. `index` stays
     /// per window, which is what `tab select 2` has always meant.
     public func documentTabs() -> [TabSummary] {
-        guard let windows else { return tabs.tabs.map { summary(for: $0) } }
+        // Every group's tabs, in group order — `allTabs` rather than the
+        // focused group's, or a split window would report half its documents
+        // and `mark tab list` would be the least useful place to find out where
+        // one went (`2026-08-26-editor-groups-per-pane-tab-bars`).
+        guard let windows else { return groups.allTabs.map { summary(for: $0) } }
         return windows.controllers.flatMap { controller in
-            controller.tabs.tabs.map { controller.summary(for: $0) }
+            controller.groups.allTabs.map { controller.summary(for: $0) }
         }
     }
 
@@ -1230,17 +1435,17 @@ extension MainWindowController: CommandTarget {
         // has always meant "the third tab of the window I am driving".
         if case .path(let path) = selector {
             let url = CommandRouter.fileURL(from: path)
-            if tabs.tab(for: url) == nil,
-                let owner = windows?.controllers.first(where: { $0.tabs.tab(for: url) != nil }),
-                let tab = owner.tabs.tab(for: url)
+            if tab(for: url) == nil,
+                let owner = windows?.controllers.first(where: { $0.tab(for: url) != nil }),
+                let tab = owner.tab(for: url)
             {
-                owner.tabs.select(tab)
+                owner.select(tab)
                 owner.showWindow(activating: false)
                 return owner.summary(for: tab)
             }
         }
         let tab = try resolve(selector)
-        tabs.select(tab)
+        select(tab)
         showWindow(activating: false)
         return summary(for: tab)
     }
@@ -1249,7 +1454,7 @@ extension MainWindowController: CommandTarget {
         let tab = try resolve(selector)
         // Captured before the close, because afterwards the tab has no index.
         let closed = summary(for: tab)
-        tabs.close(tab)
+        close(tab)
         return closed
     }
 
@@ -1351,7 +1556,9 @@ extension MainWindowController: CommandTarget {
 
         var applied = 0
         var rerendered = 0
-        for tab in tabs.tabs {
+        // Every group: a theme is the app's, and a split window whose other
+        // half kept the old colours would be the bug M7 already fixed once.
+        for tab in groups.allTabs {
             // A dehydrated tab needs nothing: it has no DOM, and it is
             // rendered against the new theme when it next hydrates.
             guard let view = tab.documentView else { continue }
@@ -1467,22 +1674,28 @@ extension MainWindowController: CommandTarget {
         case .selected:
             return try selectedTab()
         case .index(let index):
-            guard tabs.tabs.indices.contains(index) else {
+            // The window's flat index, across its groups in group order — the
+            // same one `mark tab list` prints
+            // (`2026-08-26-editor-groups-per-pane-tab-bars`). A per-group index
+            // would make `tab list` and `tab select` disagree about what "2"
+            // means the moment a window is split.
+            let count = groups.allTabs.count
+            guard let found = groups.tab(atWindowIndex: index) else {
                 throw CommandFailure(
                     .tabNotFound,
-                    "there is no tab \(index); \(tabs.count) \(tabs.count == 1 ? "tab is" : "tabs are") open",
-                    detail: ["index": .int(index), "tabs": .int(tabs.count)]
+                    "there is no tab \(index); \(count) \(count == 1 ? "tab is" : "tabs are") open",
+                    detail: ["index": .int(index), "tabs": .int(count)]
                 )
             }
-            return tabs.tabs[index]
+            return found.tab
         case .path(let path):
             let url = CommandRouter.fileURL(from: path)
-            guard let tab = tabs.tab(for: url) else {
+            guard let tab = tab(for: url) else {
                 // Say *where* it is rather than only that it is not here. With
                 // more than one window "no tab is open on that" is a confusing
                 // thing to be told about a document plainly on screen.
                 if let elsewhere = windows?.controllers.firstIndex(where: {
-                    $0.tabs.tab(for: url) != nil
+                    $0.tab(for: url) != nil
                 }) {
                     throw CommandFailure(
                         .tabNotFound,
@@ -1499,7 +1712,11 @@ extension MainWindowController: CommandTarget {
 
     fileprivate func summary(for tab: DocumentTab) -> TabSummary {
         TabSummary(
-            index: tabs.index(of: tab) ?? -1,
+            // Per *window*, across its groups in group order — which is what
+            // `mark tab select 2` has always meant and still means, now that a
+            // window's tabs can be in two lists
+            // (`2026-08-26-editor-groups-per-pane-tab-bars`).
+            index: groups.windowIndex(of: tab) ?? -1,
             path: tab.url.path,
             title: tab.metadata?.documentTitle ?? tab.title,
             selected: tab == tabs.selected,
@@ -1508,7 +1725,7 @@ extension MainWindowController: CommandTarget {
             openTasks: tab.metadata?.tasks.open,
             totalTasks: tab.metadata?.tasks.total,
             window: windows?.index(of: self),
-            pane: Pane.allCases.first { tabs.panes.tab(in: $0) === tab }?.rawValue
+            group: groups.index(of: tab)
         )
     }
 }
@@ -1544,66 +1761,65 @@ extension MainWindowController: NSMenuItemValidation {
     /// one.
     @objc public func closeTab(_ sender: Any?) {
         guard let tab = tabForMenuItem(sender) else { return }
-        tabs.close(tab)
+        close(tab)
     }
 
+    /// Every other tab **in that tab's group**.
+    ///
+    /// A group is a set of documents the reader put together, so "close the
+    /// others" means the others in the set — closing the other half of a split
+    /// as well would make this item a way to lose work you were comparing
+    /// against.
     @objc public func closeOtherTabs(_ sender: Any?) {
-        guard let keep = tabForMenuItem(sender) else { return }
-        for tab in tabs.tabs where tab != keep { tabs.close(tab) }
+        guard let keep = tabForMenuItem(sender), let owner = groups.group(of: keep) else { return }
+        for tab in owner.tabs where tab != keep { owner.close(tab) }
     }
 
-    // MARK: - Panes (2026-08-26-multiple-windows-and-split-panes)
+    // MARK: - Groups (2026-08-26-editor-groups-per-pane-tab-bars)
 
-    /// ⌘\ — put a second document on screen beside this one.
+    /// ⌘\ — put this document in a group of its own beside the others.
     @objc public func splitRight(_ sender: Any?) {
-        guard tabs.splitRight() else {
+        guard groups.splitRight() else {
             NSSound.beep()
             return
         }
+        moveKeyboardFocusToSelectedDocument()
         saveSessionSoon()
     }
 
-    /// ⇧⌘\ — back to one document, keeping the focused pane's.
+    /// ⇧⌘\ — back to one group, keeping **every** document.
     @objc public func closeSplit(_ sender: Any?) {
-        guard tabs.closeSplit() else { return }
+        guard groups.closeSplit() else { return }
         saveSessionSoon()
     }
 
-    /// ⌥⌘\ — move the focus to the other pane, so the tab bar acts on it.
+    /// ⌥⌘\ — act on the other group.
     @objc public func focusOtherPane(_ sender: Any?) {
-        guard tabs.isSplit else { return }
-        tabs.moveFocus(to: tabs.focus.other)
-        // Move the keyboard as well as the model's idea of focus, so ⌘F and
-        // the arrow keys land in the pane the reader just switched to.
-        if let webView = tabs.selected?.documentView?.webView {
-            window?.makeFirstResponder(webView)
-        }
+        guard groups.focusOther() else { return }
+        moveKeyboardFocusToSelectedDocument()
     }
 
-    /// Open the tab under the pointer — or the selected one — in the right
-    /// pane. The tab bar's context menu; there is no key equivalent, because
-    /// ⌘\ already answers "show me two".
-    @objc public func openInRightPane(_ sender: Any?) {
+    /// Move the tab under the pointer — or the selected one — into the other
+    /// group, splitting if there is only one.
+    ///
+    /// The tab bar's context menu, and the accessible half of the
+    /// drag-across-the-divider gesture. No key equivalent: ⌘\ already answers
+    /// "show me two".
+    @objc public func moveToOtherPane(_ sender: Any?) {
         guard let tab = tabForMenuItem(sender) else { return }
-        guard tabs.count >= 2 else {
+        guard groups.moveToOtherGroup(tab) else {
             NSSound.beep()
             return
         }
-        // Asking for the *left* pane's document on the right, with nothing
-        // split yet, means "put this one over there and show me something
-        // else here" — not "empty the left half". Splitting first gives the
-        // left pane a companion; the swap then puts the asked-for document
-        // where it was asked to go.
-        if !tabs.isSplit, tabs.primary === tab {
-            guard tabs.splitRight() else {
-                NSSound.beep()
-                return
-            }
-            tabs.swapPanes()
-        } else {
-            tabs.show(tab, in: .secondary)
-        }
+        moveKeyboardFocusToSelectedDocument()
         saveSessionSoon()
+    }
+
+    /// Put the keyboard where the focus went, so ⌘F and the arrow keys land in
+    /// the group the reader just moved to rather than the one they left.
+    private func moveKeyboardFocusToSelectedDocument() {
+        guard let webView = tabs.selected?.documentView?.webView else { return }
+        window?.makeFirstResponder(webView)
     }
 
     // MARK: - Windows
@@ -1930,17 +2146,20 @@ extension MainWindowController: NSMenuItemValidation {
         case #selector(closeOtherTabs(_:)):
             return tabs.count > 1
         case #selector(splitRight(_:)):
-            // Two tabs, because a split shows two *different* documents — one
-            // tab in both panes is the thing
-            // `2026-08-26-multiple-windows-and-split-panes` forbids outright.
-            return !tabs.isSplit && tabs.count >= 2
+            // Two tabs in the focused group, because splitting *moves* one: a
+            // group with a single tab has nothing to keep on this side, and one
+            // document in two groups is still forbidden.
+            return !groups.isSplit && tabs.count >= 2
         case #selector(closeSplit(_:)), #selector(focusOtherPane(_:)):
-            return tabs.isSplit
-        case #selector(openInRightPane(_:)):
-            guard let tab = (item.representedObject as? DocumentTab) ?? tabs.selected else {
-                return false
-            }
-            return tabs.count >= 2 && tabs.secondary !== tab
+            return groups.isSplit
+        case #selector(moveToOtherPane(_:)):
+            guard let tab = (item.representedObject as? DocumentTab) ?? tabs.selected,
+                let owner = groups.group(of: tab)
+            else { return false }
+            // Moving a group's only tab is a move when there is somewhere to
+            // move it *to* — which collapses the split — and nothing at all
+            // when there is only one group.
+            return owner.count >= 2 || groups.isSplit
         case #selector(popOutTab(_:)):
             // Popping the only tab out would move this window's contents into a
             // new window and leave an empty one behind, which is not what
@@ -1951,6 +2170,8 @@ extension MainWindowController: NSMenuItemValidation {
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
             return tabs.count > 1
         case #selector(selectTabByNumber(_:)):
+            // The focused group's bar: ⌘1–9 are positions in the bar the reader
+            // is looking at, not in a window-flat list they cannot see.
             return item.tag == 9 ? !tabs.isEmpty : tabs.tabs.indices.contains(item.tag - 1)
         default:
             return true
@@ -2070,20 +2291,67 @@ public final class PreviewPaneView: NSView {
     }
 }
 
-/// The document half of the split: the tab bar on top, the web views below.
+/// One editor group on screen: its tab bar on top, its documents below.
 ///
-/// Frame-based rather than autolayout for the same reason the stacked document
-/// views are: this view has two children whose geometry is one subtraction, and
-/// a constraint solver invoked on every window resize with 20 resident web
-/// views beneath it is a cost with nothing to show for it.
+/// Frame-based rather than autolayout for the same reason the document views
+/// are: this view has two children whose geometry is one subtraction, and a
+/// constraint solver invoked on every window resize with 20 resident web views
+/// beneath it is a cost with nothing to show for it.
+///
+/// **One of these per group** (`2026-08-26-editor-groups-per-pane-tab-bars`).
+/// It used to be the whole document half of the window — tab bar, editor split
+/// and all — because a window had one bar. What was window-level about it lives
+/// in ``WindowBodyView`` now: the title-bar allowance, and the folder drop.
 @MainActor
 public final class DocumentAreaView: NSView {
 
-    private let tabBar: TabBarView
+    public let tabBar: TabBarView
+    public let container: DocumentContainerView
+
+    public init(tabBar: TabBarView, container: DocumentContainerView) {
+        self.tabBar = tabBar
+        self.container = container
+        super.init(frame: NSRect(x: 0, y: 0, width: 450, height: 700))
+        addSubview(tabBar)
+        addSubview(container)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("DocumentAreaView is created in code, not from a nib")
+    }
+
+    public override var isFlipped: Bool { true }
+
+    public override func layout() {
+        let barHeight = tabBar.isHidden ? 0 : TabBarView.barHeight
+        tabBar.frame = NSRect(x: 0, y: 0, width: bounds.width, height: TabBarView.barHeight)
+        container.frame = NSRect(
+            x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight)
+        )
+        super.layout()
+    }
+}
+
+/// The window's document half: everything below the title bar.
+///
+/// Two jobs, both of which used to belong to ``DocumentAreaView`` when a window
+/// had one tab bar and that view *was* the document half:
+///
+/// * **the title-bar allowance.** The window carries `.fullSizeContentView`, so
+///   the content view extends under the title bar and chrome at y = 0 is drawn
+///   behind the traffic lights. With one bar per group there is no single bar to
+///   inset, so the whole body is inset once and every group's bar sits at its
+///   own y = 0.
+/// * **the folder drop**, which is a window-level gesture: dropping a folder
+///   anywhere in the document half sets the sidebar's root, and which group it
+///   landed over means nothing.
+@MainActor
+public final class WindowBodyView: NSView {
+
     /// The preview/editor split. Typed as `NSView` because this view's job is
-    /// two frames and a subtraction; what is inside the lower one is not its
-    /// business.
-    private let container: NSView
+    /// one frame and one subtraction; what is inside it is not its business.
+    private let content: NSView
 
     /// Plan §2 M8's *"drop a folder onto the window to set the root"*, on the
     /// document half. Returns whether the drop was accepted.
@@ -2091,19 +2359,22 @@ public final class DocumentAreaView: NSView {
     /// The sidebar registers for the same drop, so both halves of the window
     /// answer. What neither can claim is the region a `WKWebView` covers:
     /// WebKit installs its own drag destination on its hosting view and takes
-    /// the drop before AppKit walks back up to us. Dropping on the tab bar,
-    /// the empty state, or anywhere in the sidebar works; dropping onto a
-    /// rendered document is WebKit's, and that is a limitation rather than a
-    /// bug we can fix from here.
+    /// the drop before AppKit walks back up to us. Dropping on a tab bar, an
+    /// empty state, or anywhere in the sidebar works; dropping onto a rendered
+    /// document is WebKit's, and that is a limitation rather than a bug we can
+    /// fix from here.
     public var onDrop: (([URL]) -> Bool)?
 
-    public init(frame: NSRect, tabBar: TabBarView, container: NSView) {
-        self.tabBar = tabBar
-        self.container = container
+    public init(frame: NSRect, content: NSView) {
+        self.content = content
         super.init(frame: frame)
-        addSubview(tabBar)
-        addSubview(container)
+        addSubview(content)
         registerForDraggedTypes([.fileURL])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("WindowBodyView is created in code, not from a nib")
     }
 
     public override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -2118,24 +2389,12 @@ public final class DocumentAreaView: NSView {
         onDrop?(SidebarContainerView.urls(from: sender)) ?? false
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("DocumentAreaView is created in code, not from a nib")
-    }
-
     public override var isFlipped: Bool { true }
 
     public override func layout() {
         let top = titlebarInset(for: self)
-        let barHeight = tabBar.isHidden ? 0 : TabBarView.barHeight
-        tabBar.frame = NSRect(
-            x: 0, y: top, width: bounds.width, height: TabBarView.barHeight)
-        container.frame = NSRect(
-            x: 0,
-            y: top + barHeight,
-            width: bounds.width,
-            height: max(0, bounds.height - top - barHeight)
-        )
+        content.frame = NSRect(
+            x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
         super.layout()
     }
 
@@ -2144,27 +2403,107 @@ public final class DocumentAreaView: NSView {
     // `layout()` above is the whole story for entering and leaving full screen.
 }
 
-/// The resident web views, of which one or two are on screen.
+/// One group's resident web views, of which exactly one is on screen.
 ///
-/// Every resident ``DocumentView`` is a subview; ``layout()`` gives the
-/// displayed one or two a frame and hides the rest. Showing a tab is still a
-/// show/hide rather than a re-injection — the outgoing view keeps its DOM, its
-/// scroll position and its JS state, which is what makes a tab switch 0.05 ms.
+/// Every resident ``DocumentView`` for this group is a subview; ``layout()``
+/// gives the displayed one the container's bounds and hides the rest. Showing a
+/// tab is a show/hide rather than a re-injection — the outgoing view keeps its
+/// DOM, its scroll position and its JS state, which is what makes a tab switch
+/// 0.05 ms.
 ///
-/// **A hand-drawn divider rather than an `NSSplitView`.** ``PreviewPaneView``'s
-/// header records a debugging session lost to subview ordering around
-/// layer-hosted `WKWebView`s — a sibling added before them is painted over
-/// wholesale, rendering perfectly in an offscreen snapshot and not at all on
-/// screen. Wrapping this container in a split view rearranges exactly that
-/// hierarchy. A divider view plus the modal tracking loop already used by
-/// ``TabBarView/beginInteraction(with:event:)`` is less code and stays inside a
-/// shape that is known to work here.
+/// **One container per group** (`2026-08-26-editor-groups-per-pane-tab-bars`).
+/// The one-bar model put two documents in one container and framed them side by
+/// side, which is where the split's two rendering bugs lived: this container's
+/// own `draw(_:)` drew a divider and a focus stripe *under* the web views, and
+/// each pane's background painted over the other. Neither is possible now. The
+/// divider belongs to ``GroupSplitView``, above both containers; the focus
+/// indicator belongs to the tab bars; and a container has one document in it.
 @MainActor
 public final class DocumentContainerView: NSView {
 
-    /// How the panes divide the width. Clamped, so neither pane can be dragged
-    /// to nothing — collapsing is what ⇧⌘\ is for, and a 20 pt document is not
-    /// a smaller version of a document, it is an unusable one.
+    public override var isFlipped: Bool { true }
+
+    /// Shown when this group has no tabs. A window keeps its sidebar when every
+    /// document is closed, which is the whole reason a mark window is heavier
+    /// than a bare document viewer.
+    public let emptyStateLabel: NSTextField
+
+    /// The resident ``DocumentView``s, in creation order.
+    public var documentViews: [DocumentView] { subviews.compactMap { $0 as? DocumentView } }
+
+    /// The one on screen, if any.
+    public var visibleDocumentView: DocumentView? { documentViews.first { !$0.isHidden } }
+
+    /// Kept for the callers that ask "which documents are up" without caring
+    /// that the answer is now at most one per container.
+    public var visibleDocumentViews: [DocumentView] { documentViews.filter { !$0.isHidden } }
+
+    /// The view this container is showing.
+    public private(set) var shownView: DocumentView?
+
+    /// Called when the reader clicks the part of this container that no web
+    /// view covers — a request to focus this group.
+    public var onFocusRequested: (() -> Void)?
+
+    public override init(frame frameRect: NSRect) {
+        emptyStateLabel = NSTextField(labelWithString: "No document open")
+        emptyStateLabel.font = .systemFont(ofSize: 15)
+        emptyStateLabel.textColor = .tertiaryLabelColor
+        emptyStateLabel.alignment = .center
+        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+        super.init(frame: frameRect)
+        addSubview(emptyStateLabel)
+        NSLayoutConstraint.activate([
+            emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("DocumentContainerView is created in code, not from a nib")
+    }
+
+    /// Put `view` on screen and hide every other resident view here.
+    public func show(_ view: DocumentView?) {
+        shownView = view
+        for resident in documentViews {
+            resident.isHidden = resident !== view
+        }
+        emptyStateLabel.isHidden = view != nil
+        needsLayout = true
+    }
+
+    public override func layout() {
+        super.layout()
+        shownView?.frame = bounds
+    }
+
+    /// A mouse-down that reached this container landed on the strip no web view
+    /// covers — anything inside one never gets here, because WebKit took it,
+    /// which is why group focus also comes from ``DocumentWebView``.
+    public override func mouseDown(with event: NSEvent) {
+        onFocusRequested?()
+        super.mouseDown(with: event)
+    }
+}
+
+/// The groups side by side, with the divider between them.
+///
+/// **A divider view rather than drawing.** ``PreviewPaneView``'s header records
+/// what drawing does around a layer-hosted `WKWebView`, and
+/// `2026-08-26-editor-groups-per-pane-tab-bars` turned that note into a
+/// constraint after the one-bar split shipped a blank pane: *nothing draws
+/// around a `WKWebView` in a shared coordinate space*. So the divider is a
+/// layer-backed view, added **after** both groups — a sibling added before them
+/// is painted over wholesale, and one added after composites correctly, which
+/// is the same order ``PreviewPaneView`` uses for the find bar.
+@MainActor
+public final class GroupSplitView: NSView {
+
+    /// How the groups divide the width. Clamped, so neither can be dragged to
+    /// nothing — collapsing is what ⇧⌘\ is for, and a 20 pt document is not a
+    /// smaller document, it is an unusable one.
     public static let minimumSplitFraction: CGFloat = 0.2
     public static let maximumSplitFraction: CGFloat = 0.8
     public static let dividerWidth: CGFloat = 1
@@ -2172,33 +2511,14 @@ public final class DocumentContainerView: NSView {
     /// drag. A 1 pt hit target is a 1 pt hit target.
     public static let dividerGrabWidth: CGFloat = 9
 
-    /// The accent stripe marking the focused pane, drawn only when split.
-    public static let focusStripeHeight: CGFloat = 2
-
     public override var isFlipped: Bool { true }
 
-    /// The resident ``DocumentView``s, in creation order.
-    public var documentViews: [DocumentView] { subviews.compactMap { $0 as? DocumentView } }
+    /// The groups' areas, left to right. One, or two when split.
+    public private(set) var areas: [DocumentAreaView] = []
 
-    /// The one or two views on screen, left to right.
-    public var visibleDocumentViews: [DocumentView] { documentViews.filter { !$0.isHidden } }
+    private let divider = DividerView(frame: .zero)
 
-    /// The leftmost view on screen, if any.
-    ///
-    /// Kept for the callers that predate the split and only ever want "the
-    /// document"; anything that cares which pane should ask for ``panes``.
-    public var visibleDocumentView: DocumentView? { visibleDocumentViews.first }
-
-    /// The views the panes are showing. `secondary` is nil when not split.
-    public private(set) var primaryView: DocumentView?
-    public private(set) var secondaryView: DocumentView?
-
-    /// Which pane draws the focus stripe.
-    public var focusedPane: Pane = .primary {
-        didSet { needsDisplay = true }
-    }
-
-    public var isSplit: Bool { secondaryView != nil }
+    public var isSplit: Bool { areas.count == 2 }
 
     /// Where the divider sits, as a fraction of the width.
     public var splitFraction: CGFloat = 0.5 {
@@ -2212,62 +2532,48 @@ public final class DocumentContainerView: NSView {
     /// Called when the reader drags the divider, so the window can persist it.
     public var onSplitFractionChanged: ((CGFloat) -> Void)?
 
-    /// Called when the reader clicks in a pane that is not the focused one.
-    public var onPaneClicked: ((Pane) -> Void)?
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(divider)
+    }
 
-    /// Put these views on screen and hide everything else.
-    public func show(primary: DocumentView?, secondary: DocumentView?) {
-        primaryView = primary
-        secondaryView = secondary
-        for view in documentViews {
-            view.isHidden = view !== primary && view !== secondary
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("GroupSplitView is created in code, not from a nib")
+    }
+
+    /// Put these areas on screen, in this order.
+    public func show(_ areas: [DocumentAreaView]) {
+        for area in self.areas where !areas.contains(area) {
+            area.removeFromSuperview()
         }
+        self.areas = areas
+        for area in areas where area.superview !== self {
+            // Below the divider, which is why it is added rather than drawn:
+            // see this type's header.
+            addSubview(area, positioned: .below, relativeTo: divider)
+        }
+        divider.isHidden = areas.count < 2
         needsLayout = true
-        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
     }
 
     public override func layout() {
         super.layout()
-        guard let primaryView else { return }
-        if let secondaryView {
-            let dividerX = (bounds.width * splitFraction).rounded()
-            primaryView.frame = NSRect(
-                x: 0, y: 0, width: max(0, dividerX), height: bounds.height)
-            secondaryView.frame = NSRect(
-                x: dividerX + Self.dividerWidth, y: 0,
-                width: max(0, bounds.width - dividerX - Self.dividerWidth),
-                height: bounds.height)
-        } else {
-            primaryView.frame = bounds
+        guard !areas.isEmpty else { return }
+        guard areas.count == 2 else {
+            areas[0].frame = bounds
+            divider.frame = .zero
+            return
         }
-    }
-
-    /// The divider and the focused pane's stripe.
-    ///
-    /// Both are drawn rather than being subviews, for the layer-hosting reason
-    /// in this type's header: a sibling view over a `WKWebView` is painted over
-    /// wholesale. Drawing happens in this view's own backing store, underneath
-    /// nothing, and the divider sits in the gap between the two web views where
-    /// there is no web view to be painted over by.
-    public override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard isSplit else { return }
         let dividerX = (bounds.width * splitFraction).rounded()
-        NSColor.separatorColor.setFill()
-        NSRect(x: dividerX, y: 0, width: Self.dividerWidth, height: bounds.height).fill()
-
-        // Which half is being acted on. Only drawn when split: unsplit there is
-        // nothing to disambiguate, and a stripe across the top of every
-        // single-document window would be chrome for its own sake.
-        NSColor.controlAccentColor.setFill()
-        let stripe =
-            focusedPane == .primary
-            ? NSRect(x: 0, y: 0, width: dividerX, height: Self.focusStripeHeight)
-            : NSRect(
-                x: dividerX + Self.dividerWidth, y: 0,
-                width: bounds.width - dividerX - Self.dividerWidth,
-                height: Self.focusStripeHeight)
-        stripe.fill()
+        areas[0].frame = NSRect(x: 0, y: 0, width: max(0, dividerX), height: bounds.height)
+        divider.frame = NSRect(
+            x: dividerX, y: 0, width: Self.dividerWidth, height: bounds.height)
+        areas[1].frame = NSRect(
+            x: dividerX + Self.dividerWidth, y: 0,
+            width: max(0, bounds.width - dividerX - Self.dividerWidth),
+            height: bounds.height)
     }
 
     // MARK: - The divider drag
@@ -2285,10 +2591,6 @@ public final class DocumentContainerView: NSView {
         addCursorRect(dividerRect, cursor: .resizeLeftRight)
     }
 
-    /// A mouse-down here is either a divider drag or a click on the thin strip
-    /// of container not covered by a web view. Anything landing inside a web
-    /// view never reaches this method — WebKit took it — which is why pane
-    /// focus comes from ``DocumentWebView`` instead.
     public override func mouseDown(with event: NSEvent) {
         guard isSplit else {
             super.mouseDown(with: event)
@@ -2296,14 +2598,13 @@ public final class DocumentContainerView: NSView {
         }
         let start = convert(event.locationInWindow, from: nil)
         guard dividerRect.contains(start) else {
-            onPaneClicked?(start.x < bounds.width * splitFraction ? .primary : .secondary)
             super.mouseDown(with: event)
             return
         }
 
         // A modal tracking loop, matching `TabBarView`: the frames being
         // dragged belong to layer-hosted web views, and letting AppKit
-        // interleave other event handling mid-drag is how the two panes end up
+        // interleave other event handling mid-drag is how the two groups end up
         // disagreeing about where the divider is.
         while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             if next.type == .leftMouseUp { break }
@@ -2315,5 +2616,41 @@ public final class DocumentContainerView: NSView {
         }
         window?.invalidateCursorRects(for: self)
         onSplitFractionChanged?(splitFraction)
+    }
+
+    /// Which area, if any, contains a point in this view's coordinates.
+    ///
+    /// The tab bar's cross-divider drag asks this on mouse-up to find out which
+    /// group the reader dropped a tab into.
+    public func areaIndex(at point: NSPoint) -> Int? {
+        areas.firstIndex { $0.frame.contains(point) }
+    }
+}
+
+/// The 1 pt line between two groups.
+///
+/// A view with a layer background rather than a drawn rectangle, for the reason
+/// ``GroupSplitView`` gives — and because a hairline that has to be *seen*
+/// beside a `WKWebView` is exactly the thing that was invisible before.
+@MainActor
+final class DividerView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("DividerView is created in code") }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.separatorColor.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }

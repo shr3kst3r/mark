@@ -175,6 +175,22 @@ final class TabHarness {
 
     func file(named name: String) -> URL { fixture.file(named: name) }
 
+    /// Wrap this harness's store in a window's worth of groups.
+    ///
+    /// The store the harness already built becomes group 0, so a test can set
+    /// up tabs the familiar way and then split. Every group a split makes is
+    /// wired to the same hydrator, which is what the window controller's
+    /// `configureStore` does in production — a group whose store has no
+    /// hydrator silently never hydrates, and the test would pass for the wrong
+    /// reason.
+    func makeGroups() -> TabGroups {
+        let groups = TabGroups(governor: store.governor, first: store)
+        groups.configureStore = { [hydrator] store in
+            store.hydrator = hydrator
+        }
+        return groups
+    }
+
     @discardableResult
     func open(_ name: String) -> DocumentTab {
         let tab = store.open(fixture.file(named: name))
@@ -210,5 +226,26 @@ final class TabHarness {
             try? await _Concurrency.Task.sleep(for: .milliseconds(10))
         }
         return false
+    }
+}
+
+/// The one thing a window does that a ``TabGroups`` cannot do for itself:
+/// collapse a group that has just run out of documents.
+///
+/// ``MainWindowController`` does this in `tabStoreDidEmpty`; a test that drives
+/// the model without a window needs the same wiring, or a group empties and the
+/// split stays open — which is the state the ADR says is not a state.
+@MainActor
+final class GroupCollapser: TabStoreDelegate {
+    let groups: TabGroups
+
+    init(groups: TabGroups) {
+        self.groups = groups
+    }
+
+    func tabStoreDidChangeTabs(_ store: TabStore) {}
+    func tabStore(_ store: TabStore, didSelect tab: DocumentTab?, previous: DocumentTab?) {}
+    func tabStoreDidEmpty(_ store: TabStore) {
+        groups.collapseIfEmpty(store)
     }
 }

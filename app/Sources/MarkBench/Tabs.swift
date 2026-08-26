@@ -651,80 +651,128 @@ func fileBytes(_ url: URL) -> Int {
 /// rather than only asserted.
 @MainActor
 func checkPanesAndWindows(_ harness: TabBenchHarness) async {
-    print("Panes and windows (2026-08-26-multiple-windows-and-split-panes):")
+    print("Editor groups and windows (2026-08-26-editor-groups-per-pane-tab-bars):")
 
+    let controller = harness.controller
+    let groups = controller.groups
     let store = harness.store
-    let container = harness.controller.documentContainer
 
     // A clean two-document start, whatever the gates above left behind.
     store.closeAll()
     for url in harness.documents.prefix(2) { store.open(url) }
     await harness.settle(milliseconds: 200)
 
-    require(store.splitRight(), "the window split")
-    harness.controller.window?.layoutIfNeeded()
-    container.layoutSubtreeIfNeeded()
-    // Long enough for the *second* pane's document to finish ADR-2's
-    // prefix-then-fill open. The first snapshot taken here showed a rendered
-    // left pane and a black right one, which is exactly what a split that
-    // lays out correctly and never paints would look like — so the paint is
-    // now waited for and asserted rather than assumed.
+    require(groups.splitRight(), "the window split")
+    controller.window?.layoutIfNeeded()
+    controller.groupSplit.layoutSubtreeIfNeeded()
+    // Long enough for the second group's document to finish ADR-2's
+    // prefix-then-fill open. Resident, framed and visible is not painted, and
+    // a group that lays out perfectly and renders nothing looks exactly like a
+    // broken feature.
     await harness.settle(milliseconds: 1200)
 
-    guard let left = store.primary?.documentView, let right = store.secondary?.documentView
+    require(groups.isSplit, "there are two groups")
+    require(groups.groups.count == 2, "exactly two")
+    require(
+        groups.groups.allSatisfy { $0.count == 1 },
+        "each group owns one of the two documents — splitting moves a tab, it does not copy one")
+
+    guard controller.areas.count == 2,
+        let left = groups.groups[0].selected?.documentView,
+        let right = groups.groups[1].selected?.documentView
     else {
-        require(false, "both panes hold a hydrated document view")
+        require(false, "both groups have an area and a hydrated document view")
         return
     }
+    let split = controller.groupSplit
+    let leftArea = controller.areas[0]
+    let rightArea = controller.areas[1]
 
-    line("container", NSStringFromRect(container.bounds))
-    line("left pane", NSStringFromRect(left.frame))
-    line("right pane", NSStringFromRect(right.frame))
+    line("group split", NSStringFromRect(split.bounds))
+    line("left area", NSStringFromRect(leftArea.frame))
+    line("right area", NSStringFromRect(rightArea.frame))
+    line("left document", NSStringFromRect(left.frame))
+    line("right document", NSStringFromRect(right.frame))
 
-    // The geometry the unit tests cannot see. Two documents that overlap, or
-    // one with no width, is a split that "works" in the model and shows one
+    // The geometry the unit tests cannot see. Two areas that overlap, or one
+    // with no width, is a split that "works" in the model and shows one
     // document on screen.
-    require(!left.isHidden && !right.isHidden, "both panes are visible")
-    require(left.frame.width > 1 && right.frame.width > 1, "neither pane is collapsed to nothing")
-    require(!left.frame.intersects(right.frame), "the panes do not overlap")
-    require(left.frame.maxX <= right.frame.minX, "the left pane is left of the right one")
+    require(!leftArea.isHidden && !rightArea.isHidden, "both groups are visible")
     require(
-        abs(left.frame.height - container.bounds.height) < 1
-            && abs(right.frame.height - container.bounds.height) < 1,
-        "both panes are full height")
-    let gap = right.frame.minX - left.frame.maxX
+        leftArea.frame.width > 1 && rightArea.frame.width > 1,
+        "neither group is collapsed to nothing")
+    require(!leftArea.frame.intersects(rightArea.frame), "the groups do not overlap")
+    require(leftArea.frame.maxX <= rightArea.frame.minX, "group 0 is left of group 1")
+    require(
+        abs(leftArea.frame.height - split.bounds.height) < 1
+            && abs(rightArea.frame.height - split.bounds.height) < 1,
+        "both groups are full height")
+    let gap = rightArea.frame.minX - leftArea.frame.maxX
     line("divider gap", String(format: "%.1f pt", gap))
-    require(gap >= DocumentContainerView.dividerWidth, "there is room for the divider between them")
+    require(gap >= GroupSplitView.dividerWidth, "there is room for the divider between them")
 
-    // Both on screen means both resident, whatever the limit says. This is the
-    // ADR's third eviction exemption, seen from the window rather than the
-    // store.
+    // Each group's own bar, above its own documents — the whole point of the
+    // supersession, and the thing a one-bar window could not express.
+    for (index, area) in controller.areas.enumerated() {
+        line("group \(index) bar", NSStringFromRect(area.tabBar.frame))
+        require(!area.tabBar.isHidden, "group \(index) has a visible tab bar")
+        require(
+            area.tabBar.frame.maxY <= area.container.frame.minY,
+            "group \(index)'s bar is above its documents")
+        require(
+            area.tabBar.items.count == area.tabBar.store?.tabs.count,
+            "group \(index)'s bar draws its own group's tabs and no others")
+    }
     require(
-        store.displayedTabs.allSatisfy { $0.state.isResident },
+        controller.areas[0].tabBar !== controller.areas[1].tabBar,
+        "two groups, two bars")
+    require(
+        controller.areas[0].tabBar.isActive != controller.areas[1].tabBar.isActive,
+        "exactly one bar is drawn active — that is the focus indicator")
+    require(
+        controller.areas[groups.focusIndex].tabBar.isActive,
+        "and it is the focused group's")
+
+    // Both on screen means both resident, whatever the limit says. The ADR's
+    // third eviction exemption, seen from the window rather than the store.
+    require(
+        groups.displayedTabs.allSatisfy { $0.state.isResident },
         "every displayed document holds its web view")
+    require(groups.displayedTabs.count == 2, "two documents are displayed")
 
     // Resident, visible and correctly framed still does not mean *painted*.
     // `.hydrated` is set by `notePainted`, which the page reports only once it
-    // has actually drawn its prefix — so this is the difference between a
-    // split that works and one that shows a blank half.
-    for pane in Pane.allCases {
-        guard let tab = store.panes.tab(in: pane) else { continue }
-        line("\(pane.rawValue) state", tab.state.rawValue)
+    // has actually drawn its prefix.
+    for (index, group) in groups.groups.enumerated() {
+        guard let tab = group.selected else { continue }
+        line("group \(index) state", tab.state.rawValue)
         require(
-            tab.state == .hydrated,
-            "the \(pane.rawValue) pane's document has painted, not just hydrated")
+            tab.state == HydrationState.hydrated,
+            "group \(index)'s document has painted, not just hydrated")
     }
 
     // And the DOM is really there, asked of the page rather than inferred from
     // our own state machine.
-    for pane in Pane.allCases {
-        guard let view = store.panes.tab(in: pane)?.documentView else { continue }
+    for (index, group) in groups.groups.enumerated() {
+        guard let view = group.selected?.documentView else { continue }
         let blocks = await view.renderedBlockCount()
-        line("\(pane.rawValue) blocks in the DOM", "\(blocks)")
-        require(blocks > 0, "the \(pane.rawValue) pane has rendered blocks in its DOM")
+        line("group \(index) blocks in the DOM", "\(blocks)")
+        require(blocks > 0, "group \(index) has rendered blocks in its DOM")
     }
 
     snapshotDocumentArea(harness, suffix: "split")
+
+    // Closing the split keeps both documents, which is the behaviour the
+    // one-bar model could not have: it dropped the other pane's tab.
+    require(groups.closeSplit(), "the split closed")
+    await harness.settle(milliseconds: 200)
+    require(!groups.isSplit, "one group again")
+    require(
+        groups.focused.count == 2,
+        "and both documents survived the merge")
+
+    require(groups.splitRight(), "split again for the pop-out")
+    await harness.settle(milliseconds: 600)
 
     // ---------------------------------------------------------- pop-out
     let coordinator = WindowCoordinator()
@@ -733,7 +781,7 @@ func checkPanesAndWindows(_ harness: TabBenchHarness) async {
     // told about it before it can move a tab out of it.
     coordinator.adopt(source)
 
-    guard let moving = store.secondary else {
+    guard let moving = source.groups.groups.last?.selected else {
         require(false, "there is a right-hand document to pop out")
         return
     }
@@ -752,7 +800,7 @@ func checkPanesAndWindows(_ harness: TabBenchHarness) async {
     require(coordinator.count == 2, "there are two windows")
     require(popped.tabs.tabs.contains(moving), "the document is in the new window")
     require(!source.tabs.tabs.contains(moving), "and no longer in the old one")
-    require(!source.tabs.isSplit, "the split it left behind collapsed")
+    require(!source.groups.isSplit, "the group it emptied collapsed")
     require(
         moving.documentView === movingView,
         "the live web view moved rather than being remade — a pop-out keeps the DOM")
@@ -775,23 +823,32 @@ func checkPanesAndWindows(_ harness: TabBenchHarness) async {
 /// ``snapshotSidebar`` gives: it renders the view hierarchy into a bitmap
 /// directly and works with the screen locked.
 ///
-/// **What it cannot show, stated plainly because it looks like a bug.** A
-/// `WKWebView` is layer-hosted and composited by WebKit, and `cacheDisplay`
-/// mirrors only one of the two panes' remote layers: the left pane comes out
-/// rendered and **the right pane comes out black**, every time, on a split
-/// where both documents have demonstrably painted.
+/// **What it cannot show.** A `WKWebView` is layer-hosted and composited by
+/// WebKit, so `cacheDisplay` does not capture page content at all: what a pane
+/// contributes to this image is the colour behind its document, not its
+/// document.
 ///
-/// That is a property of the capture, not of the app. Do not read the black
-/// half as a pane that failed to render — the gate above asks each pane's
-/// *page* how many blocks are in its DOM, which is the evidence that actually
-/// distinguishes the two, and both report the same count.
+/// This comment used to say that one pane coming out black was "a property of
+/// the capture, not of the app", and that reading it as a pane that failed to
+/// render was a mistake. **It was not a mistake.** One pane really was blank on
+/// screen: `DocumentView` filled its background in `draw(_:)`, and drawing
+/// around a layer-hosted web view is composited over the whole of it rather
+/// than clipped to the overlap, so each pane's background painted over the
+/// other pane's document. Every assertion in the gate above passed while the
+/// window showed one document. The fix is in ``DocumentView/updateLayer()``,
+/// and the invariant is pinned in `PaneTests`.
+///
+/// The lesson for this gate: geometry, residency and DOM counts are all
+/// necessary and none of them is sufficient. Nothing in this process can see a
+/// composited pixel, so a two-pane window still wants a human — or a real
+/// screen capture — to confirm what is on it.
 ///
 /// What this image is good for is the geometry: the divider, the focus stripe,
 /// and where the two frames sit are drawn by our own code, and they are the
 /// part that can be wrong without a test noticing.
 @MainActor
 func snapshotDocumentArea(_ harness: TabBenchHarness, suffix: String) {
-    let view = harness.controller.documentContainer
+    let view = harness.controller.groupSplit
     view.layoutSubtreeIfNeeded()
     guard view.bounds.width > 1, view.bounds.height > 1,
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)

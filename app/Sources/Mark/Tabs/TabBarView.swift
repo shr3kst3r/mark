@@ -58,6 +58,39 @@ public final class TabBarView: NSView {
 
     public weak var store: TabStore?
 
+    /// Whether this bar's group has the focus.
+    ///
+    /// **This is the focus indicator**
+    /// (`2026-08-26-editor-groups-per-pane-tab-bars`). The one-bar model drew an
+    /// accent stripe across the top of the focused pane, in a view underneath
+    /// the web views, where it could not be seen; a bar that dims when its
+    /// group is not the one being acted on is drawn where a reader is already
+    /// looking to answer the same question.
+    ///
+    /// True for a window with one group, which is what makes an unsplit window
+    /// look exactly as it did.
+    public var isActive: Bool = true {
+        didSet {
+            guard isActive != oldValue else { return }
+            reload()
+        }
+    }
+
+    /// Clicking anywhere in this bar means "act on my group".
+    ///
+    /// Fired before the selection changes, so a click on a tab in the unfocused
+    /// group focuses that group *and* selects the tab, rather than selecting in
+    /// a group the window is not acting on.
+    public var onFocusRequested: (() -> Void)?
+
+    /// A tab was dragged out of this bar and dropped at `point`, in window
+    /// coordinates. Returns whether someone took it.
+    ///
+    /// The cross-divider move the ADR asks for. The bar deliberately does not
+    /// know what is on the other side of the divider — it reports a drop that
+    /// left it and lets the window decide whether that lands in another group.
+    public var onDragOut: ((DocumentTab, NSPoint) -> Bool)?
+
     /// Tab views in bar order. The accessibility children, and the drag model.
     public private(set) var items: [TabItemView] = []
 
@@ -113,12 +146,11 @@ public final class TabBarView: NSView {
             items.append(item)
             addSubview(item)
         }
-        let companion = store.isSplit ? store.panes.tab(in: store.focus.other) : nil
         for (item, tab) in zip(items, tabs) {
             item.configure(
                 tab: tab,
                 isSelected: tab == store.selected,
-                isCompanion: tab === companion)
+                isBarActive: isActive)
         }
         layoutTabs()
         needsDisplay = true
@@ -270,6 +302,13 @@ public final class TabBarView: NSView {
     public override func draw(_ dirtyRect: NSRect) {
         NSColor.underPageBackgroundColor.setFill()
         bounds.fill()
+        if !isActive {
+            // The unfocused group's bar, dimmed. Drawn over its own background
+            // rather than as a different colour so it tracks every theme and
+            // both appearances for free.
+            NSColor.windowBackgroundColor.withAlphaComponent(0.5).setFill()
+            bounds.fill()
+        }
         // A hairline under the bar, so the tab bar reads as chrome rather than
         // as the top of the document.
         NSColor.separatorColor.setFill()
@@ -283,6 +322,10 @@ public final class TabBarView: NSView {
     /// the mouse for a reorder.
     func beginInteraction(with item: TabItemView, event: NSEvent) {
         guard let store, let tab = item.tab, let window else { return }
+        // Before the selection: with two groups, clicking a tab means "act on
+        // this group, on this tab" — in that order, or the selection lands in a
+        // group the window is not acting on.
+        onFocusRequested?()
         store.select(tab)
 
         // The gesture the whole preview mechanism hangs off: a second click on
@@ -301,7 +344,9 @@ public final class TabBarView: NSView {
         // reordering mutates the very view array those callbacks arrive on, so
         // owning the loop is the difference between "the list changed under
         // me" being a design and being a crash.
+        var lastLocationInWindow = event.locationInWindow
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            lastLocationInWindow = next.locationInWindow
             if next.type == .leftMouseUp { break }
             let point = convert(next.locationInWindow, from: nil)
             let delta = point.x - startPoint.x
@@ -327,6 +372,13 @@ public final class TabBarView: NSView {
         if isDragging {
             draggingItem = nil
             item.isDragging = false
+            // Dropped outside this bar: the window gets first refusal, because
+            // the drop may be in the other group's half of the split. A move
+            // rebuilds both bars, so nothing below this line may touch `item`.
+            let dropped = convert(lastLocationInWindow, from: nil)
+            if !bounds.contains(dropped), onDragOut?(tab, lastLocationInWindow) == true {
+                return
+            }
             layoutTabs()
             // The tracking loop above consumed every drag event, so the
             // tracking areas the pointer passed over never got their
@@ -455,7 +507,10 @@ public final class TabItemView: NSView {
     /// Without it a split window has two documents visible and only one of them
     /// looks open, so there is no way to tell which of six tabs are the two you
     /// are actually reading.
-    public private(set) var isCompanion = false
+    /// Whether the bar this tab is in has the focus. A selected tab in the
+    /// unfocused group is still the document on screen there, so it keeps its
+    /// background and loses the full-strength accent stripe.
+    public private(set) var isBarActive = true
 
     /// Drawn lifted and semi-transparent while the user drags it.
     var isDragging = false {
@@ -491,11 +546,11 @@ public final class TabItemView: NSView {
         fatalError("TabItemView is created in code, not from a nib")
     }
 
-    func configure(tab: DocumentTab, isSelected: Bool, isCompanion: Bool = false) {
+    func configure(tab: DocumentTab, isSelected: Bool, isBarActive: Bool = true) {
         self.tab = tab
         self.isSelected = isSelected
-        self.isCompanion = isCompanion
-        closeButton.isHidden = !(isSelected || isCompanion || isHovered)
+        self.isBarActive = isBarActive
+        closeButton.isHidden = !(isSelected || isHovered)
         toolTip = [tab.metadata?.documentTitle, tab.url.path]
             .compactMap { $0 }
             .joined(separator: "\n")
@@ -546,7 +601,7 @@ public final class TabItemView: NSView {
         guard let tab else { return nil }
         let menu = NSMenu(title: tab.title)
         let items: [(String, Selector)] = [
-            ("Open in Right Pane", #selector(MainWindowController.openInRightPane(_:))),
+            ("Move to Other Pane", #selector(MainWindowController.moveToOtherPane(_:))),
             ("Move Tab to New Window", #selector(MainWindowController.popOutTab(_:))),
         ]
         for (title, action) in items {
@@ -587,17 +642,13 @@ public final class TabItemView: NSView {
             // The accent stripe is the redundant-encoding half of "do not rely
             // on colour alone": the selected tab is also the only one drawn on
             // the document's own background.
-            NSColor.controlAccentColor.setFill()
-            NSRect(x: 0, y: 0, width: bounds.width, height: 2).fill()
-        } else if isCompanion {
-            // The other pane's document: on screen, but not what the bar and
-            // the menus are acting on. Same background so it reads as open,
-            // a dimmed stripe so it does not read as focused — and it is a
-            // *stripe*, not just a tint, so the difference survives the
-            // colour-blind case the selected state is already careful about.
-            NSColor.controlBackgroundColor.setFill()
-            bounds.fill()
-            NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
+            //
+            // Dimmed in the unfocused group: that document *is* on screen —
+            // this is the tab of the pane beside the one being acted on — so it
+            // keeps the stripe rather than losing it, and the difference is a
+            // strength rather than a hue, which survives the colour-blind case
+            // the selected state is already careful about.
+            NSColor.controlAccentColor.withAlphaComponent(isBarActive ? 1 : 0.35).setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 2).fill()
         } else if isHovered {
             NSColor.controlBackgroundColor.withAlphaComponent(0.4).setFill()
@@ -626,9 +677,15 @@ public final class TabItemView: NSView {
         )
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingMiddle
+        // The second half of the focus indicator, and the one that survives a
+        // dark theme where two greys are nearly the same: the unfocused group's
+        // current document is named in the colour every *other* tab is named in,
+        // so only the focused group has a full-strength title.
+        let titleColour: NSColor =
+            isSelected && isBarActive ? .labelColor : .secondaryLabelColor
         let attributes: [NSAttributedString.Key: Any] = [
             .font: Self.titleFont(selected: isSelected, preview: tab.isPreview),
-            .foregroundColor: isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor,
+            .foregroundColor: titleColour,
             .paragraphStyle: style,
         ]
         let title = tab.title as NSString

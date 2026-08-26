@@ -714,6 +714,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     public func sessionSnapshot() -> SessionState {
         var state = tabs.snapshot(sidebarRoot: sidebar.root)
         state.theme = ThemeController.shared.chosenName
+        state.themeAppearance = ThemeController.shared.appearance.rawValue
         let sidebarState = sidebar.snapshot()
         state.sidebarBack = sidebarState.back.map(\.path)
         state.sidebarForward = sidebarState.forward.map(\.path)
@@ -739,7 +740,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     public func restore(_ state: SessionState, sidebarRoot: URL? = nil) {
         // Before any tab is opened, so the first render is already themed
         // rather than being rendered once and re-rendered.
-        ThemeController.shared.restore(named: state.theme)
+        ThemeController.shared.restore(
+            named: state.theme,
+            appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
         if let root = (sidebarRoot?.path ?? state.sidebarRoot) {
             let options = state.sidebarOptions ?? SessionSidebarOptions()
             sidebar.restore(
@@ -1061,19 +1064,24 @@ extension MainWindowController: CommandTarget {
     /// tab has no DOM to update and is rendered against
     /// ``ThemeController/active`` when it next hydrates (``makeDocumentView``).
     /// There is no per-tab theme state that could go stale.
-    public func applyTheme(named name: String?) async throws -> ThemeSummaryForCLI {
+    public func applyTheme(named name: String?, appearance: ThemeAppearance? = nil) async throws
+        -> ThemeSummaryForCLI
+    {
         let controller = ThemeController.shared
         let resolved: ResolvedTheme
-        let previousStamp = controller.active.codeStamp
+        let previous = controller.active
         if let name {
             do {
-                resolved = try controller.apply(named: name)
+                resolved = try controller.apply(named: name, appearance: appearance)
             } catch {
                 throw CommandFailure(
                     .badArguments, String(describing: error),
                     detail: ["theme": .string(name)])
             }
         } else {
+            // No name is either "what is applied?" or "just change which half
+            // I am looking at" — neither of which resolves anything.
+            if let appearance { controller.setAppearance(appearance) }
             resolved = controller.active
         }
 
@@ -1103,9 +1111,15 @@ extension MainWindowController: CommandTarget {
             // node-preserving where it can be. Everything else — chrome,
             // links, tables, code colours — is the style swap above and costs
             // nothing.
-            let stampChanged = resolved.codeStamp != previousStamp
+            let stampChanged = resolved.codeStamp != previous.codeStamp
             let hasDiagram = await view.containsDiagram()
-            if stampChanged || hasDiagram {
+            // `resolved == previous` is the appearance-only case — a pin, or a
+            // bare `mark theme` asking what is applied. The baked-in copies are
+            // baked in *per appearance* as well as per theme, and the page
+            // switches between them with `prefers-color-scheme`, so there is
+            // nothing to re-render and re-rendering anyway would make a report
+            // cost 95 ms a tab.
+            if resolved != previous, stampChanged || hasDiagram {
                 rerendered += 1
                 await view.rerenderForTheme()
                 _ = await view.applyTheme(resolved).value
@@ -1131,6 +1145,8 @@ extension MainWindowController: CommandTarget {
             light: resolved.light.name,
             dark: resolved.dark.name,
             paired: resolved.paired,
+            appearance: controller.appearance.rawValue,
+            showing: controller.visibleHalf.name,
             applied: applied,
             rerendered: rerendered
         )
@@ -1371,7 +1387,7 @@ extension MainWindowController: NSMenuItemValidation {
 
     /// The Theme submenu, dispatched by the name in `representedObject`.
     ///
-    /// It goes through ``applyTheme(named:)`` — the same entry point
+    /// It goes through ``applyTheme(named:appearance:)`` — the same entry point
     /// `mark theme <name>` reaches over the socket — so the menu cannot drift
     /// from the CLI, and so choosing a theme is persisted, applied to every
     /// hydrated tab, and free for the dehydrated ones by exactly the mechanism
@@ -1387,11 +1403,23 @@ extension MainWindowController: NSMenuItemValidation {
         }
     }
 
+    /// **View ▸ Theme ▸ Match System Appearance.** Hand the choice of half back
+    /// to macOS, keeping the theme.
+    ///
+    /// The counterweight to choosing a theme by name, which pins the half it
+    /// names (see ``ThemeController``). Without a way back, one trip through
+    /// the menu would cost a user the automatic light/dark switch for good.
+    @objc public func matchSystemAppearance(_ sender: Any?) {
+        _Concurrency.Task { @MainActor in
+            _ = try? await self.applyTheme(named: nil, appearance: .system)
+        }
+    }
+
     /// M7's fourth gate on this side of the socket: *a broken theme is a named
     /// error rather than invisible text*. The CLI gets that on stderr; someone
     /// who picked the theme from a menu has no terminal to read, so they get a
     /// sheet saying which theme and why. The previous theme is still in force —
-    /// ``ThemeController/apply(named:)`` changes nothing when it throws.
+    /// ``ThemeController/apply(named:appearance:)`` changes nothing when it throws.
     private func reportThemeFailure(named name: String, error: any Error) {
         let reason = (error as? CommandFailure)?.message ?? String(describing: error)
         Log.render.error(

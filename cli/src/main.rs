@@ -217,9 +217,19 @@ enum Command {
     /// the socket (ADR-3). `--list`, `--show`, and `--import` are answered
     /// **locally** by the core, so they work with no app running — which is the
     /// case an agent is usually in.
+    ///
+    /// Naming a theme shows *that* theme: `mark theme solarized-light` is light
+    /// even on a Mac that is in dark mode. `--system` is the way back to
+    /// following the system appearance between the pair's two halves.
     Theme {
         /// The theme to apply. With no name and no flags, report the active one.
         name: Option<String>,
+        /// Follow the system appearance instead of pinning the named half.
+        ///
+        /// On its own, with no name: keep the theme and go back to switching
+        /// with macOS.
+        #[arg(long, conflicts_with_all = ["list", "show", "import"])]
+        system: bool,
         /// List the available themes instead of applying one.
         #[arg(long)]
         list: bool,
@@ -625,12 +635,14 @@ fn run(command: &Command) -> Result<(), CliError> {
         Command::Tab { action } => cmd_tab(action),
         Command::Theme {
             name,
+            system,
             list,
             show,
             import,
             json,
         } => cmd_theme(
             name.as_deref(),
+            *system,
             *list,
             show.as_deref(),
             import.as_deref(),
@@ -911,6 +923,7 @@ fn resolve_theme(name: Option<&str>) -> Result<std::sync::Arc<theme::ThemePair>,
 /// which asks what is currently applied.
 fn cmd_theme(
     name: Option<&str>,
+    system: bool,
     list: bool,
     show: Option<&str>,
     import: Option<&Path>,
@@ -933,6 +946,12 @@ fn cmd_theme(
         resolve_theme(Some(name))?;
         request = request.arg("name", name);
     }
+    // Absent is "the half you named", which is what the app does with a name
+    // and no appearance. Saying nothing here is therefore not the same as
+    // saying "system", and must not be sent as one.
+    if system {
+        request = request.arg("appearance", "system");
+    }
     let result = call(request)?;
     if json {
         return print_json(&result);
@@ -950,6 +969,15 @@ fn cmd_theme(
             ", both appearances"
         }
     )?;
+    // Which half is on screen, and why that one — the question `mark theme`
+    // could not answer before, and the one behind "I chose the light theme and
+    // the window is dark".
+    let showing = theme["showing"].as_str().unwrap_or("?");
+    match theme["appearance"].as_str() {
+        Some("system") => emitln!(out, "showing {showing}, following the system appearance")?,
+        Some(pinned) => emitln!(out, "showing {showing}, pinned to {pinned}")?,
+        None => {}
+    }
     if let Some(tabs) = result["tabs"].as_i64() {
         emitln!(out, "applied to {tabs} tab(s)")?;
     }

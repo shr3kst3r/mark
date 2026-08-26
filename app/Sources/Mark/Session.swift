@@ -107,6 +107,16 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// means "the default".
     public var theme: String?
 
+    /// Which half of that theme was on screen — `"system"`, `"light"`, or
+    /// `"dark"`.
+    ///
+    /// Recorded because pinning is a choice the user made, and a relaunch that
+    /// dropped it would put a light theme back under a dark system — the exact
+    /// thing pinning exists to stop. Absent — a session written before there
+    /// was anything to record — means the named theme's own kind, because back
+    /// then naming one was already how you asked for it.
+    public var themeAppearance: String?
+
     /// Whether M9's editor pane was on screen (M10).
     ///
     /// ADR-6 opens a document *"read-only until the user asks to edit it"*, and
@@ -129,6 +139,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         sidebarForward: [String]? = nil,
         sidebarOptions: SessionSidebarOptions? = nil,
         theme: String? = nil,
+        themeAppearance: String? = nil,
         editorVisible: Bool? = nil
     ) {
         self.version = version
@@ -139,6 +150,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.sidebarForward = sidebarForward
         self.sidebarOptions = sidebarOptions
         self.theme = theme
+        self.themeAppearance = themeAppearance
         self.editorVisible = editorVisible
     }
 }

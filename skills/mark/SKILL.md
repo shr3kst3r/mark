@@ -88,7 +88,8 @@ If you only want the prose, read the file directly — that is cheaper.
 | "switch to / close that tab" | `mark tab select <index\|path>` / `mark tab close [index\|path]` (bare `close` closes the selected tab) |
 | "jump to the Install section" | `mark goto install --json` (leading `#` optional) |
 | "re-read it from disk" | `mark reload --json` (refuses if the tab has unsaved changes) |
-| "apply a theme to every tab" | `mark theme <name> --json` |
+| "apply a theme to every tab" | `mark theme <name> --json` (shows the half you named, whatever macOS is in) |
+| "go back to following light/dark" | `mark theme --system --json` |
 | "where is the sidebar pointed?" | `mark sidebar --json` |
 | "move the sidebar" | `mark nav <dir>` or `mark nav --up\|--back\|--forward` |
 
@@ -182,7 +183,8 @@ mark tab close  → {"closed":{…},"tabs":1}
 mark goto       → {"anchor":"install","tab":{…}}
 mark reload     → {"blocks":12,"tab":{…}}    // blocks actually patched
 mark theme <n>  → {"theme":{"name":…,"kind":"dark","light":…,"dark":…,
-                            "paired":true,"applied":3,"rerendered":1},"tabs":3}
+                            "paired":true,"appearance":"dark","showing":…,
+                            "applied":3,"rerendered":1},"tabs":3}
 mark sidebar    → {"sidebar":{"root":…,"breadcrumb":[…],"back":[…],
                               "forward":[…],"showsNonMarkdown":false,
                               "showsHidden":false,"sort":…,"filter":…}}
@@ -256,6 +258,10 @@ done
 - **`mark theme` is split across the two halves.** `--list`, `--show`, and
   `--import` are local; a bare `mark theme` or `mark theme <name>` needs the
   app and will launch it.
+- **Naming a theme pins its half.** A theme is a light/dark pair, and
+  `mark theme solarized-light` shows the light one even on a Mac in dark mode.
+  The reply's `appearance` says `light`, `dark`, or `system`; `--system` is how
+  you go back to following macOS.
 - **`--prefix N` counts top-level blocks, not lines**, and applies to every
   format including `--plain`.
 - **A directory walk swallows one bad file rather than the whole listing.** An

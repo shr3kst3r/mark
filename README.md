@@ -174,10 +174,12 @@ clash. Both appearances are injected as CSS custom properties, so switching macO
 between light and dark re-colours everything with zero IPC, zero re-render, and
 no flash. Pick one from **View ▸ Theme**, which is built when you open it — so a
 file you have just dropped in is listed, and one that would not parse is named
-rather than silently missing. Choosing either half of a pair installs both: the
-half in force is ticked and its partner is dashed. Your own themes go in
-`~/.config/mark/themes/*.toml` and are picked up without a rebuild.
-`mark theme --list` names them all.
+rather than silently missing. Choosing a theme shows *that* theme: pick Solarized
+Light on a Mac that is in dark mode and the window — page, sidebar, editor, and
+scrollbars — goes light. **Match System Appearance**, at the top of the same
+menu, hands the choice back to macOS, and then the half in force is ticked and
+its partner is dashed. Your own themes go in `~/.config/mark/themes/*.toml` and
+are picked up without a rebuild. `mark theme --list` names them all.
 
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and
@@ -197,8 +199,8 @@ click applies to the buffer instead, so the preview and the file can never
 disagree about which task you clicked.
 
 **Session.** Tabs, order, selection, scroll offsets, sidebar root and history,
-theme, and whether the editor was open all come back on relaunch, from our own
-JSON file rather than `NSWindowRestoration`.
+the theme and which half of it is on screen, and whether the editor was open all
+come back on relaunch, from our own JSON file rather than `NSWindowRestoration`.
 
 ## The CLI
 
@@ -229,7 +231,7 @@ is none, and never stealing focus:
 | `mark reload [--json]` | Re-reads the front document from disk. Refuses when the tab has unsaved changes. |
 | `mark sidebar [--json]` | The sidebar's root, breadcrumb, history depth, and what it is showing. |
 | `mark nav <dir>\|--up\|--back\|--forward [--json]` | Moves the sidebar's root. The CLI half of ⌘↑, ⌘[, ⌘]. |
-| `mark theme <name> [--json]` | Applies a theme to every open tab, dehydrated ones included. |
+| `mark theme <name> [--system] [--json]` | Applies a theme to every open tab, dehydrated ones included, and shows the half you named. `--system` follows the system appearance instead. |
 
 Exit codes: `0` success, `1` usage, `2` unreadable or missing file, `3` task
 index out of range, `4` the app could not be reached, `5` the app refused the

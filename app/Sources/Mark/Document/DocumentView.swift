@@ -455,7 +455,7 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// touched: code tokens carry palette *slots*, so their colours come from
     /// the very variables this installs. A caller that changes to a theme with
     /// a different scope map re-renders separately, and
-    /// ``ThemeController/apply(named:)`` is what says whether that is needed.
+    /// ``ThemeController/apply(named:appearance:)`` is what says whether that is needed.
     ///
     /// Nothing calls this on an **appearance** change, because nothing needs
     /// to: the CSS carries both halves and `prefers-color-scheme` picks.

@@ -4,10 +4,11 @@ import Foundation
 /// The Theme submenu: M7's catalogue, as something you can point at.
 ///
 /// Everything under it already existed — ``ThemeController`` resolves a name,
-/// ``MainWindowController/applyTheme(named:)`` pushes it at every tab, and the
-/// session file remembers it. What was missing was a way to choose one without
-/// typing `mark theme <name>` in a terminal, which is a strange thing to have
-/// to do to change the colour of a window that is already open.
+/// ``MainWindowController/applyTheme(named:appearance:)`` pushes it at every
+/// tab, and the session file remembers it. What was missing was a way to
+/// choose one without typing `mark theme <name>` in a terminal, which is a
+/// strange thing to have to do to change the colour of a window that is
+/// already open.
 ///
 /// # Why it is rebuilt every time it opens
 ///
@@ -28,11 +29,17 @@ import Foundation
 /// # What the items say
 ///
 /// A pair is one theme with two halves (`gruvbox-dark` / `gruvbox-light`), and
-/// choosing either half installs *both* — the page picks between them with
-/// `prefers-color-scheme` and no code runs. A menu that checked only the name
-/// you clicked would make that look like a bug ("I chose the light one and it
-/// is dark"), so the half in force is checked and its partner is dashed
-/// (`.mixed`): both are in play, one of them right now.
+/// choosing either half installs *both*. Which of them you are looking at is
+/// the first item, **Match System Appearance**:
+///
+/// * Off — the normal case, because choosing a theme by name pins it — the half
+///   you chose is checked and nothing else is marked. You asked for the light
+///   one and you have the light one, in a dark-mode system too.
+/// * On, and the page follows macOS. The half in force is checked and its
+///   partner is dashed (`.mixed`): both are in play, one of them right now.
+///
+/// The dash is therefore never the answer to "why is my light theme dark" — it
+/// only appears once you have asked for both halves to be live.
 @MainActor
 public final class ThemeMenu: NSMenu, NSMenuDelegate {
 
@@ -97,11 +104,22 @@ public final class ThemeMenu: NSMenu, NSMenuDelegate {
         }
         problems = catalog.problems
 
-        let active = ThemeController.shared.active
-        // The other half of the pair in force, if there is one. An unpaired
-        // theme like `dracula` is both halves, so it has no partner to dash.
+        let controller = ThemeController.shared
+        let active = controller.active
+        let following = controller.appearance == .system
+        // The half on screen — which is the one the user named, unless they
+        // have asked to follow macOS and macOS disagrees.
+        let showing = controller.visibleHalf.name
+        // The other half of the pair, dashed to say "also installed, not on
+        // screen". Only while following the system: under a pin the partner is
+        // not in play at all, and marking it would put back the very ambiguity
+        // pinning removed. An unpaired theme like `dracula` never has one.
         let partner: String? =
-            active.paired ? (active.kind == .dark ? active.light.name : active.dark.name) : nil
+            following && active.paired
+            ? (showing == active.dark.name ? active.light.name : active.dark.name) : nil
+
+        addItem(matchSystem(checked: following))
+        addItem(.separator())
 
         for kind in [ThemeKind.dark, ThemeKind.light] {
             let themes = catalog.themes.filter { $0.kind == kind }.sorted {
@@ -110,7 +128,7 @@ public final class ThemeMenu: NSMenu, NSMenuDelegate {
             guard !themes.isEmpty else { continue }
             addItem(.sectionHeader(title: kind == .dark ? "Dark" : "Light"))
             for theme in themes {
-                addItem(item(for: theme, active: active.name, partner: partner))
+                addItem(item(for: theme, active: showing, partner: partner))
             }
         }
 
@@ -142,6 +160,20 @@ public final class ThemeMenu: NSMenu, NSMenuDelegate {
                 withTitle: title, action: #selector(showProblems(_:)), keyEquivalent: "")
             item.target = self
         }
+    }
+
+    /// The way back from a pin: keep the theme, let macOS pick the half.
+    ///
+    /// First, above the catalogue, because it is the setting the items below it
+    /// are read against — and separated from them because it is not a theme.
+    private func matchSystem(checked: Bool) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "Match System Appearance",
+            action: #selector(MainWindowController.matchSystemAppearance(_:)), keyEquivalent: "")
+        item.state = checked ? .on : .off
+        item.toolTip =
+            "Follow macOS between light and dark.\nChoosing a theme below pins the half it names."
+        return item
     }
 
     /// One theme.

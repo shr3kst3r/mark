@@ -48,7 +48,7 @@ _mark_complete() {
         open) options="--tab --json" ;;
         goto) options="--json" ;;
         nav) options="--up --parent --back --forward --json" ;;
-        theme) options="--list --show --import --json" ;;
+        theme) options="--system --list --show --import --json" ;;
         tab)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 mapfile -t COMPREPLY < <(compgen -W "list select close" -- "${current}")

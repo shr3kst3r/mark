@@ -371,17 +371,46 @@ fn tab_select_by_number_sends_an_index_and_by_name_sends_a_path() {
 #[test]
 fn theme_applies_over_the_socket() {
     let mut app = FakeApp::answering(
-        r#"{"version":1,"ok":true,"result":{"theme":{"name":"dracula","kind":"dark","light":"dracula","dark":"dracula","paired":false,"applied":2,"rerendered":0},"tabs":2}}"#,
+        r#"{"version":1,"ok":true,"result":{"theme":{"name":"dracula","kind":"dark","light":"dracula","dark":"dracula","paired":false,"appearance":"dark","showing":"dracula","applied":2,"rerendered":0},"tabs":2}}"#,
     );
     let output = app.run(&["theme", "dracula"]);
     let request = app.request();
 
     assert_eq!(request["command"], serde_json::json!("theme"));
     assert_eq!(request["arguments"]["name"], serde_json::json!("dracula"));
+    // No appearance argument: naming a theme means the app pins the half it
+    // names, and sending "system" here would ask for the opposite.
+    assert!(request["arguments"]["appearance"].is_null());
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("dracula"), "{out}");
+    assert!(out.contains("pinned to dark"), "{out}");
     assert!(out.contains("applied to 2 tab(s)"), "{out}");
+}
+
+/// `mark theme --system` is the way back to following macOS, and it says which
+/// half that currently is — the question behind "I chose the light theme and
+/// the window is dark".
+#[test]
+fn theme_system_asks_for_the_system_appearance() {
+    let mut app = FakeApp::answering(
+        r#"{"version":1,"ok":true,"result":{"theme":{"name":"gruvbox-light","kind":"light","light":"gruvbox-light","dark":"gruvbox-dark","paired":true,"appearance":"system","showing":"gruvbox-dark","applied":1,"rerendered":0},"tabs":1}}"#,
+    );
+    let output = app.run(&["theme", "--system"]);
+    let request = app.request();
+
+    assert_eq!(request["command"], serde_json::json!("theme"));
+    assert!(request["arguments"]["name"].is_null());
+    assert_eq!(
+        request["arguments"]["appearance"],
+        serde_json::json!("system")
+    );
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains("showing gruvbox-dark, following the system appearance"),
+        "{out}"
+    );
 }
 
 #[test]

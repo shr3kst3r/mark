@@ -167,9 +167,19 @@ through the roots already visited \(em the same four moves the window offers as
 Cmd-Up, Cmd-[ and Cmd-]. A move with nowhere to go exits 5 rather than
 succeeding quietly.
 .TP
-.BI "theme " [name] " [--list] [--show " name "] [--import " file "] [--json]"
+.BI "theme " [name] " [--system] [--list] [--show " name "] [--import " file "] [--json]"
 Apply a theme to every open tab, or, with no name and no flags, report the one
 in force. Both go over the socket.
+.IP
+A theme is a light/dark pair, and naming one shows
+.I that
+half:
+.B theme solarized-light
+is light on a Mac that is in dark mode.
+.B --system
+goes back to following the system appearance between the two halves \(em with a
+name, or on its own to keep the theme you already have.
+.IP
 .BR --list ,
 .BR --show ,
 and

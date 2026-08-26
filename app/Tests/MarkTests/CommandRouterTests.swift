@@ -58,7 +58,12 @@ struct CommandRouterTests {
             (
                 #"{"version":1,"command":"theme","arguments":{"name":"dracula"}}"#,
                 "mark://theme?name=dracula",
-                .theme(name: "dracula")
+                .theme(name: "dracula", appearance: nil)
+            ),
+            (
+                #"{"version":1,"command":"theme","arguments":{"appearance":"system"}}"#,
+                "mark://theme?appearance=system",
+                .theme(name: nil, appearance: .system)
             ),
             (
                 ##"{"version":1,"command":"goto","arguments":{"anchor":"#install"}}"##,
@@ -385,6 +390,10 @@ struct CommandRouterTests {
         #expect(theme["light"] as? String == "dracula")
         #expect(theme["applied"] as? Int == 1)
         #expect(theme["rerendered"] as? Int == 0, "a shipped theme needs no re-render")
+        // Naming a theme shows that theme: the reply says which half is on
+        // screen and that nothing else can change it.
+        #expect(theme["appearance"] as? String == "dark")
+        #expect(theme["showing"] as? String == "dracula")
 
         // No name is "what is applied?", not an error.
         let reported = try decode(
@@ -401,6 +410,31 @@ struct CommandRouterTests {
         let message = try #require(error["message"] as? String)
         #expect(message.contains("no theme named"), "\(message)")
         #expect(target.appliedTheme == "dracula", "a refused theme was applied anyway")
+    }
+
+    /// `mark theme --system`: keep the theme, hand the half back to macOS.
+    @Test("theme --system changes the appearance without naming a theme")
+    func themeSystemAppearance() async throws {
+        let target = FakeCommandTarget()
+        let router = CommandRouter(target: target)
+        _ = await router.handle(
+            line: #"{"version":1,"command":"theme","arguments":{"name":"gruvbox-light"}}"#)
+        #expect(target.appliedAppearance == .light)
+
+        let followed = try decode(
+            await router.handle(
+                line: #"{"version":1,"command":"theme","arguments":{"appearance":"system"}}"#))
+        let theme = try #require((followed["result"] as? [String: Any])?["theme"] as? [String: Any])
+        #expect(theme["appearance"] as? String == "system")
+        #expect(theme["name"] as? String == "gruvbox-light", "the theme changed too")
+
+        // An appearance nobody defines is named rather than guessed at.
+        let refused = try decode(
+            await router.handle(
+                line: #"{"version":1,"command":"theme","arguments":{"appearance":"sepia"}}"#))
+        let error = try #require(refused["error"] as? [String: Any])
+        #expect(error["code"] as? String == "bad-arguments")
+        #expect((error["message"] as? String)?.contains("sepia") == true)
     }
 
     /// A paired theme carries both halves, which is what makes an appearance
@@ -543,9 +577,14 @@ final class FakeCommandTarget: CommandTarget {
     /// The real controller, not a stub: `mark theme nosuch` has to fail the way
     /// it will in the app, which means the core resolving the name.
     var appliedTheme = ThemeController.shared.name
+    /// The half on screen, the way the real controller tracks it: a name pins
+    /// the half it names unless the caller says otherwise.
+    var appliedAppearance = ThemeAppearance.system
 
-    func applyTheme(named name: String?) async throws -> ThemeSummaryForCLI {
-        log.append("theme \(name ?? "-")")
+    func applyTheme(named name: String?, appearance: ThemeAppearance?) async throws
+        -> ThemeSummaryForCLI
+    {
+        log.append("theme \(name ?? "-") \(appearance?.rawValue ?? "-")")
         let resolved: ResolvedTheme
         if let name {
             do {
@@ -556,13 +595,20 @@ final class FakeCommandTarget: CommandTarget {
                     detail: ["theme": .string(name)])
             }
             appliedTheme = resolved.name
+            appliedAppearance = appearance ?? .pinning(resolved.kind)
         } else {
             resolved = try MarkCore.theme(named: appliedTheme)
+            appliedAppearance = appearance ?? appliedAppearance
         }
+        let showing =
+            appliedAppearance == .light || (appliedAppearance == .system && !resolved.paired
+                && resolved.kind == .light)
+            ? resolved.light : resolved.dark
         return ThemeSummaryForCLI(
             name: resolved.name, kind: resolved.kind.rawValue,
             light: resolved.light.name, dark: resolved.dark.name,
-            paired: resolved.paired, applied: tabs.count, rerendered: 0)
+            paired: resolved.paired, appearance: appliedAppearance.rawValue,
+            showing: showing.name, applied: tabs.count, rerendered: 0)
     }
 
     // MARK: M8's sidebar

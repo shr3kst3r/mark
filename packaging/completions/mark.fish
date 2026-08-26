@@ -72,6 +72,7 @@ complete -c mark -n '__fish_seen_subcommand_from nav' -l parent -d "The current 
 complete -c mark -n '__fish_seen_subcommand_from nav' -l back -d 'The previous root'
 complete -c mark -n '__fish_seen_subcommand_from nav' -l forward -d 'Forward again, after --back'
 
+complete -c mark -n '__fish_seen_subcommand_from theme' -l system -d 'Follow the system appearance'
 complete -c mark -n '__fish_seen_subcommand_from theme' -l list -d 'List the available themes'
 complete -c mark -n '__fish_seen_subcommand_from theme' -l show -r -a '(__mark_themes)' -d "Dump a theme's palette and CSS"
 complete -c mark -n '__fish_seen_subcommand_from theme' -l import -r -F -d 'Convert a .tmTheme or base16 scheme'

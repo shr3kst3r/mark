@@ -18,7 +18,8 @@ struct ThemeMenuTests {
     /// one puts it back.
     private func withTheme(_ body: () async throws -> Void) async rethrows {
         let previous = ThemeController.shared.chosenName
-        defer { _ = try? ThemeController.shared.apply(named: previous) }
+        let appearance = ThemeController.shared.appearance
+        defer { _ = try? ThemeController.shared.apply(named: previous, appearance: appearance) }
         try await body()
     }
 
@@ -110,29 +111,92 @@ struct ThemeMenuTests {
 
     // MARK: - What is checked
 
-    @Test("the half in force is checked and the other half of its pair is dashed")
+    private func states(of menu: ThemeMenu) -> [String: NSControl.StateValue] {
+        Dictionary(
+            uniqueKeysWithValues: themeItems(of: menu).map {
+                ($0.representedObject as! String, $0.state)
+            })
+    }
+
+    @Test("the theme you chose is checked, and its partner is not")
+    func chosenHalfIsChecked() async throws {
+        try await withTheme {
+            // Choosing a half pins it, so the other one is not in play and is
+            // not marked. A dash here would put back the ambiguity the pin
+            // removes: "I chose the light one and it is dark".
+            try ThemeController.shared.apply(named: "gruvbox-light")
+            let states = states(of: ThemeMenu())
+            #expect(states["gruvbox-light"] == .on)
+            #expect(states["gruvbox-dark"] == .off)
+            #expect(states["nord"] == .off)
+            #expect(states.values.filter { $0 != .off }.isEmpty == false)
+            #expect(states.values.filter { $0 == .on }.count == 1)
+            #expect(states.values.allSatisfy { $0 != .mixed }, "a pinned pair dashed its partner")
+        }
+    }
+
+    @Test("while following the system, the half in force is checked and its partner is dashed")
     func pairIsVisible() async throws {
         try await withTheme {
-            // Choosing either half installs both — the page picks with
-            // `prefers-color-scheme`. A menu that checked only the name that
-            // was clicked would make that look like a bug.
-            try ThemeController.shared.apply(named: "gruvbox-dark")
-            let menu = ThemeMenu()
-            let states = Dictionary(
-                uniqueKeysWithValues: themeItems(of: menu).map {
-                    ($0.representedObject as! String, $0.state)
-                })
-            #expect(states["gruvbox-dark"] == .on)
-            #expect(states["gruvbox-light"] == .mixed)
+            // Both halves are live here — the page picks with
+            // `prefers-color-scheme` — so a menu that marked only one would
+            // hide half of what is installed.
+            try ThemeController.shared.apply(named: "gruvbox-dark", appearance: .system)
+            let states = states(of: ThemeMenu())
+            let dark = NSApplication.shared.effectiveAppearance.isDark
+            #expect(states[dark ? "gruvbox-dark" : "gruvbox-light"] == .on)
+            #expect(states[dark ? "gruvbox-light" : "gruvbox-dark"] == .mixed)
             #expect(states["nord"] == .off)
             #expect(states.values.filter { $0 == .on }.count == 1)
+        }
+    }
+
+    // MARK: - Which half
+
+    @Test("Match System Appearance is the first item, and says which mode you are in")
+    func matchSystemItem() async throws {
+        try await withTheme {
+            try ThemeController.shared.apply(named: "solarized-light")
+            let pinned = ThemeMenu()
+            let item = try #require(pinned.items.first)
+            #expect(item.title == "Match System Appearance")
+            #expect(item.action == #selector(MainWindowController.matchSystemAppearance(_:)))
+            #expect(item.state == .off, "a pinned theme is not following the system")
+            // It is not a theme, so it does not sit inside the catalogue.
+            #expect(pinned.items[1].isSeparatorItem)
+
+            ThemeController.shared.matchSystemAppearance()
+            #expect(ThemeMenu().items.first?.state == .on)
+        }
+    }
+
+    @Test("choosing a theme from the menu shows that theme, not the system's half")
+    func choosingPinsTheHalf() async throws {
+        try await withTheme {
+            let fixture = try TabFixture()
+            let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+            defer { controller.tabs.closeAll() }
+            ThemeController.shared.matchSystemAppearance()
+
+            let menu = ThemeMenu()
+            let item = try #require(
+                themeItems(of: menu).first { $0.representedObject as? String == "solarized-light" })
+            controller.chooseTheme(item)
+
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ThemeController.shared.name != "solarized-light", ContinuousClock.now < deadline {
+                try? await _Concurrency.Task.sleep(for: .milliseconds(10))
+            }
+            #expect(ThemeController.shared.visibleHalf.name == "solarized-light")
+            #expect(ThemeController.shared.appearance == .light)
+            #expect(controller.sessionSnapshot().themeAppearance == "light")
         }
     }
 
     @Test("an unpaired theme is checked alone — it is both appearances by itself")
     func unpairedIsCheckedAlone() async throws {
         try await withTheme {
-            try ThemeController.shared.apply(named: "dracula")
+            try ThemeController.shared.apply(named: "dracula", appearance: .system)
             let menu = ThemeMenu()
             let states = themeItems(of: menu).map { ($0.representedObject as! String, $0.state) }
             #expect(states.filter { $0.1 == .on }.map(\.0) == ["dracula"])
@@ -141,15 +205,18 @@ struct ThemeMenuTests {
         }
     }
 
-    @Test("the default theme is checked when nothing has been chosen")
+    @Test("the default theme's half is checked when nothing has been chosen")
     func defaultIsChecked() async throws {
         try await withTheme {
+            // Nobody chose this one, so it follows the system — and what is
+            // checked is the half that is on screen because of that.
             try ThemeController.shared.apply(named: nil)
-            let catalog = try MarkCore.themes()
+            #expect(ThemeController.shared.appearance == .system)
+            let expected = ThemeController.shared.visibleHalf.name
             let menu = ThemeMenu()
             let checked = themeItems(of: menu).filter { $0.state == .on }
                 .compactMap { $0.representedObject as? String }
-            #expect(checked == [catalog.default])
+            #expect(checked == [expected])
         }
     }
 

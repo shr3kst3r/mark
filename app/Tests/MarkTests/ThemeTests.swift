@@ -20,6 +20,16 @@ import WebKit
 @MainActor
 struct ThemeTests {
 
+    /// The shared controller is app-wide state — and now so is
+    /// `NSApplication.appearance`, which is how a pinned half reaches the page.
+    /// Each test puts both back.
+    private func withTheme(_ body: () async throws -> Void) async rethrows {
+        let name = ThemeController.shared.chosenName
+        let appearance = ThemeController.shared.appearance
+        defer { _ = try? ThemeController.shared.apply(named: name, appearance: appearance) }
+        try await body()
+    }
+
     /// A document with everything a theme touches in it.
     static let source = """
         # Themed
@@ -166,66 +176,95 @@ struct ThemeTests {
     /// statement about what happens when they come back.
     @Test("a theme reaches every tab, and a dehydrated tab comes back themed")
     func everyTabIncludingDehydrated() async throws {
-        let fixture = try TabFixture()
-        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
-        defer { controller.tabs.closeAll() }
+        try await withTheme {
+            let fixture = try TabFixture()
+            let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+            defer { controller.tabs.closeAll() }
 
-        controller.open(fixture.file(named: "a.md"))
-        controller.open(fixture.file(named: "b.md"))
-        let dehydrated = try #require(controller.tabs.tab(for: fixture.file(named: "a.md")))
-        controller.tabs.dehydrate(dehydrated)
-        #expect(dehydrated.documentView == nil, "the tab is not dehydrated")
-        let hydrated = try #require(controller.tabs.selected?.documentView)
-        await hydrated.awaitReady()
+            controller.open(fixture.file(named: "a.md"))
+            controller.open(fixture.file(named: "b.md"))
+            let dehydrated = try #require(controller.tabs.tab(for: fixture.file(named: "a.md")))
+            controller.tabs.dehydrate(dehydrated)
+            #expect(dehydrated.documentView == nil, "the tab is not dehydrated")
+            let hydrated = try #require(controller.tabs.selected?.documentView)
+            await hydrated.awaitReady()
 
-        let summary = try await controller.applyTheme(named: "dracula")
-        #expect(summary.name == "dracula")
-        #expect(summary.applied == 1, "one tab is hydrated; the other has no DOM to update")
+            let summary = try await controller.applyTheme(named: "dracula")
+            #expect(summary.name == "dracula")
+            #expect(summary.applied == 1, "one tab is hydrated; the other has no DOM to update")
 
-        let live = try #require(await hydrated.call("return window.mark.themeCSS();") as? String)
-        #expect(live.contains("--mk-background:#282a36"), "the hydrated tab is not dracula")
+            let live = try #require(await hydrated.call("return window.mark.themeCSS();") as? String)
+            #expect(live.contains("--mk-background:#282a36"), "the hydrated tab is not dracula")
 
-        // The dehydrated tab: selecting it builds a new web view, which renders
-        // against the theme the controller now holds. Nothing had to remember
-        // to re-theme it, which is the point.
-        controller.tabs.select(dehydrated)
-        let rehydrated = try #require(dehydrated.documentView)
-        await rehydrated.awaitReady()
-        let restored = try #require(
-            await rehydrated.call("return window.mark.themeCSS();") as? String)
-        #expect(
-            restored.contains("--mk-background:#282a36"),
-            "a rehydrated tab came back in the old theme")
+            // The dehydrated tab: selecting it builds a new web view, which renders
+            // against the theme the controller now holds. Nothing had to remember
+            // to re-theme it, which is the point.
+            controller.tabs.select(dehydrated)
+            let rehydrated = try #require(dehydrated.documentView)
+            await rehydrated.awaitReady()
+            let restored = try #require(
+                await rehydrated.call("return window.mark.themeCSS();") as? String)
+            #expect(
+                restored.contains("--mk-background:#282a36"),
+                "a rehydrated tab came back in the old theme")
+        }
     }
 
     @Test("a theme that will not resolve is refused and changes nothing")
     func refusedThemeChangesNothing() async throws {
-        let fixture = try TabFixture()
-        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
-        defer { controller.tabs.closeAll() }
-        controller.open(fixture.file(named: "a.md"))
+        try await withTheme {
+            let fixture = try TabFixture()
+            let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+            defer { controller.tabs.closeAll() }
+            controller.open(fixture.file(named: "a.md"))
 
-        _ = try await controller.applyTheme(named: "nord")
-        await #expect(throws: CommandFailure.self) {
-            _ = try await controller.applyTheme(named: "no-such-theme")
+            _ = try await controller.applyTheme(named: "nord")
+            await #expect(throws: CommandFailure.self) {
+                _ = try await controller.applyTheme(named: "no-such-theme")
+            }
+            #expect(ThemeController.shared.name == "nord", "a refused theme was applied anyway")
         }
-        #expect(ThemeController.shared.name == "nord", "a refused theme was applied anyway")
     }
 
     @Test("the chosen theme reaches the session file and comes back")
     func sessionRoundTrip() async throws {
-        let fixture = try TabFixture()
-        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
-        defer { controller.tabs.closeAll() }
-        controller.open(fixture.file(named: "a.md"))
-        _ = try await controller.applyTheme(named: "solarized-light")
+        try await withTheme {
+            let fixture = try TabFixture()
+            let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+            defer { controller.tabs.closeAll() }
+            controller.open(fixture.file(named: "a.md"))
+            _ = try await controller.applyTheme(named: "solarized-light")
 
-        let state = controller.sessionSnapshot()
-        #expect(state.theme == "solarized-light")
+            let state = controller.sessionSnapshot()
+            #expect(state.theme == "solarized-light")
+            // Which half, not just which pair: a relaunch that dropped this would
+            // put the light theme back under a dark system, which is the whole
+            // defect.
+            #expect(state.themeAppearance == "light")
 
-        _ = try await controller.applyTheme(named: "default-dark")
-        controller.restore(state)
-        #expect(ThemeController.shared.name == "solarized-light")
+            _ = try await controller.applyTheme(named: "default-dark")
+            controller.restore(state)
+            #expect(ThemeController.shared.name == "solarized-light")
+            #expect(ThemeController.shared.appearance == .light)
+
+            // And the other way: following the system is a choice too, and it
+            // survives the same trip.
+            _ = try await controller.applyTheme(named: nil, appearance: .system)
+            let following = controller.sessionSnapshot()
+            #expect(following.themeAppearance == "system")
+            _ = try await controller.applyTheme(named: "gruvbox-dark")
+            controller.restore(following)
+            #expect(ThemeController.shared.appearance == .system)
+
+            // A session file from before there was anything to record: the theme
+            // was named, so it comes back as the named half rather than at the
+            // mercy of the system.
+            var old = state
+            old.themeAppearance = nil
+            _ = try await controller.applyTheme(named: "default-dark")
+            controller.restore(old)
+            #expect(ThemeController.shared.appearance == .light)
+        }
     }
 
     @Test("a session naming a theme that no longer exists falls back rather than failing")
@@ -233,6 +272,101 @@ struct ThemeTests {
         let previous = ThemeController.shared.name
         ThemeController.shared.restore(named: "a-theme-that-was-deleted")
         #expect(ThemeController.shared.name == previous, "a stale session name was applied")
+    }
+
+    // MARK: - Which half is on screen
+
+    /// The defect: choosing a light theme on a Mac in dark mode left the window
+    /// dark, because the CSS carried both halves and `prefers-color-scheme`
+    /// picked the other one.
+    ///
+    /// Asserted from inside the page, and in *both* directions, so it says the
+    /// same thing whatever appearance the machine running the tests is in.
+    @Test("naming a theme shows that theme, whatever the system appearance is")
+    func namingAThemePinsIt() async throws {
+        try await withTheme {
+            let harness = try await WindowedHarness(Self.source)
+
+            for name in ["solarized-light", "solarized-dark"] {
+                let theme = try ThemeController.shared.apply(named: name)
+                _ = await harness.view.applyTheme(theme).value
+                let wanted = name.hasSuffix("-dark")
+
+                #expect(ThemeController.shared.visibleHalf.name == name)
+                // WebKit resolves `prefers-color-scheme` against the web view's
+                // effective appearance, which is what the pin sets. A page still
+                // following the system is the defect itself.
+                let dark = await harness.pageIsDark(waitingFor: wanted)
+                #expect(dark == wanted, "\(name) resolved prefers-color-scheme: dark = \(dark)")
+
+                // And the colours a reader actually sees, not the ones we sent.
+                let half = wanted ? theme.dark : theme.light
+                let background = try #require(half.document["background"]?.color)
+                let resolved = try await harness.view.call(
+                    "return window.mark.resolvedColors(null);")
+                let painted = ((resolved as? [String: Any])?["background"] as? String) ?? ""
+                #expect(
+                    painted.contains(Self.rgb(background)),
+                    "\(name) painted \(painted), not \(background)")
+            }
+        }
+    }
+
+    /// The way back, and the reason pinning costs nobody the free switch.
+    @Test("Match System Appearance hands the choice back to macOS")
+    func matchingTheSystem() async throws {
+        try await withTheme {
+            try ThemeController.shared.apply(named: "gruvbox-light")
+            #expect(ThemeController.shared.appearance == .light)
+
+            ThemeController.shared.matchSystemAppearance()
+            #expect(ThemeController.shared.appearance == .system)
+            #expect(ThemeController.shared.name == "gruvbox-light", "the theme changed too")
+            // Whichever half that is, it is the one the system is in.
+            let systemIsDark = NSApplication.shared.effectiveAppearance.isDark
+            #expect(ThemeController.shared.visibleKind == (systemIsDark ? .dark : .light))
+        }
+    }
+
+    /// An unpaired theme has one appearance and AppKit had better agree with
+    /// it: Dracula in a light-mode system was a dark page in a light window.
+    @Test("an unpaired theme takes the window with it")
+    func unpairedThemePinsTheWindow() async throws {
+        try await withTheme {
+            try ThemeController.shared.apply(named: "dracula", appearance: .system)
+            #expect(ThemeController.shared.appearance == .system)
+            #expect(ThemeController.shared.visibleKind == .dark)
+            #expect(
+                NSApplication.shared.effectiveAppearance.isDark,
+                "the window is light around a dark-only theme")
+        }
+    }
+
+    @Test("an appearance change re-renders nothing, not even a diagram")
+    func pinningDoesNotRerender() async throws {
+        try await withTheme {
+            let fixture = try TabFixture()
+            let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+            defer { controller.tabs.closeAll() }
+            controller.open(fixture.file(named: "a.md"))
+            let view = try #require(controller.tabs.selected?.documentView)
+            await view.awaitReady()
+
+            _ = try await controller.applyTheme(named: "nord")
+            let before = try #require(await view.stats())
+            let summary = try await controller.applyTheme(named: nil, appearance: .light)
+            #expect(summary.appearance == "light")
+            #expect(summary.rerendered == 0)
+            let after = try #require(await view.stats())
+            #expect(after.documents == before.documents, "an appearance change re-rendered")
+        }
+    }
+
+    /// `#rrggbb` as `getComputedStyle` gives it back — `rgb(40, 42, 54)`.
+    private static func rgb(_ hex: String) -> String {
+        let text = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard let value = UInt32(text, radix: 16) else { return hex }
+        return "\((value >> 16) & 0xFF), \((value >> 8) & 0xFF), \(value & 0xFF)"
     }
 
     // MARK: - Diagrams and math
@@ -307,6 +441,54 @@ struct ThemeTests {
         #expect(everything.contains(".hidden.md"))
         // The gap M8 recorded and could not close from Swift.
         #expect(!everything.contains("build.log"), "a gitignored file came back")
+    }
+}
+
+/// A ``DocumentView`` in a window, which is what an appearance needs to reach
+/// it.
+///
+/// `PatchHarness` deliberately has no window, and a windowless view resolves
+/// its appearance against the system rather than against
+/// `NSApplication.appearance` — so it would report the system's half whatever
+/// the pin says, and pass this suite for the wrong reason. The window is never
+/// ordered in: it exists to be the link in the chain that the app has and the
+/// patch harness does not.
+@MainActor
+final class WindowedHarness {
+    let fixture: PatchFixture
+    let window: NSWindow
+    let view: DocumentView
+    let url: URL
+
+    init(_ source: String) async throws {
+        fixture = try PatchFixture()
+        url = try fixture.write(source)
+        view = DocumentView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        window = NSWindow(
+            contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        window.contentView = view
+        view.open(url)
+        await view.awaitReady()
+        await view.ensureFullyRendered()
+    }
+
+    /// The page's own answer to `prefers-color-scheme: dark`.
+    ///
+    /// Polled, because the appearance reaches the web content process
+    /// asynchronously — the same reason `mark-bench` sleeps a frame before
+    /// reading colours back. It returns as soon as the answer is `wanted`, so a
+    /// passing run waits milliseconds and only a failing one waits the timeout.
+    func pageIsDark(waitingFor wanted: Bool) async -> Bool? {
+        let deadline = ContinuousClock.now + .seconds(2)
+        var answer: Bool?
+        repeat {
+            answer =
+                try? await view.call(
+                    "return window.matchMedia('(prefers-color-scheme: dark)').matches;") as? Bool
+            if answer == wanted { return answer }
+            try? await _Concurrency.Task.sleep(for: .milliseconds(25))
+        } while ContinuousClock.now < deadline
+        return answer
     }
 }
 

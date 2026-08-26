@@ -309,8 +309,10 @@ public enum Command: Equatable, Sendable {
     case tabList
     case tabSelect(TabSelector)
     case tabClose(TabSelector)
-    /// Apply a theme, or — with no name — report the one in force.
-    case theme(name: String?)
+    /// Apply a theme, or — with no name — report the one in force. The
+    /// appearance is which half of it to show: absent means *the one you
+    /// named*, and ``ThemeAppearance/system`` is `mark theme --system`.
+    case theme(name: String?, appearance: ThemeAppearance?)
     case goTo(anchor: String)
     case reload
     /// M8. Read the sidebar's root, breadcrumb, and history.
@@ -344,7 +346,19 @@ public enum Command: Equatable, Sendable {
             // showing are answered by `mark-cli` from the core without an app,
             // so the only questions that reach here are about *this* app's
             // state, and "which theme are you using" is one of them.
-            return .theme(name: arguments["name"].flatMap { $0.isEmpty ? nil : $0 })
+            var appearance: ThemeAppearance?
+            if let requested = arguments["appearance"], !requested.isEmpty {
+                guard let parsed = ThemeAppearance(argument: requested) else {
+                    throw CommandFailure(
+                        .badArguments,
+                        "theme: \"\(requested)\" is not system, light, or dark",
+                        detail: ["appearance": .string(requested)])
+                }
+                appearance = parsed
+            }
+            return .theme(
+                name: arguments["name"].flatMap { $0.isEmpty ? nil : $0 },
+                appearance: appearance)
 
         case "goto":
             var anchor = try require("anchor", in: arguments, for: name)
@@ -628,7 +642,8 @@ public protocol CommandTarget: AnyObject {
     ///   A theme that does not resolve leaves the current one alone; the CLI
     ///   exits non-zero and says why, which is the whole point of having a
     ///   reply channel (ADR-3).
-    func applyTheme(named name: String?) async throws -> ThemeSummaryForCLI
+    func applyTheme(named name: String?, appearance: ThemeAppearance?) async throws
+        -> ThemeSummaryForCLI
 }
 
 /// The applied theme, as the CLI sees it.
@@ -639,6 +654,12 @@ public struct ThemeSummaryForCLI: Equatable, Sendable {
     public var dark: String
     /// False when one theme is used for both appearances.
     public var paired: Bool
+    /// `"system"`, `"light"`, or `"dark"` — whether the half on screen is
+    /// pinned, and to which.
+    public var appearance: String
+    /// The half on screen right now, by name. Equal to ``name`` unless the
+    /// appearance is following a system that disagrees with it.
+    public var showing: String
     /// Hydrated tabs the CSS was pushed to. Dehydrated ones need nothing: they
     /// have no DOM, and they come back rendered against the new theme.
     public var applied: Int
@@ -648,13 +669,15 @@ public struct ThemeSummaryForCLI: Equatable, Sendable {
 
     public init(
         name: String, kind: String, light: String, dark: String, paired: Bool,
-        applied: Int, rerendered: Int
+        appearance: String, showing: String, applied: Int, rerendered: Int
     ) {
         self.name = name
         self.kind = kind
         self.light = light
         self.dark = dark
         self.paired = paired
+        self.appearance = appearance
+        self.showing = showing
         self.applied = applied
         self.rerendered = rerendered
     }
@@ -666,6 +689,8 @@ public struct ThemeSummaryForCLI: Equatable, Sendable {
             "light": .string(light),
             "dark": .string(dark),
             "paired": .bool(paired),
+            "appearance": .string(appearance),
+            "showing": .string(showing),
             "applied": .int(applied),
             "rerendered": .int(rerendered),
         ])
@@ -834,8 +859,8 @@ public final class CommandRouter {
             let closed = try target.closeTab(matching: selector)
             return ["closed": closed.json, "tabs": .int(target.documentTabs().count)]
 
-        case .theme(let name):
-            let applied = try await target.applyTheme(named: name)
+        case .theme(let name, let appearance):
+            let applied = try await target.applyTheme(named: name, appearance: appearance)
             return [
                 "theme": applied.json,
                 "tabs": .int(target.documentTabs().count),

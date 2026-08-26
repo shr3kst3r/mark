@@ -124,6 +124,7 @@ _mark() {
           ;;
         theme)
           _arguments \
+            '--system[follow the system appearance instead of pinning a half]' \
             '--list[list the available themes]' \
             '--show=[dump a theme'\''s palette and CSS]:theme:_mark_themes' \
             '--import=[convert a .tmTheme or base16 scheme]:file:_files' \

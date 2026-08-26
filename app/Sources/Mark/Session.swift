@@ -79,6 +79,116 @@ public struct SessionSidebarOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// One window, as the session file records it.
+///
+/// New with `2026-08-26-multiple-windows-and-split-panes`. Everything here used
+/// to be a top-level field of ``SessionState``, because there used to be one
+/// window; the fields are unchanged in meaning, and the flat ones are still
+/// written for the reason ``SessionState/windows`` explains.
+///
+/// Decoded field by field with defaults, like everything else in this file:
+/// Swift's synthesized decoder does **not** fall back to a property's default
+/// for a missing key, it throws, and losing a user's tabs to one absent boolean
+/// is the failure that convention exists to prevent.
+public struct SessionWindow: Codable, Equatable, Sendable {
+    public var tabs: [SessionTab]
+    public var selectedIndex: Int?
+
+    /// The split's right-hand pane, as an index into ``tabs``.
+    ///
+    /// Absent means the window was not split, which is what every session file
+    /// written before this feature says by omission.
+    public var secondaryIndex: Int?
+
+    /// Which pane was focused: ``Pane``'s raw value. Absent means primary.
+    public var focus: String?
+
+    /// Where the divider sat, as a fraction of the window's width.
+    public var splitFraction: Double?
+
+    /// `NSStringFromRect` of the window's frame.
+    ///
+    /// A window that comes back somewhere other than where it was left reads as
+    /// the app forgetting — and with more than one window it also reads as them
+    /// being shuffled. Validated on restore: a frame entirely off every screen
+    /// falls back to cascading, because a window the user cannot see is
+    /// indistinguishable from a window that did not come back.
+    public var frame: String?
+
+    public var sidebarCollapsed: Bool?
+    public var sidebarRoot: String?
+    public var sidebarBack: [String]?
+    public var sidebarForward: [String]?
+    public var sidebarOptions: SessionSidebarOptions?
+    public var editorVisible: Bool?
+
+    public init(
+        tabs: [SessionTab] = [],
+        selectedIndex: Int? = nil,
+        secondaryIndex: Int? = nil,
+        focus: String? = nil,
+        splitFraction: Double? = nil,
+        frame: String? = nil,
+        sidebarCollapsed: Bool? = nil,
+        sidebarRoot: String? = nil,
+        sidebarBack: [String]? = nil,
+        sidebarForward: [String]? = nil,
+        sidebarOptions: SessionSidebarOptions? = nil,
+        editorVisible: Bool? = nil
+    ) {
+        self.tabs = tabs
+        self.selectedIndex = selectedIndex
+        self.secondaryIndex = secondaryIndex
+        self.focus = focus
+        self.splitFraction = splitFraction
+        self.frame = frame
+        self.sidebarCollapsed = sidebarCollapsed
+        self.sidebarRoot = sidebarRoot
+        self.sidebarBack = sidebarBack
+        self.sidebarForward = sidebarForward
+        self.sidebarOptions = sidebarOptions
+        self.editorVisible = editorVisible
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tabs, selectedIndex, secondaryIndex, focus, splitFraction, frame
+        case sidebarCollapsed, sidebarRoot, sidebarBack, sidebarForward, sidebarOptions
+        case editorVisible
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try container.decodeIfPresent([SessionTab].self, forKey: .tabs) ?? []
+        selectedIndex = try container.decodeIfPresent(Int.self, forKey: .selectedIndex)
+        secondaryIndex = try container.decodeIfPresent(Int.self, forKey: .secondaryIndex)
+        focus = try container.decodeIfPresent(String.self, forKey: .focus)
+        splitFraction = try container.decodeIfPresent(Double.self, forKey: .splitFraction)
+        frame = try container.decodeIfPresent(String.self, forKey: .frame)
+        sidebarCollapsed = try container.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed)
+        sidebarRoot = try container.decodeIfPresent(String.self, forKey: .sidebarRoot)
+        sidebarBack = try container.decodeIfPresent([String].self, forKey: .sidebarBack)
+        sidebarForward = try container.decodeIfPresent([String].self, forKey: .sidebarForward)
+        sidebarOptions = try container.decodeIfPresent(
+            SessionSidebarOptions.self, forKey: .sidebarOptions)
+        editorVisible = try container.decodeIfPresent(Bool.self, forKey: .editorVisible)
+    }
+
+    /// The pane arrangement this window describes, repaired if the file lies.
+    ///
+    /// A hand-edited or truncated file can name a `secondaryIndex` that is out
+    /// of range, or the same index as `selectedIndex` — which would put one tab
+    /// in both panes, the one thing
+    /// `2026-08-26-multiple-windows-and-split-panes` forbids outright. Repaired
+    /// to "not split" rather than refused, matching this file's existing
+    /// posture on a second preview tab: a bad session file costs the user a
+    /// pane, never their documents.
+    public var repairedSecondaryIndex: Int? {
+        guard let secondaryIndex, tabs.indices.contains(secondaryIndex) else { return nil }
+        guard secondaryIndex != selectedIndex else { return nil }
+        return secondaryIndex
+    }
+}
+
 /// What `mark` remembers between launches.
 public struct SessionState: Codable, Equatable, Sendable {
 
@@ -130,6 +240,44 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// nothing is written, and a tab is still clean until the user types.
     public var editorVisible: Bool?
 
+    /// Every window, in creation order
+    /// (`2026-08-26-multiple-windows-and-split-panes`).
+    ///
+    /// **The duplication with the flat fields above is deliberate.** They keep
+    /// describing `windows[0]`, and both are written, so:
+    ///
+    /// * a build without multi-window support reads the flat fields and
+    ///   restores one window rather than failing or coming back empty;
+    /// * a build with it prefers `windows` and ignores the flat copies.
+    ///
+    /// That is what buys a two-way downgrade for the price of a few duplicated
+    /// keys, and it is why ``currentVersion`` does not move: the rule this file
+    /// has followed since M8 is that every added field is optional and additive,
+    /// because a version bump refuses yesterday's session and loses the user's
+    /// tabs to buy nothing.
+    public var windows: [SessionWindow]?
+
+    /// The windows to restore: the new field when present, else the flat
+    /// fields read as a single window.
+    ///
+    /// The one place that fallback is expressed, so no caller has to remember
+    /// which shape it is holding.
+    public var effectiveWindows: [SessionWindow] {
+        if let windows, !windows.isEmpty { return windows }
+        guard !tabs.isEmpty || sidebarRoot != nil else { return [] }
+        return [
+            SessionWindow(
+                tabs: tabs,
+                selectedIndex: selectedIndex,
+                sidebarRoot: sidebarRoot,
+                sidebarBack: sidebarBack,
+                sidebarForward: sidebarForward,
+                sidebarOptions: sidebarOptions,
+                editorVisible: editorVisible
+            )
+        ]
+    }
+
     public init(
         version: Int = SessionState.currentVersion,
         tabs: [SessionTab] = [],
@@ -140,7 +288,8 @@ public struct SessionState: Codable, Equatable, Sendable {
         sidebarOptions: SessionSidebarOptions? = nil,
         theme: String? = nil,
         themeAppearance: String? = nil,
-        editorVisible: Bool? = nil
+        editorVisible: Bool? = nil,
+        windows: [SessionWindow]? = nil
     ) {
         self.version = version
         self.tabs = tabs
@@ -152,6 +301,24 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.theme = theme
         self.themeAppearance = themeAppearance
         self.editorVisible = editorVisible
+        self.windows = windows
+    }
+
+    /// Assemble a state from windows, mirroring the first into the flat fields.
+    ///
+    /// The only place the mirroring happens, so the two halves cannot disagree.
+    public init(windows: [SessionWindow]) {
+        let first = windows.first ?? SessionWindow()
+        self.init(
+            tabs: first.tabs,
+            selectedIndex: first.selectedIndex,
+            sidebarRoot: first.sidebarRoot,
+            sidebarBack: first.sidebarBack,
+            sidebarForward: first.sidebarForward,
+            sidebarOptions: first.sidebarOptions,
+            editorVisible: first.editorVisible,
+            windows: windows
+        )
     }
 }
 

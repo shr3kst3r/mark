@@ -78,6 +78,13 @@ cat >"${bundle}/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key> <string>${version}</string>
     <key>CFBundleVersion</key>         <string>${version}</string>
     <!--
+      Names \`Resources/mark.icns\` (the extension is optional and conventionally
+      omitted). Without this the Dock, Finder, the ⌘-Tab switcher and the About
+      panel all draw the generic application icon — which is what \`open
+      README.md\` showed for every build up to this one.
+    -->
+    <key>CFBundleIconFile</key>        <string>mark</string>
+    <!--
       Not Apple keys, and deliberately not folded into CFBundleVersion:
       Homebrew's cask machinery and LaunchServices both compare that as a
       version number, and "0.2.0+f63a7ca" is not one. The App's About panel
@@ -112,14 +119,39 @@ cat >"${bundle}/Contents/Info.plist" <<PLIST
             </array>
         </dict>
     </array>
+    <!--
+      Two entries, where there used to be one covering both types.
+
+      The split is required rather than tidy: \`CFBundleTypeIconFile\` attaches
+      to the *entry*, so a single entry naming both types would put the markdown
+      document icon on every .txt file on the machine.
+
+      \`LSHandlerRank\` is now explicit on both. It was absent before, which
+      LaunchServices reads as \`Default\` — so mark was quietly claiming to be
+      the preferred opener for **all plain text**. Markdown keeps that claim,
+      which is the status quo written down and is what the app is for;
+      plain text drops to \`Alternate\`, which narrows an over-claim rather than
+      changing what mark can open. An explicit user choice in Finder still wins
+      over both.
+    -->
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
-            <key>CFBundleTypeName</key>   <string>Markdown Document</string>
-            <key>CFBundleTypeRole</key>   <string>Viewer</string>
+            <key>CFBundleTypeName</key>     <string>Markdown Document</string>
+            <key>CFBundleTypeRole</key>     <string>Viewer</string>
+            <key>CFBundleTypeIconFile</key> <string>mark-document</string>
+            <key>LSHandlerRank</key>        <string>Default</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>net.daringfireball.markdown</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>   <string>Plain Text Document</string>
+            <key>CFBundleTypeRole</key>   <string>Viewer</string>
+            <key>LSHandlerRank</key>      <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
                 <string>public.plain-text</string>
             </array>
         </dict>
@@ -136,6 +168,14 @@ cp "${cli_bin}" "${bundle}/Contents/MacOS/mark-cli"
 cp "${root}/app/Resources/shell.html" \
    "${root}/app/Resources/shell.js" \
    "${root}/app/Resources/shell.css" \
+   "${bundle}/Contents/Resources/"
+
+# The two icons, named by `CFBundleIconFile` and by the markdown document type's
+# `CFBundleTypeIconFile`. Committed artifacts, like the man page below — drawn
+# by `scripts/make-icons.swift` and regenerated with `just icons`, not built
+# here.
+cp "${root}/packaging/mark.icns" \
+   "${root}/packaging/mark-document.icns" \
    "${bundle}/Contents/Resources/"
 
 # The man page and the shell completions (M10). Copied rather than symlinked, so

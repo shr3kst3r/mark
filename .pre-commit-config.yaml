@@ -18,6 +18,17 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=256]
+        # The app and document icons are deliberately committed artwork, and an
+        # `.icns` carrying a 1024x1024 representation is ~430 KB — normal for
+        # the format, and required: the 1024 image is what Finder's Get Info
+        # and a Retina Quick Look actually draw. This hook exists to catch the
+        # *accidental* blob (a build output, a corpus, a stray archive), so the
+        # 256 KB limit stays in force everywhere else rather than being raised
+        # for everything to accommodate two files.
+        #
+        # They are reproducible rather than opaque: `scripts/make-icons.swift`
+        # draws them and `just icons` regenerates them.
+        exclude: ^packaging/.*\.icns$
 
   - repo: local
     hooks:

@@ -565,9 +565,24 @@ public struct TabSummary: Equatable, Sendable {
     public var openTasks: Int?
     public var totalTasks: Int?
 
+    /// Which window holds this tab, in creation order
+    /// (`2026-08-26-multiple-windows-and-split-panes`).
+    ///
+    /// Reported because ``index`` is only unique *within* a window, and because
+    /// a command acts on the key window — so "why did `mark open` put it over
+    /// there" is a question `mark tab list` should be able to answer. `nil`
+    /// when the app has no window coordinator, which is every test and
+    /// `mark-bench`.
+    public var window: Int?
+
+    /// Which pane, when the window is split: ``Pane``'s raw value, or `nil` for
+    /// a tab that is not on screen.
+    public var pane: String?
+
     public init(
         index: Int, path: String, title: String, selected: Bool, resident: Bool,
-        preview: Bool = false, openTasks: Int? = nil, totalTasks: Int? = nil
+        preview: Bool = false, openTasks: Int? = nil, totalTasks: Int? = nil,
+        window: Int? = nil, pane: String? = nil
     ) {
         self.index = index
         self.path = path
@@ -577,6 +592,8 @@ public struct TabSummary: Equatable, Sendable {
         self.preview = preview
         self.openTasks = openTasks
         self.totalTasks = totalTasks
+        self.window = window
+        self.pane = pane
     }
 
     public var json: JSONValue {
@@ -590,6 +607,12 @@ public struct TabSummary: Equatable, Sendable {
         ]
         if let openTasks { object["openTasks"] = .int(openTasks) }
         if let totalTasks { object["totalTasks"] = .int(totalTasks) }
+        // Both omitted rather than null when absent, so an older CLI reading
+        // this reply sees exactly the object it saw before — additive on the
+        // wire, which is what `2026-08-24-cli-app-unix-socket-ipc` requires of
+        // a protocol change that does not bump the version.
+        if let window { object["window"] = .int(window) }
+        if let pane { object["pane"] = .string(pane) }
         return .object(object)
     }
 }
@@ -703,13 +726,38 @@ public struct ThemeSummaryForCLI: Equatable, Sendable {
 @MainActor
 public final class CommandRouter {
 
-    public weak var target: (any CommandTarget)?
+    /// Resolved per command rather than held, because with more than one window
+    /// there is no such thing as "the" target.
+    ///
+    /// `2026-08-26-multiple-windows-and-split-panes`:
+    ///
+    /// > Commands act on the **key window**, falling back to the first window
+    /// > when none is key.
+    ///
+    /// Binding a controller once at launch would have meant every `mark open`
+    /// landing in the window that happened to exist first, no matter which one
+    /// the user was looking at.
+    private let resolveTarget: () -> (any CommandTarget)?
+
+    /// The window a command would act on right now.
+    public var target: (any CommandTarget)? { resolveTarget() }
 
     /// Commands performed since launch, for `ping` and the tests.
     public private(set) var commandCount = 0
 
-    public init(target: (any CommandTarget)? = nil) {
-        self.target = target
+    /// A router that asks for its target on every command. The app's path.
+    public init(_ resolveTarget: @escaping () -> (any CommandTarget)?) {
+        self.resolveTarget = resolveTarget
+    }
+
+    /// A router bound to one target for its lifetime.
+    ///
+    /// Every test's path, and correct there: a test that builds one window is
+    /// entitled to assume commands reach it. Held weakly, matching the property
+    /// this replaced — a router must not keep a closed window alive.
+    public convenience init(target: (any CommandTarget)? = nil) {
+        weak let weakTarget = target
+        self.init { weakTarget }
     }
 
     // MARK: Entry path 1 — the socket

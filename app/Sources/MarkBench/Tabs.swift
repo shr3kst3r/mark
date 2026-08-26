@@ -457,6 +457,10 @@ func runTabGates(corpus: URL) async {
     print("")
     await checkSessionRoundTrip(harness)
 
+    // --------------------------------------------------------------- panes
+    print("")
+    await checkPanesAndWindows(harness)
+
     harness.close()
     await harness.settle(milliseconds: 200)
     print("")
@@ -630,4 +634,183 @@ func format(bytes: UInt64) -> String {
 
 func fileBytes(_ url: URL) -> Int {
     ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int) ?? 0
+}
+
+
+// MARK: - Gate 6: two documents on screen, and a window of their own
+
+/// `2026-08-26-multiple-windows-and-split-panes`, against real laid-out
+/// geometry.
+///
+/// The unit suites cover the model — which tab is in which pane, what survives
+/// eviction, what the session file says. What they abstract away is the half
+/// that can only be wrong on screen: whether the two panes actually get
+/// non-overlapping frames, whether the divider lands between them, and whether
+/// a popped-out window ends up with the document *and* its live web view. That
+/// is what this checks, and it writes a PNG so the geometry is inspectable
+/// rather than only asserted.
+@MainActor
+func checkPanesAndWindows(_ harness: TabBenchHarness) async {
+    print("Panes and windows (2026-08-26-multiple-windows-and-split-panes):")
+
+    let store = harness.store
+    let container = harness.controller.documentContainer
+
+    // A clean two-document start, whatever the gates above left behind.
+    store.closeAll()
+    for url in harness.documents.prefix(2) { store.open(url) }
+    await harness.settle(milliseconds: 200)
+
+    require(store.splitRight(), "the window split")
+    harness.controller.window?.layoutIfNeeded()
+    container.layoutSubtreeIfNeeded()
+    // Long enough for the *second* pane's document to finish ADR-2's
+    // prefix-then-fill open. The first snapshot taken here showed a rendered
+    // left pane and a black right one, which is exactly what a split that
+    // lays out correctly and never paints would look like — so the paint is
+    // now waited for and asserted rather than assumed.
+    await harness.settle(milliseconds: 1200)
+
+    guard let left = store.primary?.documentView, let right = store.secondary?.documentView
+    else {
+        require(false, "both panes hold a hydrated document view")
+        return
+    }
+
+    line("container", NSStringFromRect(container.bounds))
+    line("left pane", NSStringFromRect(left.frame))
+    line("right pane", NSStringFromRect(right.frame))
+
+    // The geometry the unit tests cannot see. Two documents that overlap, or
+    // one with no width, is a split that "works" in the model and shows one
+    // document on screen.
+    require(!left.isHidden && !right.isHidden, "both panes are visible")
+    require(left.frame.width > 1 && right.frame.width > 1, "neither pane is collapsed to nothing")
+    require(!left.frame.intersects(right.frame), "the panes do not overlap")
+    require(left.frame.maxX <= right.frame.minX, "the left pane is left of the right one")
+    require(
+        abs(left.frame.height - container.bounds.height) < 1
+            && abs(right.frame.height - container.bounds.height) < 1,
+        "both panes are full height")
+    let gap = right.frame.minX - left.frame.maxX
+    line("divider gap", String(format: "%.1f pt", gap))
+    require(gap >= DocumentContainerView.dividerWidth, "there is room for the divider between them")
+
+    // Both on screen means both resident, whatever the limit says. This is the
+    // ADR's third eviction exemption, seen from the window rather than the
+    // store.
+    require(
+        store.displayedTabs.allSatisfy { $0.state.isResident },
+        "every displayed document holds its web view")
+
+    // Resident, visible and correctly framed still does not mean *painted*.
+    // `.hydrated` is set by `notePainted`, which the page reports only once it
+    // has actually drawn its prefix — so this is the difference between a
+    // split that works and one that shows a blank half.
+    for pane in Pane.allCases {
+        guard let tab = store.panes.tab(in: pane) else { continue }
+        line("\(pane.rawValue) state", tab.state.rawValue)
+        require(
+            tab.state == .hydrated,
+            "the \(pane.rawValue) pane's document has painted, not just hydrated")
+    }
+
+    // And the DOM is really there, asked of the page rather than inferred from
+    // our own state machine.
+    for pane in Pane.allCases {
+        guard let view = store.panes.tab(in: pane)?.documentView else { continue }
+        let blocks = await view.renderedBlockCount()
+        line("\(pane.rawValue) blocks in the DOM", "\(blocks)")
+        require(blocks > 0, "the \(pane.rawValue) pane has rendered blocks in its DOM")
+    }
+
+    snapshotDocumentArea(harness, suffix: "split")
+
+    // ---------------------------------------------------------- pop-out
+    let coordinator = WindowCoordinator()
+    let source = harness.controller
+    // The harness built its controller directly, so the coordinator has to be
+    // told about it before it can move a tab out of it.
+    coordinator.adopt(source)
+
+    guard let moving = store.secondary else {
+        require(false, "there is a right-hand document to pop out")
+        return
+    }
+    let movingURL = moving.url
+    let movingView = moving.documentView
+    let popped = coordinator.popOut(moving, from: source)
+    await harness.settle(milliseconds: 300)
+
+    guard let popped else {
+        require(false, "the tab moved into a window of its own")
+        return
+    }
+    line("windows", "\(coordinator.count)")
+    line("popped document", movingURL.lastPathComponent)
+
+    require(coordinator.count == 2, "there are two windows")
+    require(popped.tabs.tabs.contains(moving), "the document is in the new window")
+    require(!source.tabs.tabs.contains(moving), "and no longer in the old one")
+    require(!source.tabs.isSplit, "the split it left behind collapsed")
+    require(
+        moving.documentView === movingView,
+        "the live web view moved rather than being remade — a pop-out keeps the DOM")
+    require(moving.state.isResident, "the popped document still holds its web view")
+    require(popped.isSidebarCollapsed, "the popped-out window starts with its sidebar collapsed")
+    require(
+        popped.window?.tabbingMode == .disallowed,
+        "the new window disallows native tabbing too")
+    require(
+        popped.tabs.governor === source.tabs.governor,
+        "both windows share one residency budget")
+
+    popped.close()
+    await harness.settle(milliseconds: 100)
+}
+
+/// A PNG of the document area, so the split's geometry is inspectable.
+///
+/// `cacheDisplay` rather than `screencapture`, for the reason
+/// ``snapshotSidebar`` gives: it renders the view hierarchy into a bitmap
+/// directly and works with the screen locked.
+///
+/// **What it cannot show, stated plainly because it looks like a bug.** A
+/// `WKWebView` is layer-hosted and composited by WebKit, and `cacheDisplay`
+/// mirrors only one of the two panes' remote layers: the left pane comes out
+/// rendered and **the right pane comes out black**, every time, on a split
+/// where both documents have demonstrably painted.
+///
+/// That is a property of the capture, not of the app. Do not read the black
+/// half as a pane that failed to render — the gate above asks each pane's
+/// *page* how many blocks are in its DOM, which is the evidence that actually
+/// distinguishes the two, and both report the same count.
+///
+/// What this image is good for is the geometry: the divider, the focus stripe,
+/// and where the two frames sit are drawn by our own code, and they are the
+/// part that can be wrong without a test noticing.
+@MainActor
+func snapshotDocumentArea(_ harness: TabBenchHarness, suffix: String) {
+    let view = harness.controller.documentContainer
+    view.layoutSubtreeIfNeeded()
+    guard view.bounds.width > 1, view.bounds.height > 1,
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+    else {
+        require(false, "the document area has drawable bounds to snapshot")
+        return
+    }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]) else {
+        require(false, "the document-area snapshot could not be encoded")
+        return
+    }
+    let base =
+        ProcessInfo.processInfo.environment["MARK_BENCH_PANE_SNAPSHOT"]
+        ?? "target/mark-panes.png"
+    let destination = base.replacingOccurrences(of: ".png", with: "-\(suffix).png")
+    let url = URL(fileURLWithPath: destination)
+    try? FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? png.write(to: url)
+    line("snapshot", destination)
 }

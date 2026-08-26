@@ -342,6 +342,23 @@ bench-app: build-rust
 corpus *args:
     python3 scripts/gen-corpus.py {{args}}
 
+# Redraw packaging/mark.icns and packaging/mark-document.icns.
+#
+# Deliberately *not* a dependency of `build`. The artwork changes about never,
+# and a `swift scripts/make-icons.swift` plus two `iconutil` runs in the dev
+# loop would cost every build for it. Both `.icns` are committed; this is how
+# they are regenerated when someone changes the drawing.
+icons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    work="$(mktemp -d)"
+    trap 'rm -rf "${work}"' EXIT
+    swift scripts/make-icons.swift "${work}"
+    for name in mark mark-document; do
+        iconutil -c icns "${work}/${name}.iconset" -o "packaging/${name}.icns"
+        printf '%-24s %s\n' "packaging/${name}.icns" "$(du -h "packaging/${name}.icns" | cut -f1)"
+    done
+
 # --- ADR corpus --------------------------------------------------------
 
 # Regenerate INDEX.md and validate the supersession chain.

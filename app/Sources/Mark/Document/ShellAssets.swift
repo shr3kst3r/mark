@@ -271,8 +271,8 @@ public enum WebViewFactory {
     }()
 
     /// A web view on the shared configuration, with the script bridge attached.
-    public static func makeWebView(bridge: ScriptBridge) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+    public static func makeWebView(bridge: ScriptBridge) -> DocumentWebView {
+        let webView = DocumentWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = true
@@ -289,4 +289,30 @@ public enum WebViewFactory {
     /// How many web views the router is currently delivering to. For the tests
     /// that assert dehydration actually released something.
     public static var routedWebViewCount: Int { router.routeCount }
+}
+
+/// A `WKWebView` that says when it has taken the keyboard focus.
+///
+/// The whole subclass exists for one signal. With a split
+/// (`2026-08-26-multiple-windows-and-split-panes`) the window has to know which
+/// pane the reader means, and the obvious source — a mouse-down on the pane —
+/// never arrives: WebKit installs its own event handling on the hosting view
+/// and consumes the click before AppKit walks back up to us. What does happen
+/// is that the web view becomes first responder, and there is no notification
+/// for that either.
+///
+/// Hence an override. `becomeFirstResponder` fires for a click into the page,
+/// for a Tab into it, and for a programmatic focus, which is all three of the
+/// ways a pane can become the current one.
+@MainActor
+public final class DocumentWebView: WKWebView {
+
+    /// Called when this view takes the keyboard focus.
+    public var onBecomeFirstResponder: (() -> Void)?
+
+    public override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onBecomeFirstResponder?() }
+        return accepted
+    }
 }

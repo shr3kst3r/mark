@@ -5,8 +5,14 @@ import WebKit
 
 @testable import MarkKit
 
-/// ADR-4's structural constraints, asserted rather than commented.
-@Suite("MainWindowController — ADR-4's one window")
+/// The window's structural constraints, asserted rather than commented.
+///
+/// The suite was named "ADR-4's one window" until
+/// `2026-08-26-multiple-windows-and-split-panes` made windows plural. What that
+/// ADR did **not** relax is everything below: native tabbing is still rejected,
+/// the shared configuration still stands, and both are now per-window
+/// obligations rather than single ones.
+@Suite("MainWindowController — structure")
 @MainActor
 struct MainWindowControllerTests {
 
@@ -15,16 +21,53 @@ struct MainWindowControllerTests {
     /// > bars. Set `tabbingMode = .disallowed` explicitly so AppKit does not
     /// > add one.
     ///
-    /// Worth a test even though M2 has no tab bar: `.automatic` (the default)
-    /// honours the user's "Prefer tabs: always" System Settings preference, so
-    /// the bug appears on *someone else's* machine, and only once M3 has drawn
-    /// a tab bar for it to compete with.
-    @Test("the window disallows native tabbing")
+    /// `.automatic` (the default) honours the user's "Prefer tabs: always"
+    /// System Settings preference, so the bug appears on *someone else's*
+    /// machine.
+    ///
+    /// **Every** window, not just the first. The superseding ADR turns this
+    /// into a per-window obligation — one window missing it reintroduces the
+    /// competing-tab-bar failure — so the second window is asserted too.
+    @Test("every window disallows native tabbing")
     func tabbingIsDisallowed() throws {
-        let controller = MainWindowController(root: URL(fileURLWithPath: "/tmp"))
-        let window = try #require(controller.window)
-        #expect(window.tabbingMode == .disallowed)
-        #expect(window.tabGroup?.windows.count ?? 1 == 1)
+        let coordinator = WindowCoordinator()
+        for _ in 0..<2 {
+            let controller = coordinator.makeWindow(root: URL(fileURLWithPath: "/tmp"))
+            let window = try #require(controller.window)
+            #expect(window.tabbingMode == .disallowed)
+            #expect(window.tabGroup?.windows.count ?? 1 == 1)
+        }
+        #expect(coordinator.count == 2)
+    }
+
+    /// A popped-out window is another instance of this same class — "no second,
+    /// lesser window class, so no document feature has a second place to
+    /// drift". The visible difference is the sidebar, which starts collapsed.
+    @Test("a popped-out window is a full window with its sidebar collapsed")
+    func poppedOutWindowIsFullyFurnished() throws {
+        let coordinator = WindowCoordinator()
+        let source = coordinator.makeWindow(root: URL(fileURLWithPath: "/tmp"))
+        #expect(!source.isSidebarCollapsed)
+
+        let detached = coordinator.makeWindow(
+            root: URL(fileURLWithPath: "/tmp"), collapsedSidebar: true)
+        #expect(detached.isSidebarCollapsed)
+        // Everything a document needs is still there — the point of reusing
+        // the class rather than writing a stripped viewer.
+        #expect(detached.window?.contentViewController is NSSplitViewController)
+        #expect(detached.findBar.superview != nil)
+        #expect(detached.tabBar.store === detached.tabs)
+    }
+
+    /// Every window shares the app's one residency budget. The window-level
+    /// half of `ResidencyTests.budgetIsApplicationWide`.
+    @Test("windows share one residency governor")
+    func windowsShareTheBudget() throws {
+        let coordinator = WindowCoordinator()
+        let first = coordinator.makeWindow(root: URL(fileURLWithPath: "/tmp"))
+        let second = coordinator.makeWindow(root: URL(fileURLWithPath: "/tmp"))
+        #expect(first.tabs.governor === second.tabs.governor)
+        #expect(first.tabs.governor === ResidencyGovernor.shared)
     }
 
     @Test("the window is a split view with a sidebar and a document area")

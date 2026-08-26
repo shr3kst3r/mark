@@ -64,6 +64,13 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// synchronously.
     public var onScroll: ((Double) -> Void)?
 
+    /// Called when the reader clicks or tabs into this document.
+    ///
+    /// With a split there are two documents on screen and the window has to
+    /// know which one the tab bar and the find bar should act on. See
+    /// ``DocumentWebView`` for why this cannot be a mouse event.
+    public var onFocus: (() -> Void)?
+
     /// The last position the page reported. Readable without a round trip,
     /// which is the whole reason it is pushed rather than queried.
     public private(set) var scrollOffset: Double = 0
@@ -123,6 +130,7 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
 
         let webView = WebViewFactory.makeWebView(bridge: bridge)
         webView.navigationDelegate = self
+        webView.onBecomeFirstResponder = { [weak self] in self?.onFocus?() }
         webView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(webView)
         NSLayoutConstraint.activate([
@@ -489,6 +497,20 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         let result = try? await call(
             "return document.querySelector('.mk-diagram') !== null;")
         return (result as? Bool) ?? false
+    }
+
+    /// How many top-level blocks the page currently has in its DOM.
+    ///
+    /// Asked of the page rather than inferred from this app's own state
+    /// machine, which is the point: `2026-08-26-multiple-windows-and-split-panes`
+    /// puts a second document on screen, and "resident, visible and correctly
+    /// framed" is not the same as "painted". A pane that lays out perfectly and
+    /// renders nothing looks exactly like a broken feature, and only the page
+    /// can say which it is.
+    public func renderedBlockCount() async -> Int {
+        let result = try? await call(
+            "return document.getElementById('mk-doc')?.children.length ?? 0;")
+        return (result as? Int) ?? 0
     }
 
     /// Scroll to a heading anchor, reporting whether it exists.

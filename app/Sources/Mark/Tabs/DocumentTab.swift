@@ -207,9 +207,33 @@ public final class DocumentTab: Identifiable {
         return buffer.text
     }
 
-    /// MRU stamp, assigned by ``TabStore`` on every selection. Eviction picks
-    /// the smallest.
+    /// MRU stamp, assigned by ``ResidencyGovernor`` on every selection.
+    /// Eviction picks the smallest.
+    ///
+    /// Stamped by the governor rather than by the owning store, because
+    /// `2026-08-26-multiple-windows-and-split-panes` ranks tabs across every
+    /// window at once and two per-store counters would not be comparable.
     var lastUsed: UInt64 = 0
+
+    /// The store this tab belongs to, or `nil` while it is in flight between
+    /// two of them.
+    ///
+    /// Weak and deliberately not part of ``init``: a tab is created before it is
+    /// inserted, and ``TabStore/detach(_:)`` leaves it storeless for the moment
+    /// between leaving one window and joining another. The governor needs it to
+    /// dehydrate a tab it found by walking every store, without having to carry
+    /// the pairing alongside.
+    public internal(set) weak var store: TabStore?
+
+    /// Whether this tab is on screen right now — in either pane of its window,
+    /// whether or not that window is key.
+    ///
+    /// The third eviction exemption
+    /// (`2026-08-26-multiple-windows-and-split-panes`). Distinct from "selected":
+    /// the right-hand pane of a split is displayed and not selected, and so is
+    /// every pane of every window that is not currently key. Evicting one of
+    /// those blanks a document somebody is reading.
+    public var isDisplayed: Bool { store?.isDisplayed(self) ?? false }
 
     /// Generation counter for in-flight metadata loads, so a slow read for an
     /// old revision cannot overwrite a newer one.

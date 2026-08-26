@@ -139,11 +139,24 @@ adds the tab without moving the reader off the current document. Neither form
 activates the app.
 .TP
 .BR "tab list" " [--json]"
-Every open tab: index, title, open/total tasks, and whether it currently holds a
-web view.
+Every open tab, in every window: index, title, open/total tasks, and whether it
+currently holds a web view. With more than one window open, each row is
+prefixed by its window and pane \(em
+.BR w0L ", " w0R
+\(em where
+.B L
+and
+.B R
+are the two halves of a split. The index is per window, which is what
+.B tab select
+takes.
 .TP
 .BI "tab select " index|path " [--json]"
-Bring a tab to the front.
+Bring a tab to the front. An
+.I index
+addresses the window the command is acting on; a
+.I path
+is looked for in every window, so a document is found wherever it is.
 .TP
 .BI "tab close " [index|path] " [--json]"
 Close a tab; with no argument, the selected one.
@@ -266,7 +279,13 @@ Where the app reads and writes its session, instead of
 Set to 1 and the app neither restores nor saves a session.
 .TP
 .B MARK_RESIDENT_TABS
-How many tabs keep a live web view. Default 3; each one costs about 52 MB.
+How many tabs keep a live web view, across every window. Default 3; each one
+costs about 52 MB, so the app's footprint is roughly 100 MB plus 52 MB per
+resident tab. Opening a window does not raise the budget. A tab that is on
+screen \(em either pane of a split, in any window \(em or has unsaved changes is
+never dehydrated, so the working set can exceed this; see
+.B doctor
+for what it actually is.
 .TP
 .B COLUMNS
 Terminal width for

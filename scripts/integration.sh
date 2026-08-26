@@ -21,6 +21,7 @@
 #  11. Finder cold open — a document handed to the app *as it launches* is opened,
 #                         which is `open README.md` and a double-click in Finder
 #  12. build identity   — the CLI and the app it is driving report the same build
+#  13. the icons        — the bundle carries its artwork and the plist names it
 #
 # Isolation. The app is launched through LaunchServices, which does **not** give
 # us a way to point it at a private $TMPDIR — the socket is `$TMPDIR/mark-$UID`
@@ -766,6 +767,58 @@ elif [[ "${cli_build}" == "${app_build}" ]]; then
     pass "both report ${cli_build}"
 else
     fail "the CLI is ${cli_build} but the app is ${app_build}"
+fi
+
+# The bundle's artwork and the plist keys that name it. Here rather than in
+# `swift test` for the reason gate 12 exists: a unit test cannot see a bundle it
+# does not assemble, and every failure below is invisible until someone looks at
+# the Dock.
+#
+# `plutil -lint` earns its place separately: `Info.plist` is written by a shell
+# heredoc in `assemble-bundle.sh`, so a malformed edit is a live failure mode
+# rather than a theoretical one, and an unparseable plist makes the app
+# unlaunchable rather than merely ugly.
+gate "15. the bundle carries its icons (Dock, Finder, ⌘-Tab, the About panel)"
+if plutil -lint "${bundle}/Contents/Info.plist" >/dev/null 2>&1; then
+    pass "Info.plist parses"
+else
+    fail "Info.plist does not parse: $(plutil -lint "${bundle}/Contents/Info.plist" 2>&1)"
+fi
+
+for icon in mark mark-document; do
+    path="${bundle}/Contents/Resources/${icon}.icns"
+    if [[ -s "${path}" ]]; then
+        pass "Resources/${icon}.icns ($(du -h "${path}" | cut -f1))"
+    else
+        fail "Resources/${icon}.icns is missing or empty"
+    fi
+done
+
+icon_key="$(plutil -extract CFBundleIconFile raw "${bundle}/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "${icon_key}" == "mark" ]]; then
+    pass "CFBundleIconFile names mark.icns"
+else
+    fail "CFBundleIconFile is '${icon_key:-<absent>}', expected 'mark'"
+fi
+
+# Index 0 is the markdown entry. The plain-text entry deliberately has no icon:
+# one entry covering both types would put the markdown document icon on every
+# .txt file, which is why `assemble-bundle.sh` splits them.
+doc_icon="$(plutil -extract CFBundleDocumentTypes.0.CFBundleTypeIconFile raw \
+    "${bundle}/Contents/Info.plist" 2>/dev/null || true)"
+doc_type="$(plutil -extract CFBundleDocumentTypes.0.LSItemContentTypes.0 raw \
+    "${bundle}/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "${doc_icon}" == "mark-document" && "${doc_type}" == "net.daringfireball.markdown" ]]; then
+    pass "the markdown document type carries mark-document.icns"
+else
+    fail "markdown document type is '${doc_type:-<absent>}' with icon '${doc_icon:-<absent>}'"
+fi
+
+if plutil -extract CFBundleDocumentTypes.1.CFBundleTypeIconFile raw \
+    "${bundle}/Contents/Info.plist" >/dev/null 2>&1; then
+    fail "the plain-text document type has an icon; it would land on every .txt"
+else
+    pass "the plain-text document type has no icon of its own"
 fi
 
 # ------------------------------------------------------------------ done ----

@@ -17,7 +17,17 @@ import Foundation
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
 
-    public private(set) var mainWindowController: MainWindowController?
+    /// Every window, and the session file they share
+    /// (`2026-08-26-multiple-windows-and-split-panes`).
+    public private(set) var windows: WindowCoordinator!
+
+    /// The first window.
+    ///
+    /// Kept, and kept meaning "the first one", for the callers that predate
+    /// there being more than one. Anything acting on *the user's* window wants
+    /// ``WindowCoordinator/keyController`` instead — with three windows open,
+    /// the first is rarely the one in front.
+    public var mainWindowController: MainWindowController? { windows?.controllers.first }
 
     /// ADR-3's command surface. One router, two entry paths.
     public private(set) var router: CommandRouter?
@@ -88,22 +98,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? restored?.sidebarRoot.map { URL(fileURLWithPath: $0) }.flatMap(Self.existing)
             ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 
-        let controller = MainWindowController(root: root, session: session)
-        mainWindowController = controller
+        let coordinator = WindowCoordinator(session: session)
+        windows = coordinator
+        let controller = coordinator.makeWindow(root: root)
         installMainMenu(for: controller)
         controller.showWindow(activating: true)
 
         if let restored {
-            Log.app.info("restoring \(restored.tabs.count) tabs from the session file")
-            controller.restore(
-                restored, sidebarRoot: requested.isEmpty ? nil : root)
+            Log.app.info(
+                "restoring \(restored.effectiveWindows.count) window(s), \(restored.tabs.count) tabs in the first, from the session file"
+            )
+            coordinator.restore(restored, sidebarRoot: requested.isEmpty ? nil : root)
         }
 
         for url in launchFiles {
-            controller.open(url)
+            coordinator.keyController?.open(url)
         }
 
-        router = CommandRouter(target: controller)
+        // The target is resolved per command rather than bound once: with more
+        // than one window, "the window" is whichever one is in front when the
+        // command arrives (`2026-08-26-multiple-windows-and-split-panes`).
+        router = CommandRouter { [weak coordinator] in coordinator?.keyController }
         startCommandSocket()
 
         // After the router exists, because a queued `mark://` URL is routed
@@ -112,6 +127,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let held = pendingURLs
         pendingURLs = []
         open(held, into: controller)
+
+        // The Window menu follows the key window, so it has to be rebuilt when
+        // that changes rather than only when a tab does.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyWindowChanged(_:)),
+            name: NSWindow.didBecomeKeyNotification, object: nil)
 
         Log.signposter.endInterval("didFinishLaunching", state)
     }
@@ -129,7 +150,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// exactly, including activating: a double-click in Finder is a person
     /// asking to look at something now.
     public func application(_ application: NSApplication, open urls: [URL]) {
-        guard let controller = mainWindowController else {
+        guard let controller = windows?.keyController else {
             // The cold-launch order, not an error: hold them until
             // `applicationDidFinishLaunching` has a window to open them in.
             pendingURLs.append(contentsOf: urls)
@@ -215,8 +236,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // One window (ADR-4), so closing it means quitting.
+        // Still true with more than one window, and now it means what it says:
+        // closing the *last* one quits. `2026-08-26-multiple-windows-and-split-panes`
+        // did not change this — a document viewer with no windows and no dock
+        // menu has nothing left to show.
         true
+    }
+
+    /// The key window changed, so the Window menu's tab items belong to a
+    /// different tab list now.
+    @objc private func keyWindowChanged(_ notification: Notification) {
+        guard let controller = windows?.keyController else { return }
+        WindowMenu.shared?.update(with: controller.tabs)
     }
 
     /// The session write that has to happen synchronously.
@@ -230,8 +261,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // 800 ms" only if the pending debounce is written when the app goes
         // away — and `applicationWillTerminate` has no runloop left to await
         // on, which is why `Buffer.save()` is synchronous.
-        mainWindowController?.flushDirtyBuffers()
-        mainWindowController?.saveSessionNow()
+        // Every window's, not just the first: unsaved work in a popped-out
+        // window is exactly as unsaved as anywhere else.
+        windows?.flushDirtyBuffers()
+        windows?.saveNow()
         socketServer?.stop()
     }
 
@@ -304,6 +337,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// targeting the responder chain, validated by
     /// ``MainWindowController/validateMenuItem(_:)``.
     private func installMainMenu(for controller: MainWindowController) {
+        let mainMenu = buildMainMenu()
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = WindowMenu.shared
+        WindowMenu.shared?.update(with: controller.tabs)
+    }
+
+    /// The menu bar, built but not installed.
+    ///
+    /// Separated from ``installMainMenu(for:)`` so `MenuBarTests` can read the
+    /// whole bar at once without an `NSApplication`. That is not a convenience:
+    /// the ⌥⌘F collision this build fixes was invisible to every other kind of
+    /// test, because it is a property of the bar as a whole rather than of any
+    /// item in it.
+    func buildMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
@@ -321,6 +368,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
+        // `2026-08-26-multiple-windows-and-split-panes`. ⌘N is the platform's
+        // "another one of these", and until that ADR there was nothing for it
+        // to mean — a viewer has no blank document to make.
+        fileMenu.addItem(
+            withTitle: "New Window", action: #selector(MainWindowController.newWindow(_:)),
+            keyEquivalent: "n")
         fileMenu.addItem(
             withTitle: "New Tab…", action: #selector(MainWindowController.newTab(_:)),
             keyEquivalent: "t")
@@ -460,6 +513,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 
+        // `2026-08-26-multiple-windows-and-split-panes`: two documents on
+        // screen, one tab bar, and a focused pane that says which one the bar
+        // and the find bar act on. ⌘\ and its two modifiers were free.
+        viewMenu.addItem(
+            withTitle: "Split Right", action: #selector(MainWindowController.splitRight(_:)),
+            keyEquivalent: "\\")
+        let closeSplitItem = viewMenu.addItem(
+            withTitle: "Close Split", action: #selector(MainWindowController.closeSplit(_:)),
+            keyEquivalent: "\\")
+        closeSplitItem.keyEquivalentModifierMask = [.command, .shift]
+        let focusPaneItem = viewMenu.addItem(
+            withTitle: "Focus Other Pane",
+            action: #selector(MainWindowController.focusOtherPane(_:)), keyEquivalent: "\\")
+        focusPaneItem.keyEquivalentModifierMask = [.command, .option]
+        viewMenu.addItem(.separator())
+
         // M7's catalogue, in the menu bar. A group of its own because it is the
         // one item in this menu that changes how the *document* looks rather
         // than which panes are around it. Its contents are built when it opens
@@ -495,9 +564,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         sortItem.submenu = sortMenu
         viewMenu.addItem(sortItem)
 
+        // **⌥⌘J, not ⌥⌘F.** This item claimed ⌥⌘F, and so does
+        // `Edit ▸ Find ▸ Replace…` above. AppKit matches key equivalents in
+        // menu-bar order and stops at the first hit; Edit precedes View, so
+        // ⌥⌘F has always been Replace and this item drew a shortcut that did
+        // nothing — worse than having none, because it advertises itself.
+        //
+        // Replace keeps ⌥⌘F: it is the platform standard for Find & Replace,
+        // and `2026-08-25-flock-write-locking` chose `NSTextView` precisely to
+        // inherit standard editing behaviour. ⌥⌘J is Xcode's binding for the
+        // filter field in its navigator — the same control in the same place.
+        //
+        // Anything added here with `[.command, .option]` should be checked
+        // against the rest of the menu bar first; `AppDelegateTests` now fails
+        // the build if two items collide.
         viewMenu.addItem(
             withTitle: "Filter Files…",
-            action: #selector(MainWindowController.focusSidebarFilter(_:)), keyEquivalent: "f"
+            action: #selector(MainWindowController.focusSidebarFilter(_:)), keyEquivalent: "j"
         ).keyEquivalentModifierMask = [.command, .option]
         viewMenu.addItem(
             withTitle: "Refresh Sidebar",
@@ -543,9 +626,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(windowItem)
         WindowMenu.shared = windowMenu
 
-        NSApp.mainMenu = mainMenu
-        NSApp.windowsMenu = windowMenu
-        windowMenu.update(with: controller.tabs)
+        return mainMenu
     }
 
     @objc private func openDocument(_ sender: Any?) {
@@ -554,7 +635,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsOtherFileTypes = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        mainWindowController?.open(url)
+        windows?.keyController?.open(url)
     }
 }
 
@@ -596,6 +677,15 @@ public final class WindowMenu: NSMenu {
             withTitle: "Show Previous Tab",
             action: #selector(MainWindowController.selectPreviousTab(_:)), keyEquivalent: "\t")
         previous.keyEquivalentModifierMask = [.control, .shift]
+        addItem(.separator())
+
+        // `2026-08-26-multiple-windows-and-split-panes`. In the Window menu
+        // rather than File, because the thing it makes is a window; Safari and
+        // Chrome both put "Move Tab to New Window" here for the same reason.
+        let popOut = addItem(
+            withTitle: "Move Tab to New Window",
+            action: #selector(MainWindowController.popOutTab(_:)), keyEquivalent: "n")
+        popOut.keyEquivalentModifierMask = [.command, .control]
         addItem(.separator())
 
         for number in 1...max(1, positions) {

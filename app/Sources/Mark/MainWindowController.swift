@@ -77,6 +77,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let splitViewController: NSSplitViewController
     private let session: Session
 
+    /// The other windows, and the shared session file.
+    ///
+    /// `nil` for a controller built directly rather than through
+    /// ``WindowCoordinator/makeWindow(root:collapsedSidebar:)`` — `mark-bench`
+    /// and most tests — which is why every use of it here has a single-window
+    /// fallback. Weak: the coordinator owns the controllers, not the reverse.
+    public weak var windows: WindowCoordinator?
+
+    /// The sidebar's split item, kept so the pane can be collapsed on a
+    /// popped-out window without going through the menu action.
+    private let sidebarItem: NSSplitViewItem
+
     /// ADR-2's file watcher, for every open document at once.
     ///
     /// It lives here rather than on ``DocumentView`` for the reason ADR-4
@@ -156,6 +168,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(documentItem)
         self.splitViewController = splitViewController
+        self.sidebarItem = sidebarItem
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
@@ -227,6 +240,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         documentArea.onDrop = { [weak self] urls in
             self?.sidebar.handleDrop(urls) ?? false
         }
+        documentContainer.onSplitFractionChanged = { [weak self] _ in
+            self?.saveSessionSoon()
+        }
+        documentContainer.onPaneClicked = { [weak self] pane in
+            self?.tabs.moveFocus(to: pane)
+        }
         // Picking a heading scrolls the preview to it — the sidebar's other
         // half answers "which file", this one answers "where in it".
         toc.onSelect = { [weak self] heading in
@@ -262,6 +281,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         tabs.open(url, preview: preview)
     }
 
+    /// Move the focus to whichever pane is showing `tab`.
+    ///
+    /// The destination of ``DocumentView/onFocus``: the reader clicked into a
+    /// document, and the window has to decide that document is now the one the
+    /// tab bar, the find bar and the menus act on.
+    func focusPane(showing tab: DocumentTab) {
+        guard let pane = Pane.allCases.first(where: { tabs.panes.tab(in: $0) === tab }) else {
+            return
+        }
+        tabs.moveFocus(to: pane)
+    }
+
     /// Point the sidebar somewhere else, recording it in the history.
     public func setSidebarRoot(_ url: URL) {
         sidebar.navigate(to: url)
@@ -275,6 +306,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Whether the sidebar pane is collapsed.
+    public var isSidebarCollapsed: Bool { sidebarItem.isCollapsed }
+
+    /// Show or hide the sidebar without going through the menu action.
+    ///
+    /// A popped-out window starts collapsed: it exists to show one document,
+    /// and arriving with a file tree open would make it a second copy of the
+    /// window it came from rather than the detached view that was asked for.
+    /// ⌃⌘S still brings it back, which is why this is a starting state rather
+    /// than a property of the window.
+    public func setSidebarCollapsed(_ collapsed: Bool) {
+        sidebarItem.isCollapsed = collapsed
+    }
+
+    /// Give up everything this window holds on `tab`, short of its contents.
+    ///
+    /// Called before a tab is moved to another window. It does **not** touch
+    /// the `Buffer`: that travels with the tab, unsaved text, `flock(2)` lock
+    /// and all, which is the entire difference between moving a tab and closing
+    /// one. What it drops is the machinery that is this *window's* — the
+    /// conflict prompt that would otherwise be presented on a sheet over a
+    /// window no longer showing the document, and the editor pane's binding to
+    /// a buffer it is about to stop being responsible for.
+    func releaseClaims(on tab: DocumentTab) {
+        conflicts.cancel(for: tab.url)
+        if let buffer = tab.buffer {
+            editor.forget(buffer)
+        }
+    }
+
     // MARK: - Watching
 
     /// Watch exactly the files that are open, and nothing else.
@@ -283,7 +344,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// so a tab that appears by any route — the sidebar, ⌘T, `mark open`,
     /// `mark://`, session restore — is watched by construction and there is no
     /// second list to forget to update.
-    private func syncWatchedFiles() {
+    func syncWatchedFiles() {
         watcher.setWatched(Set(tabs.tabs.map(\.url)))
     }
 
@@ -427,6 +488,31 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             return nil
         }
 
+        tab.attach(buffer: buffer)
+        wire(buffer, to: tab)
+        // The checkbox seam: from here on a click on this tab's preview goes to
+        // the buffer while dirty and to the file while clean, decided per
+        // click rather than by a flag.
+        tab.documentView?.taskWriter = BufferTaskWriter(buffer: buffer)
+        Log.app.info(
+            "editing \(tab.url.lastPathComponent, privacy: .public) (\(buffer.text.utf8.count) bytes)"
+        )
+        return buffer
+    }
+
+    /// Every wire between a buffer and this window, in one place.
+    ///
+    /// Extracted from ``buffer(for:)`` so that a tab arriving from another
+    /// window through ``adopt(_:for:)`` is re-wired identically rather than
+    /// through a second copy that can drift.
+    ///
+    /// **`onWillWrite` is the one that fails silently.** Every closure here
+    /// captures `self`; miss the re-wire and most of them merely update the
+    /// wrong window's chrome. That one tells the `FileWatcher` the hash of what
+    /// we are about to write, and left pointing at the old window's watcher the
+    /// new window sees its own autosave as an external change and re-renders
+    /// the document under the reader's caret 800 ms after they stop typing.
+    private func wire(_ buffer: Buffer, to tab: DocumentTab) {
         buffer.onWillWrite = { [weak self] contents in
             // ADR-6: *"Every write records its content hash, and the watcher
             // suppresses matches."* This is that. Before the write, so a fast
@@ -470,16 +556,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 self.editor.adoptExternalText(buffer.text)
             }
         }
-
-        tab.attach(buffer: buffer)
-        // The checkbox seam: from here on a click on this tab's preview goes to
-        // the buffer while dirty and to the file while clean, decided per
-        // click rather than by a flag.
-        tab.documentView?.taskWriter = BufferTaskWriter(buffer: buffer)
-        Log.app.info(
-            "editing \(tab.url.lastPathComponent, privacy: .public) (\(buffer.text.utf8.count) bytes)"
-        )
-        return buffer
     }
 
     private func bindEditor(to tab: DocumentTab) {
@@ -712,22 +788,53 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// which reads as "it forgot where I had been" rather than as a missing
     /// feature.
     public func sessionSnapshot() -> SessionState {
-        var state = tabs.snapshot(sidebarRoot: sidebar.root)
+        // One window's worth, mirrored into the flat fields. Still here because
+        // a controller built without a ``WindowCoordinator`` — `mark-bench`,
+        // most tests — is still a whole app as far as the session file is
+        // concerned.
+        var state = SessionState(windows: [windowSnapshot()])
+        // The theme is the app's, not the window's, which is why it is set here
+        // and not in ``windowSnapshot()``: two windows showing two themes is
+        // not a thing, and `2026-08-26-multiple-windows-and-split-panes` did
+        // not make it one.
         state.theme = ThemeController.shared.chosenName
+        // Which half of the theme is pinned, for the same reason and with the
+        // same scope: pinning is one choice for the app, not one per window.
         state.themeAppearance = ThemeController.shared.appearance.rawValue
-        let sidebarState = sidebar.snapshot()
-        state.sidebarBack = sidebarState.back.map(\.path)
-        state.sidebarForward = sidebarState.forward.map(\.path)
-        state.sidebarOptions = SessionSidebarOptions(
-            showsNonMarkdown: sidebarState.options.showsNonMarkdown,
-            showsHidden: sidebarState.options.showsHidden,
-            sort: sidebarState.sort.rawValue
-        )
-        // M10. M9 shipped without this and a relaunch came back read-only,
-        // which reads as the window forgetting rather than as ADR-6's
-        // read-only default being honoured.
-        state.editorVisible = isEditorVisible
         return state
+    }
+
+    /// This window's state, for the coordinator to assemble with the others.
+    public func windowSnapshot() -> SessionWindow {
+        let sidebarState = sidebar.snapshot()
+        return SessionWindow(
+            tabs: tabs.tabs.map {
+                SessionTab(
+                    path: $0.url.path,
+                    scrollOffset: $0.documentView?.scrollOffset ?? $0.scrollOffset,
+                    title: $0.metadata?.documentTitle,
+                    preview: $0.isPreview
+                )
+            },
+            selectedIndex: tabs.selectedIndex,
+            secondaryIndex: tabs.secondary.flatMap { tabs.index(of: $0) },
+            focus: tabs.focus.rawValue,
+            splitFraction: Double(documentContainer.splitFraction),
+            frame: window.map { NSStringFromRect($0.frame) },
+            sidebarCollapsed: isSidebarCollapsed,
+            sidebarRoot: sidebar.root.path,
+            sidebarBack: sidebarState.back.map(\.path),
+            sidebarForward: sidebarState.forward.map(\.path),
+            sidebarOptions: SessionSidebarOptions(
+                showsNonMarkdown: sidebarState.options.showsNonMarkdown,
+                showsHidden: sidebarState.options.showsHidden,
+                sort: sidebarState.sort.rawValue
+            ),
+            // M10. M9 shipped without this and a relaunch came back read-only,
+            // which reads as the window forgetting rather than as ADR-6's
+            // read-only default being honoured.
+            editorVisible: isEditorVisible
+        )
     }
 
     /// Restore a session. Only the selected tab is hydrated, so a 40-tab
@@ -743,6 +850,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         ThemeController.shared.restore(
             named: state.theme,
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
+        guard let window = state.effectiveWindows.first else { return }
+        restore(window, sidebarRoot: sidebarRoot)
+    }
+
+    /// Restore one window's worth of state.
+    public func restore(_ state: SessionWindow, sidebarRoot: URL? = nil) {
         if let root = (sidebarRoot?.path ?? state.sidebarRoot) {
             let options = state.sidebarOptions ?? SessionSidebarOptions()
             sidebar.restore(
@@ -760,6 +873,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 )
             )
         }
+        if let fraction = state.splitFraction {
+            documentContainer.splitFraction = CGFloat(fraction)
+        }
+        restoreFrame(state.frame)
+        setSidebarCollapsed(state.sidebarCollapsed ?? false)
         tabs.restore(state)
         // After the tabs, because showing the pane binds the selected tab's
         // buffer and there is no selection until `restore` has made one. A
@@ -770,7 +888,40 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Put the window back where it was, unless "where it was" is off screen.
+    ///
+    /// A display that has been unplugged since the last run leaves a frame
+    /// nothing can show. `setFrame` would accept it happily and the window
+    /// would be gone — indistinguishable, to the user, from a window that never
+    /// came back. So the frame has to *intersect* a screen, not merely parse.
+    private func restoreFrame(_ encoded: String?) {
+        guard let encoded, let window else { return }
+        let frame = NSRectFromString(encoded)
+        guard frame.width >= window.minSize.width, frame.height >= window.minSize.height else {
+            return
+        }
+        let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        guard visible else {
+            Log.app.info(
+                "restored window frame \(encoded, privacy: .public) is off every screen; cascading instead"
+            )
+            return
+        }
+        window.setFrame(frame, display: false)
+    }
+
+    /// Schedule a session write.
+    ///
+    /// Routed through the coordinator when there is one, because the file
+    /// describes *every* window and a controller only knows its own. Without
+    /// one — `mark-bench`, most tests — it falls back to writing itself as the
+    /// single window, which is exactly what it did before there could be more
+    /// than one.
     public func saveSessionSoon() {
+        if let windows {
+            windows.saveSoon()
+            return
+        }
         session.scheduleSave { [weak self] in
             self?.sessionSnapshot() ?? SessionState()
         }
@@ -780,6 +931,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// scroll offsets are pushed from the page continuously rather than
     /// queried here.
     public func saveSessionNow() {
+        if let windows {
+            windows.saveNow()
+            return
+        }
         session.saveNow(sessionSnapshot())
     }
 
@@ -795,6 +950,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             tabBar.isHidden = tabs.isEmpty
             tabBar.superview?.needsLayout = true
         }
+        // Only the window in front owns the menu bar. Without the guard, a
+        // background window refreshing its badges would retitle ⌘1–⌘9 with
+        // *its* tabs while the user is looking at another window's.
+        if isMenuBarOwner {
+            WindowMenu.shared?.update(with: tabs)
+        }
+    }
+
+    /// Whether this window's tabs are the ones the Window menu should list.
+    ///
+    /// True for a controller with no coordinator, which is the single-window
+    /// case every test and `mark-bench` builds.
+    private var isMenuBarOwner: Bool {
+        guard let windows else { return true }
+        return windows.keyController === self
+    }
+
+    // MARK: - NSWindowDelegate
+
+    /// This window is going away.
+    ///
+    /// The coordinator writes its dirty buffers before dropping it:
+    /// `applicationWillTerminate` never sees a window closed an hour before
+    /// quit, so this is the last chance its unsaved work has.
+    public func windowWillClose(_ notification: Notification) {
+        windows?.windowWillClose(self)
+    }
+
+    /// The Window menu follows the front window.
+    public func windowDidBecomeKey(_ notification: Notification) {
         WindowMenu.shared?.update(with: tabs)
     }
 }
@@ -803,16 +988,29 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 extension MainWindowController: TabHydrator {
 
-    /// ADR-4's hydration. Every web view made in the app is made here.
+    /// Hydration. Every web view made in the app is made here.
     public func makeDocumentView(for tab: DocumentTab) -> DocumentView {
         let view = DocumentView(frame: documentContainer.bounds)
-        // Autoresizing rather than four constraints per view: with up to 20
-        // resident views this is layout the window would otherwise redo on
-        // every resize, and the container's job is to stack, not to lay out.
-        view.autoresizingMask = [.width, .height]
+        // Frame-based rather than autoresizing, because the container now
+        // places its views rather than stacking them: a split gives the two
+        // displayed views half the width each, and an autoresizing mask would
+        // fight `DocumentContainerView.layout()` for the frame on every resize.
         view.isHidden = true
         documentContainer.addSubview(view)
+        wire(view, to: tab)
+        view.open(
+            tab.url, source: tab.authoritativeSource, restoringScrollTo: tab.scrollOffset)
+        return view
+    }
 
+    /// Everything a ``DocumentView`` needs to know about the window showing it.
+    ///
+    /// Extracted from ``makeDocumentView(for:)`` so that ``adopt(_:for:)`` — a
+    /// view arriving from another window — goes through the identical wiring
+    /// rather than a second copy of it that can fall behind. Every closure here
+    /// captures `self`, which is exactly why a moved view must be re-wired: left
+    /// alone it reports its scrolls to the window it came from.
+    private func wire(_ view: DocumentView, to tab: DocumentTab) {
         view.onOpen = { [weak self, weak tab] url in
             guard let self, let tab else { return }
             self.tabs.notePainted(tab)
@@ -827,6 +1025,13 @@ extension MainWindowController: TabHydrator {
             tab.scrollOffset = y
             self.saveSessionSoon()
         }
+        // Clicking into a document is how a reader says which pane they mean.
+        // A `WKWebView` swallows the click, so the signal comes from the view
+        // taking first-responder rather than from a mouse event we never see.
+        view.onFocus = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.focusPane(showing: tab)
+        }
         // ADR-6: *"nothing may read the file for rendering […] on a dirty
         // tab"*. Rehydration is a render, so a dirty tab is rehydrated from its
         // buffer — otherwise switching away from an unsaved document and back
@@ -834,13 +1039,30 @@ extension MainWindowController: TabHydrator {
         if let buffer = tab.buffer {
             view.taskWriter = BufferTaskWriter(buffer: buffer)
         }
-        view.open(
-            tab.url, source: tab.authoritativeSource, restoringScrollTo: tab.scrollOffset)
-        return view
     }
 
     public func discardDocumentView(_ view: DocumentView, for tab: DocumentTab) {
         view.tearDown()
+    }
+
+    /// A live view that has just arrived from another window.
+    ///
+    /// The document is not reopened: it keeps its DOM, its scroll position and
+    /// its JS state across the move, which is why a pop-out is instant rather
+    /// than a ~4.7 ms rehydration — and, more importantly, why a dirty tab can
+    /// move at all without being dehydrated, which
+    /// `2026-08-25-flock-write-locking` forbids.
+    public func adopt(_ view: DocumentView, for tab: DocumentTab) {
+        view.isHidden = true
+        documentContainer.addSubview(view)
+        wire(view, to: tab)
+        // The buffer's callbacks captured the old window too, and one of them
+        // is load-bearing in a way that fails silently — see `wire(_:to:)` for
+        // `Buffer`.
+        if let buffer = tab.buffer {
+            wire(buffer, to: tab)
+        }
+        documentContainer.needsLayout = true
     }
 }
 
@@ -879,20 +1101,36 @@ extension MainWindowController: TabStoreDelegate {
         saveSessionSoon()
     }
 
-    /// The switch itself: unhide one view, hide the other.
+    /// Which document is in which pane, and which pane is being acted on.
     ///
-    /// ADR-4 measured this at 0.05 ms median because that is all it is. There
-    /// is no re-injection, no re-layout of the document, and no scroll
-    /// restoration — the outgoing view keeps its DOM, its scroll position, and
-    /// its JS state, and gets them back untouched when it is next shown.
-    public func tabStore(_ store: TabStore, didSelect tab: DocumentTab?, previous: DocumentTab?) {
+    /// The switch itself is still a show/hide, measured at 0.05 ms median
+    /// because that is all it is: no re-injection, no re-layout of the
+    /// document, no scroll restoration. Splitting adds a second view to the
+    /// same operation rather than a different one.
+    public func tabStore(_ store: TabStore, didChangePanes panes: PaneArrangement) {
         let state = Log.signposter.beginInterval("tab switch")
-        previous?.documentView?.isHidden = true
-        if let view = tab?.documentView {
-            view.frame = documentContainer.bounds
-            view.isHidden = false
-        }
+        documentContainer.show(
+            primary: panes.primary?.documentView,
+            secondary: panes.secondary?.documentView)
+        documentContainer.focusedPane = panes.focus
         Log.signposter.endInterval("tab switch", state)
+        tabBar.reload()
+        updateChrome()
+        // The bar stays open across a split, and its highlights belonged to
+        // whichever document was being searched.
+        refreshFind()
+        saveSessionSoon()
+    }
+
+    /// The selection moved within the focused pane.
+    public func tabStore(_ store: TabStore, didSelect tab: DocumentTab?, previous: DocumentTab?) {
+        // The pane contents are set by `didChangePanes`, which the store fires
+        // first. This one is about everything that follows *the selection*
+        // rather than the layout.
+        documentContainer.show(
+            primary: store.panes.primary?.documentView,
+            secondary: store.panes.secondary?.documentView)
+        documentContainer.focusedPane = store.focus
         // The sidebar follows the selection too, so the tree is always
         // pointing at the document on screen (issue #7). Outside the signpost
         // interval on purpose: ADR-4's 0.05 ms is the show/hide, and folding a
@@ -970,11 +1208,37 @@ extension MainWindowController: CommandTarget {
         return .tab(summary(for: tab))
     }
 
+    /// Every tab in **every** window, each carrying its window index.
+    ///
+    /// All windows rather than just this one, because `mark tab list` is where
+    /// someone goes to find out where a document ended up — and with commands
+    /// acting on the key window
+    /// (`2026-08-26-multiple-windows-and-split-panes`), "it is not in this
+    /// window" is exactly the thing they are trying to discover. `index` stays
+    /// per window, which is what `tab select 2` has always meant.
     public func documentTabs() -> [TabSummary] {
-        tabs.tabs.map { summary(for: $0) }
+        guard let windows else { return tabs.tabs.map { summary(for: $0) } }
+        return windows.controllers.flatMap { controller in
+            controller.tabs.tabs.map { controller.summary(for: $0) }
+        }
     }
 
     public func selectTab(matching selector: TabSelector) throws -> TabSummary {
+        // A path names a document, not a position, so it is worth finding in
+        // another window rather than reporting absent from this one. An index
+        // is a position *in a window's bar* and stays local — `tab select 2`
+        // has always meant "the third tab of the window I am driving".
+        if case .path(let path) = selector {
+            let url = CommandRouter.fileURL(from: path)
+            if tabs.tab(for: url) == nil,
+                let owner = windows?.controllers.first(where: { $0.tabs.tab(for: url) != nil }),
+                let tab = owner.tabs.tab(for: url)
+            {
+                owner.tabs.select(tab)
+                owner.showWindow(activating: false)
+                return owner.summary(for: tab)
+            }
+        }
         let tab = try resolve(selector)
         tabs.select(tab)
         showWindow(activating: false)
@@ -1214,6 +1478,17 @@ extension MainWindowController: CommandTarget {
         case .path(let path):
             let url = CommandRouter.fileURL(from: path)
             guard let tab = tabs.tab(for: url) else {
+                // Say *where* it is rather than only that it is not here. With
+                // more than one window "no tab is open on that" is a confusing
+                // thing to be told about a document plainly on screen.
+                if let elsewhere = windows?.controllers.firstIndex(where: {
+                    $0.tabs.tab(for: url) != nil
+                }) {
+                    throw CommandFailure(
+                        .tabNotFound,
+                        "\(url.path) is open in window \(elsewhere), not this one",
+                        detail: ["path": .string(url.path), "window": .int(elsewhere)])
+                }
                 throw CommandFailure(
                     .tabNotFound, "no tab is open on \(url.path)",
                     detail: ["path": .string(url.path)])
@@ -1222,7 +1497,7 @@ extension MainWindowController: CommandTarget {
         }
     }
 
-    private func summary(for tab: DocumentTab) -> TabSummary {
+    fileprivate func summary(for tab: DocumentTab) -> TabSummary {
         TabSummary(
             index: tabs.index(of: tab) ?? -1,
             path: tab.url.path,
@@ -1231,7 +1506,9 @@ extension MainWindowController: CommandTarget {
             resident: tab.state.isResident,
             preview: tab.isPreview,
             openTasks: tab.metadata?.tasks.open,
-            totalTasks: tab.metadata?.tasks.total
+            totalTasks: tab.metadata?.tasks.total,
+            window: windows?.index(of: self),
+            pane: Pane.allCases.first { tabs.panes.tab(in: $0) === tab }?.rawValue
         )
     }
 }
@@ -1259,13 +1536,136 @@ extension MainWindowController: NSMenuItemValidation {
 
     /// ⌘W closes the *tab*, matching every tab bar on the platform. The window
     /// has ⇧⌘W (`performClose:`), which AppKit routes itself.
+    /// ⌘W closes the *tab*, matching every tab bar on the platform. The window
+    /// has ⇧⌘W (`performClose:`), which AppKit routes itself.
+    ///
+    /// From the tab bar's context menu the sender carries the tab that was
+    /// right-clicked; from the menu bar there is none and it means the selected
+    /// one.
     @objc public func closeTab(_ sender: Any?) {
-        tabs.closeSelected()
+        guard let tab = tabForMenuItem(sender) else { return }
+        tabs.close(tab)
     }
 
     @objc public func closeOtherTabs(_ sender: Any?) {
-        guard let keep = tabs.selected else { return }
+        guard let keep = tabForMenuItem(sender) else { return }
         for tab in tabs.tabs where tab != keep { tabs.close(tab) }
+    }
+
+    // MARK: - Panes (2026-08-26-multiple-windows-and-split-panes)
+
+    /// ⌘\ — put a second document on screen beside this one.
+    @objc public func splitRight(_ sender: Any?) {
+        guard tabs.splitRight() else {
+            NSSound.beep()
+            return
+        }
+        saveSessionSoon()
+    }
+
+    /// ⇧⌘\ — back to one document, keeping the focused pane's.
+    @objc public func closeSplit(_ sender: Any?) {
+        guard tabs.closeSplit() else { return }
+        saveSessionSoon()
+    }
+
+    /// ⌥⌘\ — move the focus to the other pane, so the tab bar acts on it.
+    @objc public func focusOtherPane(_ sender: Any?) {
+        guard tabs.isSplit else { return }
+        tabs.moveFocus(to: tabs.focus.other)
+        // Move the keyboard as well as the model's idea of focus, so ⌘F and
+        // the arrow keys land in the pane the reader just switched to.
+        if let webView = tabs.selected?.documentView?.webView {
+            window?.makeFirstResponder(webView)
+        }
+    }
+
+    /// Open the tab under the pointer — or the selected one — in the right
+    /// pane. The tab bar's context menu; there is no key equivalent, because
+    /// ⌘\ already answers "show me two".
+    @objc public func openInRightPane(_ sender: Any?) {
+        guard let tab = tabForMenuItem(sender) else { return }
+        guard tabs.count >= 2 else {
+            NSSound.beep()
+            return
+        }
+        // Asking for the *left* pane's document on the right, with nothing
+        // split yet, means "put this one over there and show me something
+        // else here" — not "empty the left half". Splitting first gives the
+        // left pane a companion; the swap then puts the asked-for document
+        // where it was asked to go.
+        if !tabs.isSplit, tabs.primary === tab {
+            guard tabs.splitRight() else {
+                NSSound.beep()
+                return
+            }
+            tabs.swapPanes()
+        } else {
+            tabs.show(tab, in: .secondary)
+        }
+        saveSessionSoon()
+    }
+
+    // MARK: - Windows
+
+    /// ⌃⌘N — move this tab into a window of its own.
+    ///
+    /// A *move*, not a copy: `2026-08-26-multiple-windows-and-split-panes`
+    /// allows a tab exactly one view, so the document leaves this window's bar
+    /// and takes its web view — DOM, scroll position and all — with it.
+    @objc public func popOutTab(_ sender: Any?) {
+        guard let tab = tabForMenuItem(sender), tabs.count >= 2 else {
+            NSSound.beep()
+            return
+        }
+        guard let coordinator = windows else {
+            Log.app.error("no window coordinator; cannot pop \(tab.title, privacy: .public) out")
+            NSSound.beep()
+            return
+        }
+        // `2026-08-25-flock-write-locking`: never resolve a conflict by
+        // writing, and never by moving the document somewhere the user is not
+        // looking either. The prompt belongs to this window until it is
+        // answered.
+        if tab.buffer?.isConflicted == true {
+            reportUnmovableConflict(tab)
+            return
+        }
+        coordinator.popOut(tab, from: self)
+    }
+
+    /// ⌘N — a new window on the same folder, with no tabs.
+    @objc public func newWindow(_ sender: Any?) {
+        guard let coordinator = windows else { return }
+        let controller = coordinator.makeWindow(root: sidebar.root, collapsedSidebar: false)
+        controller.showWindow(activating: true)
+    }
+
+    /// The tab a context-menu item refers to, or the selected one for a
+    /// menu-bar item.
+    ///
+    /// ``TabItemView`` puts its tab in `representedObject`; the Window and File
+    /// menus have no tab in hand and mean "the one I am looking at".
+    private func tabForMenuItem(_ sender: Any?) -> DocumentTab? {
+        ((sender as? NSMenuItem)?.representedObject as? DocumentTab) ?? tabs.selected
+    }
+
+    private func reportUnmovableConflict(_ tab: DocumentTab) {
+        Log.core.error(
+            "\(tab.url.lastPathComponent, privacy: .public) has an unresolved conflict; not moving it to another window"
+        )
+        guard let window else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(tab.title)” has unresolved changes."
+        alert.informativeText =
+            "This document was changed on disk while you were editing it. "
+            + "Resolve that here before moving it to another window."
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
     }
 
     /// ⌃⇥.
@@ -1529,6 +1929,25 @@ extension MainWindowController: NSMenuItemValidation {
             return true
         case #selector(closeOtherTabs(_:)):
             return tabs.count > 1
+        case #selector(splitRight(_:)):
+            // Two tabs, because a split shows two *different* documents — one
+            // tab in both panes is the thing
+            // `2026-08-26-multiple-windows-and-split-panes` forbids outright.
+            return !tabs.isSplit && tabs.count >= 2
+        case #selector(closeSplit(_:)), #selector(focusOtherPane(_:)):
+            return tabs.isSplit
+        case #selector(openInRightPane(_:)):
+            guard let tab = (item.representedObject as? DocumentTab) ?? tabs.selected else {
+                return false
+            }
+            return tabs.count >= 2 && tabs.secondary !== tab
+        case #selector(popOutTab(_:)):
+            // Popping the only tab out would move this window's contents into a
+            // new window and leave an empty one behind, which is not what
+            // anyone means by "pop this out".
+            return windows != nil && tabs.count >= 2
+        case #selector(newWindow(_:)):
+            return windows != nil
         case #selector(selectNextTab(_:)), #selector(selectPreviousTab(_:)):
             return tabs.count > 1
         case #selector(selectTabByNumber(_:)):
@@ -1725,16 +2144,176 @@ public final class DocumentAreaView: NSView {
     // `layout()` above is the whole story for entering and leaving full screen.
 }
 
-/// The stack of resident web views. Showing a tab unhides one and hides the
-/// rest; nothing here re-injects anything.
+/// The resident web views, of which one or two are on screen.
+///
+/// Every resident ``DocumentView`` is a subview; ``layout()`` gives the
+/// displayed one or two a frame and hides the rest. Showing a tab is still a
+/// show/hide rather than a re-injection — the outgoing view keeps its DOM, its
+/// scroll position and its JS state, which is what makes a tab switch 0.05 ms.
+///
+/// **A hand-drawn divider rather than an `NSSplitView`.** ``PreviewPaneView``'s
+/// header records a debugging session lost to subview ordering around
+/// layer-hosted `WKWebView`s — a sibling added before them is painted over
+/// wholesale, rendering perfectly in an offscreen snapshot and not at all on
+/// screen. Wrapping this container in a split view rearranges exactly that
+/// hierarchy. A divider view plus the modal tracking loop already used by
+/// ``TabBarView/beginInteraction(with:event:)`` is less code and stays inside a
+/// shape that is known to work here.
 @MainActor
 public final class DocumentContainerView: NSView {
+
+    /// How the panes divide the width. Clamped, so neither pane can be dragged
+    /// to nothing — collapsing is what ⇧⌘\ is for, and a 20 pt document is not
+    /// a smaller version of a document, it is an unusable one.
+    public static let minimumSplitFraction: CGFloat = 0.2
+    public static let maximumSplitFraction: CGFloat = 0.8
+    public static let dividerWidth: CGFloat = 1
+    /// The invisible margin either side of the divider that still starts a
+    /// drag. A 1 pt hit target is a 1 pt hit target.
+    public static let dividerGrabWidth: CGFloat = 9
+
+    /// The accent stripe marking the focused pane, drawn only when split.
+    public static let focusStripeHeight: CGFloat = 2
 
     public override var isFlipped: Bool { true }
 
     /// The resident ``DocumentView``s, in creation order.
     public var documentViews: [DocumentView] { subviews.compactMap { $0 as? DocumentView } }
 
-    /// The one currently on screen, if any.
-    public var visibleDocumentView: DocumentView? { documentViews.first { !$0.isHidden } }
+    /// The one or two views on screen, left to right.
+    public var visibleDocumentViews: [DocumentView] { documentViews.filter { !$0.isHidden } }
+
+    /// The leftmost view on screen, if any.
+    ///
+    /// Kept for the callers that predate the split and only ever want "the
+    /// document"; anything that cares which pane should ask for ``panes``.
+    public var visibleDocumentView: DocumentView? { visibleDocumentViews.first }
+
+    /// The views the panes are showing. `secondary` is nil when not split.
+    public private(set) var primaryView: DocumentView?
+    public private(set) var secondaryView: DocumentView?
+
+    /// Which pane draws the focus stripe.
+    public var focusedPane: Pane = .primary {
+        didSet { needsDisplay = true }
+    }
+
+    public var isSplit: Bool { secondaryView != nil }
+
+    /// Where the divider sits, as a fraction of the width.
+    public var splitFraction: CGFloat = 0.5 {
+        didSet {
+            splitFraction = min(
+                max(Self.minimumSplitFraction, splitFraction), Self.maximumSplitFraction)
+            needsLayout = true
+        }
+    }
+
+    /// Called when the reader drags the divider, so the window can persist it.
+    public var onSplitFractionChanged: ((CGFloat) -> Void)?
+
+    /// Called when the reader clicks in a pane that is not the focused one.
+    public var onPaneClicked: ((Pane) -> Void)?
+
+    /// Put these views on screen and hide everything else.
+    public func show(primary: DocumentView?, secondary: DocumentView?) {
+        primaryView = primary
+        secondaryView = secondary
+        for view in documentViews {
+            view.isHidden = view !== primary && view !== secondary
+        }
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    public override func layout() {
+        super.layout()
+        guard let primaryView else { return }
+        if let secondaryView {
+            let dividerX = (bounds.width * splitFraction).rounded()
+            primaryView.frame = NSRect(
+                x: 0, y: 0, width: max(0, dividerX), height: bounds.height)
+            secondaryView.frame = NSRect(
+                x: dividerX + Self.dividerWidth, y: 0,
+                width: max(0, bounds.width - dividerX - Self.dividerWidth),
+                height: bounds.height)
+        } else {
+            primaryView.frame = bounds
+        }
+    }
+
+    /// The divider and the focused pane's stripe.
+    ///
+    /// Both are drawn rather than being subviews, for the layer-hosting reason
+    /// in this type's header: a sibling view over a `WKWebView` is painted over
+    /// wholesale. Drawing happens in this view's own backing store, underneath
+    /// nothing, and the divider sits in the gap between the two web views where
+    /// there is no web view to be painted over by.
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard isSplit else { return }
+        let dividerX = (bounds.width * splitFraction).rounded()
+        NSColor.separatorColor.setFill()
+        NSRect(x: dividerX, y: 0, width: Self.dividerWidth, height: bounds.height).fill()
+
+        // Which half is being acted on. Only drawn when split: unsplit there is
+        // nothing to disambiguate, and a stripe across the top of every
+        // single-document window would be chrome for its own sake.
+        NSColor.controlAccentColor.setFill()
+        let stripe =
+            focusedPane == .primary
+            ? NSRect(x: 0, y: 0, width: dividerX, height: Self.focusStripeHeight)
+            : NSRect(
+                x: dividerX + Self.dividerWidth, y: 0,
+                width: bounds.width - dividerX - Self.dividerWidth,
+                height: Self.focusStripeHeight)
+        stripe.fill()
+    }
+
+    // MARK: - The divider drag
+
+    private var dividerRect: NSRect {
+        let dividerX = (bounds.width * splitFraction).rounded()
+        return NSRect(
+            x: dividerX - Self.dividerGrabWidth / 2, y: 0,
+            width: Self.dividerGrabWidth, height: bounds.height)
+    }
+
+    public override func resetCursorRects() {
+        super.resetCursorRects()
+        guard isSplit else { return }
+        addCursorRect(dividerRect, cursor: .resizeLeftRight)
+    }
+
+    /// A mouse-down here is either a divider drag or a click on the thin strip
+    /// of container not covered by a web view. Anything landing inside a web
+    /// view never reaches this method — WebKit took it — which is why pane
+    /// focus comes from ``DocumentWebView`` instead.
+    public override func mouseDown(with event: NSEvent) {
+        guard isSplit else {
+            super.mouseDown(with: event)
+            return
+        }
+        let start = convert(event.locationInWindow, from: nil)
+        guard dividerRect.contains(start) else {
+            onPaneClicked?(start.x < bounds.width * splitFraction ? .primary : .secondary)
+            super.mouseDown(with: event)
+            return
+        }
+
+        // A modal tracking loop, matching `TabBarView`: the frames being
+        // dragged belong to layer-hosted web views, and letting AppKit
+        // interleave other event handling mid-drag is how the two panes end up
+        // disagreeing about where the divider is.
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if next.type == .leftMouseUp { break }
+            let point = convert(next.locationInWindow, from: nil)
+            guard bounds.width > 0 else { break }
+            splitFraction = point.x / bounds.width
+            layoutSubtreeIfNeeded()
+            displayIfNeeded()
+        }
+        window?.invalidateCursorRects(for: self)
+        onSplitFractionChanged?(splitFraction)
+    }
 }

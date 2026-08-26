@@ -1,8 +1,8 @@
 ---
 id: 2026-08-24-tab-residency-and-memory-model
-status: Accepted
+status: Superseded
 supersedes: [2026-08-24-single-window-custom-tab-bar]
-superseded-by: null
+superseded-by: 2026-08-26-multiple-windows-and-split-panes
 components: [app, tabs, sidebar]
 ticket: null
 date: 2026-08-24

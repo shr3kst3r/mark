@@ -19,6 +19,16 @@ public protocol TabHydrator: AnyObject {
     /// Take `view` out of the view hierarchy and release its web view.
     /// ``DocumentTab/scrollOffset`` has already been captured.
     func discardDocumentView(_ view: DocumentView, for tab: DocumentTab)
+
+    /// Take in a live view that arrived from another window, and re-wire it.
+    ///
+    /// Separate from ``makeDocumentView(for:)`` because nothing is being made:
+    /// the document keeps its DOM, its scroll offset and its JS state across a
+    /// pop-out. What it does **not** keep is its callbacks — every one of them
+    /// captured the window it came from — so an implementation that only
+    /// re-parents the view and forgets to re-wire it leaves a document
+    /// reporting its scrolls to a window that is no longer showing it.
+    func adopt(_ view: DocumentView, for tab: DocumentTab)
 }
 
 /// What the UI is told when the tab list changes.
@@ -33,10 +43,53 @@ public protocol TabStoreDelegate: AnyObject {
     /// The last moment an unsaved buffer can be written. Defaulted, so the
     /// stubs that only care about the two above are unaffected.
     func tabStore(_ store: TabStore, willClose tab: DocumentTab)
+    /// Which tab is in which pane, or which pane has the focus, changed.
+    ///
+    /// Separate from ``tabStore(_:didSelect:previous:)`` because splitting does
+    /// not necessarily move the selection: opening a split puts a *second*
+    /// document on screen while the selected one stays exactly where it was.
+    /// Defaulted, so existing conformances and the test stubs still compile.
+    func tabStore(_ store: TabStore, didChangePanes panes: PaneArrangement)
 }
 
 extension TabStoreDelegate {
     public func tabStore(_ store: TabStore, willClose tab: DocumentTab) {}
+    public func tabStore(_ store: TabStore, didChangePanes panes: PaneArrangement) {}
+}
+
+/// Where in a window a document is shown.
+///
+/// Two, not N. `2026-08-26-multiple-windows-and-split-panes`:
+///
+/// > Two panes is what is built. More panes per window is not foreclosed, but
+/// > the focus model here is a boolean, and generalising it is a design change
+/// > rather than a loop bound.
+public enum Pane: String, Sendable, Equatable, CaseIterable {
+    case primary
+    case secondary
+
+    public var other: Pane { self == .primary ? .secondary : .primary }
+}
+
+/// The panes' contents and which one has the focus, as one value.
+///
+/// Passed to the delegate whole rather than as three arguments, so a future
+/// third field does not change every call site.
+@MainActor
+public struct PaneArrangement: Equatable {
+    public var primary: DocumentTab?
+    public var secondary: DocumentTab?
+    public var focus: Pane
+
+    public var isSplit: Bool { secondary != nil }
+
+    /// The tabs on screen, in pane order. At most two, and never the same tab
+    /// twice — the ADR forbids one tab having two views.
+    public var displayed: [DocumentTab] { [primary, secondary].compactMap { $0 } }
+
+    public func tab(in pane: Pane) -> DocumentTab? {
+        pane == .primary ? primary : secondary
+    }
 }
 
 /// The open documents, their order, their MRU ranking, and ADR-4's
@@ -50,59 +103,102 @@ extension TabStoreDelegate {
 @MainActor
 public final class TabStore {
 
-/// How many tabs may hold a web view at once.
-    ///
-    /// **3, from `2026-08-24-tab-residency-and-memory-model`.** The superseded
-    /// ADR said 20, derived from a measurement that put a resident tab at
-    /// ~1.2 MB. That measurement summed RSS by walking the app's process
-    /// subtree — but WebKit's content processes are children of launchd, not of
-    /// us, so it could not see them at all. A resident tab actually costs
+    /// **3, carried forward from `2026-08-24-tab-residency-and-memory-model`.**
+    /// That ADR's predecessor said 20, derived from a measurement that put a
+    /// resident tab at ~1.2 MB. That measurement summed RSS by walking the app's
+    /// process subtree — but WebKit's content processes are children of launchd,
+    /// not of us, so it could not see them at all. A resident tab actually costs
     /// ~52 MB: 20 of them is ~1.16 GB, 3 is ~264 MB.
     ///
-    /// 3 keeps the current tab and the two most recently used switching in
-    /// 0.0001 ms; anything beyond rehydrates in ~4.7 ms, which is imperceptible.
-    /// Still a tunable, and still overridable at launch via `MARK_RESIDENT_TABS`
-    /// — `MARK_RESIDENT_TABS=1` is a defensible setting, not a wrong one.
-    public static let defaultResidentLimit = 3
+    /// An alias for ``ResidencyGovernor/defaultLimit``, kept because the limit
+    /// stopped being this type's property when
+    /// `2026-08-26-multiple-windows-and-split-panes` made it application-wide.
+    public static var defaultResidentLimit: Int { ResidencyGovernor.defaultLimit }
 
-    /// The environment override, read once. Nonsense values are ignored with a
-    /// log line rather than silently clamping to something surprising.
-    public static let configuredResidentLimit: Int = {
-        guard let raw = ProcessInfo.processInfo.environment["MARK_RESIDENT_TABS"] else {
-            return defaultResidentLimit
-        }
-        guard let value = Int(raw), value >= 1 else {
-            Log.tabs.error(
-                "MARK_RESIDENT_TABS=\(raw, privacy: .public) is not a positive integer; using \(defaultResidentLimit)"
-            )
-            return defaultResidentLimit
-        }
-        return value
-    }()
+    /// An alias for ``ResidencyGovernor/configuredLimit``. See above.
+    public static var configuredResidentLimit: Int { ResidencyGovernor.configuredLimit }
 
-    /// How many tabs may hold a web view at once.
+    /// Who budgets this store's web views — **shared with every other window**.
+    ///
+    /// `2026-08-26-multiple-windows-and-split-panes` makes residency an
+    /// application-level fact rather than a per-store one, precisely so that
+    /// opening a window cannot multiply the memory budget while every log line
+    /// keeps reporting the old number.
+    public let governor: ResidencyGovernor
+
+    /// How many tabs may hold a web view at once, across the whole app.
+    ///
+    /// A pass-through. Setting it through any store sets it for all of them,
+    /// which is the point rather than a leak.
     public var residentLimit: Int {
-        didSet {
-            residentLimit = max(1, residentLimit)
-            enforceResidentLimit()
-        }
+        get { governor.limit }
+        set { governor.limit = newValue }
     }
 
     /// Tabs in bar order. Reordering this is what drag-to-reorder does.
     public private(set) var tabs: [DocumentTab] = []
 
-    public private(set) var selected: DocumentTab?
+    /// What each pane is showing. Absent keys mean an empty pane.
+    private var paneTabs: [Pane: DocumentTab] = [:]
+
+    /// Which pane the tab bar, the menus and the socket act on.
+    public private(set) var focus: Pane = .primary
+
+    /// The tab in the **focused** pane.
+    ///
+    /// Deliberately still called `selected` and still meaning "the tab this
+    /// window is acting on". Keeping the name is what lets the window title,
+    /// the table of contents, the find bar, the editor binding and every socket
+    /// command carry on unchanged: with no split there is one pane, and this is
+    /// exactly what it always was.
+    public var selected: DocumentTab? { paneTabs[focus] }
+
+    /// The right-hand pane's tab, or `nil` when the window is not split.
+    public var secondary: DocumentTab? { paneTabs[.secondary] }
+
+    /// The left-hand pane's tab.
+    public var primary: DocumentTab? { paneTabs[.primary] }
+
+    public var isSplit: Bool { paneTabs[.secondary] != nil }
+
+    /// The panes as one value, for the delegate.
+    public var panes: PaneArrangement {
+        PaneArrangement(
+            primary: paneTabs[.primary], secondary: paneTabs[.secondary], focus: focus)
+    }
+
+    /// The tabs on screen in this window — at most two, never the same twice.
+    public var displayedTabs: [DocumentTab] { panes.displayed }
+
+    /// Whether `tab` is in either pane. The governor's third eviction exemption.
+    public func isDisplayed(_ tab: DocumentTab) -> Bool {
+        paneTabs.values.contains { $0 === tab }
+    }
 
     public weak var delegate: (any TabStoreDelegate)?
     public weak var hydrator: (any TabHydrator)?
 
-    /// Monotonic MRU clock. Every selection stamps the selected tab with the
-    /// next value, so "least recently used" is a comparison and not a list to
-    /// keep in sync.
-    private var useClock: UInt64 = 0
+    public init(governor: ResidencyGovernor = .shared) {
+        self.governor = governor
+        governor.register(self)
+    }
 
-    public init(residentLimit: Int = TabStore.configuredResidentLimit) {
-        self.residentLimit = max(1, residentLimit)
+    /// A store with a residency budget of its own.
+    ///
+    /// For tests and `mark-bench` only. It builds a **private** governor rather
+    /// than setting the shared one's limit, because a test that mutated
+    /// ``ResidencyGovernor/shared`` would change the answer for every suite
+    /// running beside it.
+    public convenience init(residentLimit: Int) {
+        self.init(governor: ResidencyGovernor(limit: residentLimit))
+    }
+
+    deinit {
+        // `governor` holds stores weakly, so this is tidiness rather than
+        // correctness — but a window closing should not leave a dead entry for
+        // the next eviction pass to walk past.
+        let governor = self.governor
+        MainActor.assumeIsolated { governor.unregister(self) }
     }
 
     // MARK: - Reading
@@ -184,6 +280,7 @@ public final class TabStore {
         let tab = DocumentTab(url: url, isPreview: preview)
         insertAt = min(max(0, insertAt), tabs.count)
         tabs.insert(tab, at: insertAt)
+        tab.store = self
         Log.tabs.info(
             "open \(preview ? "preview" : "tab", privacy: .public) \(tab.title, privacy: .public) at \(insertAt) of \(self.tabs.count)"
         )
@@ -211,8 +308,9 @@ public final class TabStore {
     private func discardPreview(_ tab: DocumentTab, at index: Int) {
         delegate?.tabStore(self, willClose: tab)
         dehydrate(tab)
-        if tab == selected { selected = nil }
+        vacatePanes(of: tab)
         tabs.remove(at: index)
+        tab.store = nil
         Log.tabs.debug("preview \(tab.title, privacy: .public) replaced in place at \(index)")
     }
 
@@ -234,31 +332,113 @@ public final class TabStore {
 
     // MARK: - Selecting
 
+    /// Show `tab` in the **focused** pane.
+    ///
+    /// Unsplit, this is exactly what it always was. Split, it is what makes the
+    /// one tab bar drive two panes: click into the right-hand pane and the next
+    /// tab you pick lands there.
     public func select(_ tab: DocumentTab?) {
+        show(tab, in: focus)
+    }
+
+    /// Show `tab` in `pane`, without moving the focus.
+    ///
+    /// The one place a pane's contents change, so the invariant that no tab is
+    /// in both panes has exactly one site to hold rather than one per caller.
+    public func show(_ tab: DocumentTab?, in pane: Pane) {
         guard tab == nil || tabs.contains(tab!) else { return }
         let previous = selected
         if let tab {
-            useClock += 1
-            tab.lastUsed = useClock
+            tab.lastUsed = governor.stamp()
         }
-        guard tab != previous else {
-            // Still worth the hydration check: re-selecting the current tab is
-            // how a caller asks for it to be brought back after an eviction
-            // that raced the selection.
-            if let tab {
-                hydrate(tab)
-                enforceResidentLimit()
-            }
-            return
+
+        // **The invariant**: one tab is never in two panes. Two views of one
+        // document is ~104 MB and two DOMs fed by one `Buffer`, and
+        // `2026-08-26-multiple-windows-and-split-panes` forbids it outright.
+        //
+        // So a tab arriving in a pane it is not already in **swaps** with
+        // whatever that pane held, rather than being copied. Swapping rather
+        // than simply vacating matters: vacating leaves the other pane empty,
+        // and an empty left pane with a document on the right is a state no
+        // user asked for and no menu item can get out of.
+        let unchanged = paneTabs[pane] === tab
+        if let tab, paneTabs[pane.other] === tab {
+            paneTabs[pane.other] = paneTabs[pane]
         }
-        selected = tab
+        paneTabs[pane] = tab
+        normalizePanes()
+
         if let tab {
             let state = Log.signposter.beginInterval("tab hydrate")
             hydrate(tab)
             Log.signposter.endInterval("tab hydrate", state)
         }
         enforceResidentLimit()
-        delegate?.tabStore(self, didSelect: tab, previous: previous)
+
+        guard !unchanged else {
+            // Re-selecting the current tab is how a caller asks for it to be
+            // brought back after an eviction that raced the selection; the
+            // hydration above has already done that. Nothing moved, so nothing
+            // is announced.
+            return
+        }
+        delegate?.tabStore(self, didChangePanes: panes)
+        if pane == focus {
+            delegate?.tabStore(self, didSelect: tab, previous: previous)
+        }
+    }
+
+    /// Move the focus to `pane`, which changes what ``selected`` means.
+    ///
+    /// Named `moveFocus(to:)` rather than `focus(_:)` so it cannot be confused
+    /// with the ``focus`` property at a call site — one reads the pane, the
+    /// other changes it, and a one-character difference between them is how a
+    /// bug gets past review.
+    public func moveFocus(to pane: Pane) {
+        guard pane != focus else { return }
+        // Focusing an empty pane would make `selected` nil while a document is
+        // plainly on screen, and every menu item would grey out.
+        guard paneTabs[pane] != nil else { return }
+        let previous = selected
+        focus = pane
+        if let tab = paneTabs[pane] { tab.lastUsed = governor.stamp() }
+        Log.tabs.debug("focus \(pane.rawValue, privacy: .public)")
+        delegate?.tabStore(self, didChangePanes: panes)
+        delegate?.tabStore(self, didSelect: selected, previous: previous)
+    }
+
+    /// ⌘\ — put a second document on screen beside this one.
+    ///
+    /// The right-hand pane gets the **second most recently used** tab, and the
+    /// focus stays where it is. It never duplicates the current tab: the ADR
+    /// forbids one tab having two views, so with fewer than two tabs there is
+    /// nothing to split and the menu item is disabled.
+    @discardableResult
+    public func splitRight() -> Bool {
+        guard !isSplit, tabs.count >= 2 else { return false }
+        let companion = mruOrder.first { !isDisplayed($0) }
+        guard let companion else { return false }
+        Log.tabs.info(
+            "split right: \(companion.title, privacy: .public) beside \(self.selected?.title ?? "nothing", privacy: .public)"
+        )
+        show(companion, in: .secondary)
+        return true
+    }
+
+    /// ⇧⌘\ — back to one document.
+    ///
+    /// The focused pane's document is the one kept, which is the one the user
+    /// was last acting on.
+    @discardableResult
+    public func closeSplit() -> Bool {
+        guard isSplit else { return false }
+        let kept = selected
+        paneTabs = [.primary: kept].compactMapValues { $0 }
+        focus = .primary
+        Log.tabs.info("split closed, keeping \(kept?.title ?? "nothing", privacy: .public)")
+        enforceResidentLimit()
+        delegate?.tabStore(self, didChangePanes: panes)
+        return true
     }
 
     public func select(index: Int) {
@@ -301,26 +481,96 @@ public final class TabStore {
     /// closing the one you just opened returns you to the one you were reading.
     public func close(_ tab: DocumentTab) {
         guard let index = tabs.firstIndex(of: tab) else { return }
-        let wasSelected = tab == selected
+        // Which pane it was in, captured before it is removed from them. A tab
+        // in the *other* pane is on screen without being selected, and closing
+        // it must collapse that pane rather than pick a successor for it.
+        let vacated = Pane.allCases.first { paneTabs[$0] === tab }
         // Before anything is torn down: a tab closed 300 ms after the last
         // keystroke still has an unwritten buffer, and this is where it is
         // written.
         delegate?.tabStore(self, willClose: tab)
         dehydrate(tab)
+        vacatePanes(of: tab)
         tabs.remove(at: index)
+        tab.store = nil
         Log.tabs.info("close tab \(tab.title, privacy: .public), \(self.tabs.count) left")
-        if wasSelected {
-            selected = nil
+
+        switch vacated {
+        case .secondary:
+            // The split's right-hand pane. Collapsing it is the whole
+            // behaviour: filling it with another document would be the app
+            // deciding the user wants to keep comparing.
+            focus = .primary
+            delegate?.tabStore(self, didChangePanes: panes)
+
+        case .primary where isSplit:
+            // The left pane emptied while the right one still has something.
+            // Promote the survivor rather than leaving a blank half-window.
+            let survivor = paneTabs[.secondary]
+            paneTabs = [.primary: survivor].compactMapValues { $0 }
+            focus = .primary
+            delegate?.tabStore(self, didChangePanes: panes)
+            delegate?.tabStore(self, didSelect: selected, previous: nil)
+
+        case .primary:
             if let successor = mruOrder.first {
                 select(successor)
             } else {
                 // The last tab. The window stays open on its empty state — it
-                // still has the sidebar, which is the whole reason ADR-4 chose
-                // one window. ⇧⌘W closes the window.
+                // still has the sidebar, which is the whole reason
+                // `2026-08-26-multiple-windows-and-split-panes` keeps a window
+                // heavier than a bare document viewer. ⇧⌘W closes the window.
+                delegate?.tabStore(self, didChangePanes: panes)
                 delegate?.tabStore(self, didSelect: nil, previous: nil)
             }
+
+        case nil:
+            // A tab that was open but not on screen. Nothing moved.
+            break
         }
         delegate?.tabStoreDidChangeTabs(self)
+    }
+
+    /// Take `tab` out of whichever pane holds it, leaving the pane empty.
+    private func vacatePanes(of tab: DocumentTab) {
+        for pane in Pane.allCases where paneTabs[pane] === tab {
+            paneTabs[pane] = nil
+        }
+        normalizePanes()
+    }
+
+    /// **The left pane is never empty while the right one is full.**
+    ///
+    /// Not tidiness. A window in that state shows one document on the right
+    /// half and a blank left half, with no menu item that fixes it: ⇧⌘\ keeps
+    /// the *focused* pane, ⌘\ refuses because the window is already split, and
+    /// clicking a tab fills whichever pane has the focus. It is reachable
+    /// several ways — moving the left pane's document to the right, closing the
+    /// left pane's tab, popping it out — so it is repaired in one place rather
+    /// than guarded against in each of them.
+    private func normalizePanes() {
+        guard paneTabs[.primary] == nil, let orphan = paneTabs[.secondary] else { return }
+        paneTabs[.primary] = orphan
+        paneTabs[.secondary] = nil
+        focus = .primary
+    }
+
+    /// Exchange the two panes' documents, keeping the focus on the same
+    /// *document* rather than on the same side.
+    ///
+    /// Following the document is the useful half: the reader asked for the
+    /// thing they were reading to move, not to start acting on the other one.
+    @discardableResult
+    public func swapPanes() -> Bool {
+        guard isSplit, let left = paneTabs[.primary], let right = paneTabs[.secondary] else {
+            return false
+        }
+        paneTabs[.primary] = right
+        paneTabs[.secondary] = left
+        focus = focus.other
+        Log.tabs.debug("panes swapped")
+        delegate?.tabStore(self, didChangePanes: panes)
+        return true
     }
 
     public func closeSelected() {
@@ -332,11 +582,86 @@ public final class TabStore {
         for tab in tabs {
             delegate?.tabStore(self, willClose: tab)
             dehydrate(tab)
+            tab.store = nil
         }
         tabs.removeAll()
-        selected = nil
+        paneTabs.removeAll()
+        focus = .primary
+        delegate?.tabStore(self, didChangePanes: panes)
         delegate?.tabStore(self, didSelect: nil, previous: nil)
         delegate?.tabStoreDidChangeTabs(self)
+    }
+
+    // MARK: - Moving a tab to another window
+
+    /// Take `tab` out of this store **without closing it**, and hand back its
+    /// live view.
+    ///
+    /// Deliberately not ``close(_:)``, and the difference is the whole point.
+    /// `close` fires `willClose`, which writes and then discards the tab's
+    /// `Buffer` — correct for a document going away, catastrophic for one
+    /// merely changing windows, which would arrive at its new home having
+    /// silently lost its undo stack, its `flock(2)` lock and its conflict
+    /// state.
+    ///
+    /// The `DocumentView` is returned still alive rather than dehydrated.
+    /// `2026-08-25-flock-write-locking` says a dirty tab is never dehydrated,
+    /// and a move should not become the one path that does it — so the view is
+    /// reparented into the destination window instead, which also saves the
+    /// ~4.7 ms rehydration.
+    ///
+    /// The caller **must** hand both to ``adopt(_:view:)`` on another store.
+    /// A tab left in the return value is a tab nothing owns.
+    public func detach(_ tab: DocumentTab) -> (tab: DocumentTab, view: DocumentView?) {
+        guard let index = tabs.firstIndex(of: tab) else { return (tab, nil) }
+        let vacated = Pane.allCases.first { paneTabs[$0] === tab }
+        vacatePanes(of: tab)
+        tabs.remove(at: index)
+        tab.store = nil
+        let view = tab.documentView
+        // Not `detach()` on the tab — that clears `documentView` and marks it
+        // dehydrated. The view is moving house, not being torn down; the
+        // destination re-attaches it as-is.
+        view?.removeFromSuperview()
+
+        Log.tabs.info(
+            "detach \(tab.title, privacy: .public) (\(view == nil ? "dehydrated" : "carrying its view", privacy: .public)), \(self.tabs.count) left"
+        )
+
+        if vacated == .secondary {
+            focus = .primary
+        } else if vacated == .primary, isSplit {
+            paneTabs = [.primary: paneTabs[.secondary]].compactMapValues { $0 }
+            focus = .primary
+        } else if vacated == .primary, let successor = mruOrder.first {
+            paneTabs[.primary] = successor
+            successor.lastUsed = governor.stamp()
+            hydrate(successor)
+        }
+        delegate?.tabStore(self, didChangePanes: panes)
+        delegate?.tabStore(self, didSelect: selected, previous: tab)
+        delegate?.tabStoreDidChangeTabs(self)
+        return (tab, view)
+    }
+
+    /// Take in a tab detached from another store, with its view if it had one.
+    ///
+    /// The tab arrives selected, because a window that opens showing nothing is
+    /// not what "pop this out" means.
+    public func adopt(_ tab: DocumentTab, view: DocumentView?, at index: Int? = nil) {
+        let insertAt = min(max(0, index ?? tabs.count), tabs.count)
+        tabs.insert(tab, at: insertAt)
+        tab.store = self
+        if let view {
+            // Re-attached rather than remade: the document keeps its DOM, its
+            // scroll position and its JS state across the move.
+            hydrator?.adopt(view, for: tab)
+        }
+        Log.tabs.info(
+            "adopt \(tab.title, privacy: .public) at \(insertAt) of \(self.tabs.count)")
+        delegate?.tabStoreDidChangeTabs(self)
+        show(tab, in: .primary)
+        moveFocus(to: .primary)
     }
 
     // MARK: - Reordering
@@ -403,48 +728,32 @@ public final class TabStore {
 
     /// Evict least-recently-used residents until the working set fits.
     ///
-    /// The selected tab is never evicted, so a `residentLimit` of 1 still
-    /// works: it means "only the tab you are looking at".
+    /// **The pass itself lives on ``ResidencyGovernor``, not here**, because
+    /// `2026-08-26-multiple-windows-and-split-panes` budgets residency across
+    /// every window at once:
     ///
-    /// **A dirty tab is never evicted either**, regardless of MRU position.
-    /// `2026-08-24-editing-pane-and-autosave` states it twice, once as a
-    /// decision and once as a constraint on future work, and
-    /// `2026-08-24-tab-residency-and-memory-model` records what it costs:
+    /// > A per-window limit multiplies the budget by the window count while
+    /// > continuing to report the old number.
     ///
-    /// > A user with many dirty tabs pays full residency, because
-    /// > `2026-08-24-editing-pane-and-autosave` forbids dehydrating unsaved
-    /// > work. At ~52 MB per tab that is now a much sharper constraint than
-    /// > when it was written against ~1.2 MB. Ten dirty tabs is ~620 MB.
-    ///
-    /// So the working set can legitimately exceed ``residentLimit``, and the
-    /// log says by how much and why. That is the accepted trade, not a bug: the
-    /// alternative is throwing away a `WKWebView` whose document exists only in
-    /// a buffer.
+    /// So this store cannot decide what to evict by looking at its own tabs —
+    /// the least recently used tab in the application may be in another window.
+    /// Kept as a method rather than deleted because it is the name every call
+    /// site already uses, and because "enforce the limit" is the thing being
+    /// asked for; where the ranking happens is the governor's business.
     public func enforceResidentLimit() {
-        var residents = tabs.filter { $0.state.isResident && $0 != selected && !$0.isDirty }
-        var over = residentCount - residentLimit
-        guard over > 0 else { return }
-        residents.sort { $0.lastUsed < $1.lastUsed }
-        for tab in residents {
-            guard over > 0 else { break }
-            dehydrate(tab)
-            over -= 1
-        }
-        let pinned = tabs.filter { $0.state.isResident && $0 != selected && $0.isDirty }
-        if !pinned.isEmpty && residentCount > residentLimit {
-            Log.tabs.info(
-                """
-                resident set is \(self.residentCount) with a limit of \(self.residentLimit):                 \(pinned.count) dirty tab(s) are exempt from eviction                 (~\(pinned.count * 52) MB) — unsaved work is never dehydrated
-                """
-            )
-        }
+        governor.enforce()
     }
 
     // MARK: - Session
 
     /// This store as a session snapshot, in bar order.
     public func snapshot(sidebarRoot: URL?) -> SessionState {
-        SessionState(
+        SessionState(windows: [snapshotWindow(sidebarRoot: sidebarRoot)])
+    }
+
+    /// This store as one window's session entry.
+    public func snapshotWindow(sidebarRoot: URL?) -> SessionWindow {
+        SessionWindow(
             tabs: tabs.map {
                 SessionTab(
                     path: $0.url.path,
@@ -454,6 +763,8 @@ public final class TabStore {
                 )
             },
             selectedIndex: selectedIndex,
+            secondaryIndex: secondary.flatMap { index(of: $0) },
+            focus: focus.rawValue,
             sidebarRoot: sidebarRoot?.path
         )
     }
@@ -464,7 +775,20 @@ public final class TabStore {
     /// selected pays for a web view, so a session with 40 tabs restores at the
     /// cost of one document, not forty. Missing files are dropped with a log
     /// line rather than restored as tabs that cannot open.
+    /// Restore from a whole session file, taking the first window.
+    ///
+    /// The single-window shorthand. A store belongs to one window, so "restore
+    /// this session" can only mean the window the file describes first —
+    /// ``WindowCoordinator`` is what fans the rest out.
     public func restore(_ session: SessionState) {
+        guard let window = session.effectiveWindows.first else {
+            closeAll()
+            return
+        }
+        restore(window)
+    }
+
+    public func restore(_ session: SessionWindow) {
         closeAll()
 
         // Resolved to a *path* before filtering, because dropping a missing
@@ -489,6 +813,7 @@ public final class TabStore {
             // tab the user would have let go.
             let tab = DocumentTab(url: url, isPreview: entry.preview)
             tab.scrollOffset = entry.scrollOffset
+            tab.store = self
             restored.append(tab)
         }
         // *At most one preview tab* is an invariant of this type, not a hope
@@ -510,8 +835,7 @@ public final class TabStore {
         // over the resident limit evicts from the left rather than in an
         // arbitrary order.
         for tab in tabs {
-            useClock += 1
-            tab.lastUsed = useClock
+            tab.lastUsed = governor.stamp()
         }
         for tab in tabs {
             tab.refreshMetadata { [weak self, weak tab] in
@@ -524,6 +848,29 @@ public final class TabStore {
             select(tab)
         } else if let first = tabs.first {
             select(first)
+        }
+
+        // The split, last: `show(_:in:)` on an empty primary would put the
+        // second document on the left. `repairedSecondaryIndex` has already
+        // discarded an out-of-range index and one equal to the selection —
+        // a hand-edited file naming the same tab twice would otherwise ask for
+        // the one thing `2026-08-26-multiple-windows-and-split-panes` forbids.
+        //
+        // Resolved by path for the same reason the selection is: dropping a
+        // missing file shifts every index after it.
+        if let index = session.repairedSecondaryIndex,
+            session.tabs.indices.contains(index)
+        {
+            let url = URL(fileURLWithPath: session.tabs[index].path).standardizedFileURL
+            if let tab = tab(for: url), tab !== selected {
+                show(tab, in: .secondary)
+            }
+        }
+        if session.repairedSecondaryIndex == nil, session.secondaryIndex != nil {
+            Log.tabs.info("session named an unusable secondary pane; restoring unsplit")
+        }
+        if isSplit, let pane = session.focus.flatMap(Pane.init(rawValue:)) {
+            moveFocus(to: pane)
         }
     }
 }

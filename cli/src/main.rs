@@ -827,14 +827,39 @@ fn cmd_tab(action: &TabAction) -> Result<(), CliError> {
             if tabs.is_empty() {
                 emitln!(out, "no tabs are open")?;
             }
+            // The window column appears only when there is more than one
+            // window (2026-08-26-multiple-windows-and-split-panes). A `w0` on
+            // every row of a single-window listing would be a column of
+            // constants, and every existing script's parse would shift for
+            // nothing. Absent entirely from an older app's reply, which reads
+            // here as one window.
+            let windows: std::collections::BTreeSet<i64> = tabs
+                .iter()
+                .filter_map(|tab| tab["window"].as_i64())
+                .collect();
+            let show_windows = windows.len() > 1;
             for tab in &tabs {
                 let tasks = match (tab["openTasks"].as_i64(), tab["totalTasks"].as_i64()) {
                     (Some(open), Some(total)) if total > 0 => format!("{open}/{total}"),
                     _ => String::new(),
                 };
+                // `w0/2` rather than a bare index: the number means nothing on
+                // its own, and the pane is what says *which half* of a split
+                // window a document is in.
+                let window = if show_windows {
+                    match (tab["window"].as_i64(), tab["pane"].as_str()) {
+                        (Some(w), Some("secondary")) => format!("w{w}R "),
+                        (Some(w), Some(_)) => format!("w{w}L "),
+                        (Some(w), None) => format!("w{w}  "),
+                        (None, _) => "     ".to_string(),
+                    }
+                } else {
+                    String::new()
+                };
                 emitln!(
                     out,
-                    "{}{} {}  {:<24} {:>7}  {}  {}",
+                    "{}{}{} {}  {:<24} {:>7}  {}  {}",
+                    window,
                     if tab["selected"].as_bool() == Some(true) {
                         "*"
                     } else {
@@ -1770,6 +1795,55 @@ struct Doctor {
     /// ``app_bundle``, the one this CLI lives inside.
     app_path: Option<String>,
     theme_dir: Option<String>,
+    /// Windows, tabs, and how many of those tabs hold a `WKWebView`.
+    ///
+    /// `2026-08-26-multiple-windows-and-split-panes` requires this, discharging
+    /// a bullet its predecessor asked for and never got:
+    ///
+    /// > **`mark doctor` reports window count, tab count, resident count, the
+    /// > budget computed from the formula, and the system-wide
+    /// > `com.apple.WebKit.WebContent` process count.**
+    ///
+    /// `None` when no app is running — there is nothing to count, which is a
+    /// different answer from zero.
+    windows: Option<u64>,
+    tabs: Option<u64>,
+    resident_tabs: Option<u64>,
+    /// `~100 MB baseline + ~52 MB x resident tabs`, in megabytes. The ADR's
+    /// formula, evaluated rather than left for the reader.
+    estimated_footprint_mb: Option<u64>,
+    /// `com.apple.WebKit.WebContent` processes **on the machine**, not ours.
+    ///
+    /// Counted system-wide on purpose. The superseded ADR's entire correction
+    /// was that WebKit's content processes are children of launchd, so a
+    /// subtree walk from the app cannot see them:
+    ///
+    /// > **Never measure process memory by walking the app's process subtree.**
+    ///
+    /// The consequence is that other applications' web views are in this
+    /// number, which is why the human-readable line says "system-wide" rather
+    /// than implying they are all ours.
+    webcontent_processes: Option<u64>,
+}
+
+/// `com.apple.WebKit.WebContent` processes on the machine.
+///
+/// `ps` rather than anything cleverer: it needs no entitlement, it sees
+/// processes launchd owns, and being wrong here is cheap — the number is
+/// diagnostic. `None` if `ps` cannot be run at all, so "we did not look" stays
+/// distinguishable from "there are none".
+fn webcontent_process_count() -> Option<u64> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-axo", "comm="])
+        .output()
+        .ok()?;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Some(
+        listing
+            .lines()
+            .filter(|line| line.contains("com.apple.WebKit.WebContent"))
+            .count() as u64,
+    )
 }
 
 fn cmd_doctor(json: bool) -> Result<(), CliError> {
@@ -1796,6 +1870,40 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
             .map(ToOwned::to_owned)
     };
 
+    // A second round trip, and only when an app is answering. `tab-list` is
+    // reused rather than given a sibling command: it already reports every tab
+    // in every window with its residency, which is the whole of what the
+    // memory formula needs.
+    struct Residency {
+        windows: u64,
+        tabs: u64,
+        resident: u64,
+    }
+    let residency = if running {
+        Client::probing()
+            .ok()
+            .and_then(|client| client.send(&Request::new("tab-list")).ok())
+            .and_then(|reply| reply["tabs"].as_array().cloned())
+            .map(|tabs| {
+                let windows: std::collections::BTreeSet<i64> = tabs
+                    .iter()
+                    .map(|tab| tab["window"].as_i64().unwrap_or(0))
+                    .collect();
+                Residency {
+                    // An app with a window and no tabs still has one window,
+                    // and an older app reports no `window` field at all.
+                    windows: windows.len().max(1) as u64,
+                    tabs: tabs.len() as u64,
+                    resident: tabs
+                        .iter()
+                        .filter(|tab| tab["resident"].as_bool() == Some(true))
+                        .count() as u64,
+                }
+            })
+    } else {
+        None
+    };
+
     let doctor = Doctor {
         core_version: mark_core::VERSION.to_owned(),
         cli_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1817,6 +1925,15 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         app_build: field("build"),
         app_path: field("app"),
         theme_dir: theme::user_dir().map(|dir| dir.display().to_string()),
+        windows: residency.as_ref().map(|r| r.windows),
+        tabs: residency.as_ref().map(|r| r.tabs),
+        resident_tabs: residency.as_ref().map(|r| r.resident),
+        estimated_footprint_mb: residency.as_ref().map(|r| 100 + 52 * r.resident),
+        webcontent_processes: if running {
+            webcontent_process_count()
+        } else {
+            None
+        },
     };
 
     if json {
@@ -1860,6 +1977,28 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         doctor.theme,
         doctor.themes
     )?;
+    if let (Some(windows), Some(tabs), Some(resident), Some(footprint)) = (
+        doctor.windows,
+        doctor.tabs,
+        doctor.resident_tabs,
+        doctor.estimated_footprint_mb,
+    ) {
+        emitln!(
+            out,
+            "windows             {windows} ({tabs} tab{}, {resident} resident)",
+            if tabs == 1 { "" } else { "s" }
+        )?;
+        emitln!(
+            out,
+            "memory budget       ~{footprint} MB  (~100 MB + ~52 MB x {resident} resident)"
+        )?;
+        if let Some(processes) = doctor.webcontent_processes {
+            // "system-wide" is not hedging. Every one of these is a child of
+            // launchd, ours and everyone else's alike, and the line would be a
+            // lie without the word.
+            emitln!(out, "WebContent procs    {processes} system-wide")?;
+        }
+    }
     match (&doctor.socket_path, &doctor.socket_error) {
         (Some(path), _) => {
             emitln!(

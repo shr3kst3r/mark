@@ -20,9 +20,17 @@ import Foundation
 /// prints the tree so a regression is visible in the gate output rather than
 /// only to someone running VoiceOver.
 ///
-/// What ADR-4 gives up and this therefore does **not** implement: drag-out to
-/// a new window (there is exactly one `NSWindow`), cross-window tab merging,
-/// and the ⌘⇧\ "Show All Tabs" overview.
+/// `2026-08-26-multiple-windows-and-split-panes` since gave the app more than
+/// one window, so the first item on that list came back — but through the menu
+/// bar and this bar's context menu (*Move Tab to New Window*), **not** by
+/// dragging a tab out of the bar. The drag loop below reorders within the bar
+/// and nothing else; tearing a tab off with the mouse would mean tracking the
+/// pointer outside the window, hit-testing every other window's bar, and
+/// drawing a detached tab under the cursor, which is a great deal of hand-built
+/// AppKit for a gesture the menu already performs.
+///
+/// Still not implemented, and still for the reason the superseded ADR gave:
+/// cross-window tab merging, and the ⌘⇧\ "Show All Tabs" overview.
 @MainActor
 public final class TabBarView: NSView {
 
@@ -105,8 +113,12 @@ public final class TabBarView: NSView {
             items.append(item)
             addSubview(item)
         }
+        let companion = store.isSplit ? store.panes.tab(in: store.focus.other) : nil
         for (item, tab) in zip(items, tabs) {
-            item.configure(tab: tab, isSelected: tab == store.selected)
+            item.configure(
+                tab: tab,
+                isSelected: tab == store.selected,
+                isCompanion: tab === companion)
         }
         layoutTabs()
         needsDisplay = true
@@ -437,6 +449,14 @@ public final class TabItemView: NSView {
     public private(set) var tab: DocumentTab?
     public private(set) var isSelected = false
 
+    /// On screen in the pane that does **not** have the focus.
+    ///
+    /// A third state, added by `2026-08-26-multiple-windows-and-split-panes`.
+    /// Without it a split window has two documents visible and only one of them
+    /// looks open, so there is no way to tell which of six tabs are the two you
+    /// are actually reading.
+    public private(set) var isCompanion = false
+
     /// Drawn lifted and semi-transparent while the user drags it.
     var isDragging = false {
         didSet { needsDisplay = true }
@@ -471,10 +491,11 @@ public final class TabItemView: NSView {
         fatalError("TabItemView is created in code, not from a nib")
     }
 
-    func configure(tab: DocumentTab, isSelected: Bool) {
+    func configure(tab: DocumentTab, isSelected: Bool, isCompanion: Bool = false) {
         self.tab = tab
         self.isSelected = isSelected
-        closeButton.isHidden = !(isSelected || isHovered)
+        self.isCompanion = isCompanion
+        closeButton.isHidden = !(isSelected || isCompanion || isHovered)
         toolTip = [tab.metadata?.documentTitle, tab.url.path]
             .compactMap { $0 }
             .joined(separator: "\n")
@@ -513,6 +534,41 @@ public final class TabItemView: NSView {
         bar?.beginInteraction(with: self, event: event)
     }
 
+    /// Right-click. ⌘\\ and ⌃⌘N are in the menu bar, and a shortcut nobody can
+    /// find is not a feature — this is where someone looks for "show this one
+    /// beside that one".
+    ///
+    /// Every item carries its tab in `representedObject`, so the actions act on
+    /// the tab that was clicked rather than on the selected one. Validation is
+    /// `MainWindowController`'s, through the responder chain, exactly like the
+    /// menu-bar copies.
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        guard let tab else { return nil }
+        let menu = NSMenu(title: tab.title)
+        let items: [(String, Selector)] = [
+            ("Open in Right Pane", #selector(MainWindowController.openInRightPane(_:))),
+            ("Move Tab to New Window", #selector(MainWindowController.popOutTab(_:))),
+        ]
+        for (title, action) in items {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.representedObject = tab
+        }
+        menu.addItem(.separator())
+        let close = menu.addItem(
+            withTitle: "Close Tab", action: #selector(MainWindowController.closeTab(_:)),
+            keyEquivalent: "")
+        close.representedObject = tab
+        let closeOthers = menu.addItem(
+            withTitle: "Close Other Tabs",
+            action: #selector(MainWindowController.closeOtherTabs(_:)), keyEquivalent: "")
+        closeOthers.representedObject = tab
+        // Right-clicking a tab is also a way of pointing at it, and acting on a
+        // tab that is not the selected one without saying so would be a
+        // surprise. Selecting first makes the two agree.
+        bar?.store?.select(tab)
+        return menu
+    }
+
     /// Middle-click closes, matching every browser tab bar.
     public override func otherMouseUp(with event: NSEvent) {
         guard event.buttonNumber == 2, let tab, bounds.contains(convert(event.locationInWindow, from: nil))
@@ -532,6 +588,16 @@ public final class TabItemView: NSView {
             // on colour alone": the selected tab is also the only one drawn on
             // the document's own background.
             NSColor.controlAccentColor.setFill()
+            NSRect(x: 0, y: 0, width: bounds.width, height: 2).fill()
+        } else if isCompanion {
+            // The other pane's document: on screen, but not what the bar and
+            // the menus are acting on. Same background so it reads as open,
+            // a dimmed stripe so it does not read as focused — and it is a
+            // *stripe*, not just a tint, so the difference survives the
+            // colour-blind case the selected state is already careful about.
+            NSColor.controlBackgroundColor.setFill()
+            bounds.fill()
+            NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
             NSRect(x: 0, y: 0, width: bounds.width, height: 2).fill()
         } else if isHovered {
             NSColor.controlBackgroundColor.withAlphaComponent(0.4).setFill()

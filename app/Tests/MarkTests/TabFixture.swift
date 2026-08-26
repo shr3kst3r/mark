@@ -118,6 +118,20 @@ final class CountingHydrator: TabHydrator {
         view.tearDown()
     }
 
+    /// Views that arrived from another store, in call order.
+    ///
+    /// The property a pop-out test actually needs: a moved tab must arrive
+    /// *without* going through `makeDocumentView`, because remaking the view
+    /// would throw away the DOM and the scroll position the move exists to
+    /// keep.
+    private(set) var adopted: [URL] = []
+
+    func adopt(_ view: DocumentView, for tab: DocumentTab) {
+        adopted.append(tab.url)
+        container.addSubview(view)
+        view.onScroll = { [weak tab] y in tab?.scrollOffset = y }
+    }
+
     var liveWebViewCount: Int {
         container.subviews.compactMap { $0 as? DocumentView }.count
     }
@@ -138,13 +152,19 @@ final class TabHarness {
     let hydrator: CountingHydrator
     let bar: TabBarView
 
+    /// - Parameter governor: shared with another harness to stand in for two
+    ///   windows sharing one memory budget
+    ///   (`2026-08-26-multiple-windows-and-split-panes`). Left nil, the harness
+    ///   gets a private governor, so a test that changes the limit cannot
+    ///   change the answer for a suite running beside it.
     init(
         files: [String] = [],
         residentLimit: Int = TabStore.defaultResidentLimit,
+        governor: ResidencyGovernor? = nil,
         barWidth: CGFloat = 900
     ) throws {
         fixture = try TabFixture()
-        store = TabStore(residentLimit: residentLimit)
+        store = governor.map { TabStore(governor: $0) } ?? TabStore(residentLimit: residentLimit)
         hydrator = CountingHydrator()
         store.hydrator = hydrator
         bar = TabBarView(store: store)

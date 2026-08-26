@@ -116,6 +116,13 @@ let package = Package(
                 .copy("Resources/shell.html"),
                 .copy("Resources/shell.js"),
                 .copy("Resources/shell.css"),
+                // The markdown reference (Help ▸ Markdown Reference), which is
+                // a *document* rather than a shell asset: it is read by Swift
+                // and rendered by the core, never served over `mark-asset`.
+                // It lives here rather than in `docs/` because a SwiftPM
+                // resource must be under the target root, and one copy that
+                // ships is better than two that can disagree.
+                .copy("Resources/markdown-reference.md"),
             ]
         ),
 

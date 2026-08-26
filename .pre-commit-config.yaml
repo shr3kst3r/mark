@@ -10,7 +10,12 @@ repos:
       - id: trailing-whitespace
         # Markdown fixtures use trailing whitespace meaningfully (hard breaks),
         # and the ADR corpus is immutable once accepted.
-        exclude: ^(docs/adrs/|core/tests/fixtures/)
+        #
+        # The markdown reference is a fixture in every sense that matters here:
+        # its line-break section *demonstrates* the two-space hard break, so
+        # stripping it would delete the thing the section is about and leave the
+        # page teaching something false.
+        exclude: ^(docs/adrs/|core/tests/fixtures/|app/Resources/markdown-reference\.md$)
       - id: end-of-file-fixer
         exclude: ^docs/adrs/
       - id: check-yaml

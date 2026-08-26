@@ -204,6 +204,131 @@ blockquote {
   color: var(--mk-subtle);
 }
 
+/*
+ * GFM alerts — `> [!NOTE]` and its four siblings.
+ *
+ * `ENABLE_GFM` has been on since M1, so pulldown-cmark has always recognised
+ * these and always emitted `<blockquote class="markdown-alert-note">`
+ * (`html.rs`). Nothing here ever drew them. The marker line is **consumed** by
+ * the parser, so an unstyled alert is an ordinary quote with its first line
+ * silently deleted — strictly worse than not having written it, and invisible
+ * to every test we have, because the HTML is well-formed and nobody rendered
+ * it. Writing the markdown reference is what found it.
+ *
+ * The label below is that deleted line, put back in CSS rather than in the
+ * page: ADR-5's "no JavaScript" is about the document, and a `::before` costs
+ * nothing at render time and nothing at appearance-switch time.
+ *
+ * The five colours are semantic tokens every theme already defines, so a user
+ * TOML dropped into `~/.config/mark/themes` gets alerts with no new slot to
+ * fill in — and `--mk-surface` rather than a `color-mix()` tint, so the rule
+ * needs nothing WebKit 17 does not have.
+ */
+.markdown-alert-note,
+.markdown-alert-tip,
+.markdown-alert-important,
+.markdown-alert-warning,
+.markdown-alert-caution {
+  padding: 0.6rem 1rem;
+  background: var(--mk-surface);
+  border-radius: 0 4px 4px 0;
+  color: var(--mk-foreground);
+}
+
+/* `:first-child` still matches the first *element*: `::before` generates a box,
+   not a child node, so the label and this rule do not fight. */
+.markdown-alert-note > :first-child,
+.markdown-alert-tip > :first-child,
+.markdown-alert-important > :first-child,
+.markdown-alert-warning > :first-child,
+.markdown-alert-caution > :first-child {
+  margin-top: 0;
+}
+
+.markdown-alert-note > :last-child,
+.markdown-alert-tip > :last-child,
+.markdown-alert-important > :last-child,
+.markdown-alert-warning > :last-child,
+.markdown-alert-caution > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-alert-note::before,
+.markdown-alert-tip::before,
+.markdown-alert-important::before,
+.markdown-alert-warning::before,
+.markdown-alert-caution::before {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-weight: 600;
+}
+
+/* The border and the label take the same token twice rather than going through
+   an intermediate `--mk-alert`. That would read better and would break
+   `ThemeTests.stylesheetVariablesExist`, whose invariant is that every custom
+   property this file reads is a colour some theme defines — the check that
+   stands between a typo and a page of invisible text. Ten short declarations
+   are a fair price for keeping it exactly true.
+
+   That test scans this file as text, comments included, so do not write a
+   property reference in prose here either. */
+.markdown-alert-note {
+  border-left-color: var(--mk-link);
+}
+.markdown-alert-note::before {
+  content: "Note";
+  color: var(--mk-link);
+}
+
+.markdown-alert-tip {
+  border-left-color: var(--mk-success);
+}
+.markdown-alert-tip::before {
+  content: "Tip";
+  color: var(--mk-success);
+}
+
+.markdown-alert-important {
+  border-left-color: var(--mk-accent);
+}
+.markdown-alert-important::before {
+  content: "Important";
+  color: var(--mk-accent);
+}
+
+.markdown-alert-warning {
+  border-left-color: var(--mk-warning);
+}
+.markdown-alert-warning::before {
+  content: "Warning";
+  color: var(--mk-warning);
+}
+
+.markdown-alert-caution {
+  border-left-color: var(--mk-error);
+}
+.markdown-alert-caution::before {
+  content: "Caution";
+  color: var(--mk-error);
+}
+
+/*
+ * Footnote definitions. pulldown-cmark emits the label as a `<sup>` followed
+ * by the definition's `<p>`, and `<p>` is a block — so with no rule the number
+ * sits on a line of its own above its own text. Floating it puts it back
+ * beside the first line and still works when a definition runs to more than
+ * one paragraph, which a flex or grid row does not.
+ */
+.footnote-definition-label {
+  float: left;
+  margin-right: 0.5rem;
+  color: var(--mk-subtle);
+}
+
+.footnote-definition > :last-child {
+  margin-bottom: 0;
+}
+
 table {
   border-collapse: collapse;
   display: block;

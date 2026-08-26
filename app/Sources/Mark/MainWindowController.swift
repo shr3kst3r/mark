@@ -60,8 +60,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The areas side by side, with the divider between them.
     public let groupSplit: GroupSplitView
 
+    /// ⌘F, for the document in the focused group.
+    ///
+    /// The query, the generation counter and the four `NSTextFinder` actions
+    /// live in ``DocumentFinder`` since
+    /// `2026-08-26-markdown-reference-window` gave the markdown reference its
+    /// own window: two surfaces now show a document, and one copy of a race
+    /// that only appears under load is enough.
+    public let finder: DocumentFinder
+
     /// ⌘F's bar, along the bottom of the preview. Hidden until asked for.
-    public let findBar: FindBar
+    public var findBar: FindBar { finder.bar }
 
     /// The stacked web views with the find bar under them — the preview column
     /// of ``editorSplit``.
@@ -147,12 +156,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         editor.isHidden = true
         conflicts = ConflictController()
 
-        findBar = FindBar(
-            frame: NSRect(x: 0, y: 0, width: 900, height: FindBar.barHeight))
-        findBar.isHidden = true
+        finder = DocumentFinder(width: 900)
         previewPane = PreviewPaneView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 700),
-            findBar: findBar,
+            findBar: finder.bar,
             container: groupSplit
         )
 
@@ -263,12 +270,24 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         toc.onSelect = { [weak self] heading in
             self?.scrollToHeading(heading)
         }
-        findBar.onQueryChanged = { [weak self] query in
-            self?.search(query)
+        // The focused group's document, asked for freshly every time: which
+        // one that is changes with the selection, with the focus moving between
+        // panes, and with ADR-4 tearing a web view down underneath it.
+        finder.documentView = { [weak self] in self?.documentView }
+        finder.hasDocument = { [weak self] in self?.tabs.selected != nil }
+        finder.onVisibilityChanged = { [weak self] visible in
+            guard let self else { return }
+            // The bar is a child of the preview pane, and the pane gives it its
+            // frame — so the pane is what has to lay out, synchronously, before
+            // anything reads the bar's geometry or puts the caret in it.
+            self.previewPane.needsLayout = true
+            self.previewPane.layoutSubtreeIfNeeded()
+            // Closing hands the keyboard back to the document rather than
+            // leaving it on a field that is no longer on screen.
+            if !visible, let webView = self.documentView?.webView {
+                self.window?.makeFirstResponder(webView)
+            }
         }
-        findBar.onNext = { [weak self] in self?.findNext() }
-        findBar.onPrevious = { [weak self] in self?.findPrevious() }
-        findBar.onClose = { [weak self] in self?.setFindBarVisible(false) }
         tabBar.reload()
         updateChrome()
     }
@@ -802,118 +821,41 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Finding in the document
 
-    /// The string the preview is currently showing matches for.
-    private var findQuery = ""
-
-    /// Bumped on every search, so a slow answer for a query the reader has
-    /// already typed past cannot overwrite a newer one.
-    private var findGeneration = 0
-
-    public var isFindBarVisible: Bool { !findBar.isHidden }
+    /// Everything below forwards to ``finder``.
+    ///
+    /// Kept as this window's own surface rather than pushed onto callers,
+    /// because `FindTests` is written against exactly these names and is the
+    /// check that lifting the implementation out changed no behaviour.
+    public var isFindBarVisible: Bool { finder.isVisible }
 
     /// Show or hide ⌘F's bar.
-    ///
-    /// Hiding it drops the highlights as well as the bar. Leaving twelve
-    /// yellow words behind after the bar has gone would look like the document
-    /// had been marked up rather than searched.
     public func setFindBarVisible(_ visible: Bool) {
-        guard visible != isFindBarVisible else { return }
-        findBar.isHidden = !visible
-        previewPane.needsLayout = true
-        findBar.needsLayout = true
-        findBar.needsDisplay = true
-        guard !visible else { return }
-        findQuery = ""
-        findGeneration += 1
-        findBar.query = ""
-        findBar.report(nil)
-        if let view = documentView {
-            _Concurrency.Task { @MainActor in await view.clearFind() }
-            window?.makeFirstResponder(view.webView)
-        }
+        finder.setVisible(visible)
     }
 
     /// ⌘F.
     public func showFindBar() {
-        setFindBarVisible(true)
-        previewPane.layoutSubtreeIfNeeded()
-        findBar.focus()
+        finder.show()
     }
 
     /// ⌘G, ↩, and the bar's down arrow.
     public func findNext() {
-        advance(forward: true)
+        finder.next()
     }
 
     /// ⇧⌘G, ⇧↩, and the bar's up arrow.
     public func findPrevious() {
-        advance(forward: false)
-    }
-
-    /// Move to the next or previous match, wrapping at both ends.
-    ///
-    /// A step through ranges the page has already built, not another search —
-    /// which is what makes holding ⌘G down feel like cycling rather than like
-    /// re-running a query twelve times.
-    private func advance(forward: Bool) {
-        guard isFindBarVisible, !findQuery.isEmpty else {
-            // ⌘G with nothing to repeat is a request for the bar, not a beep.
-            showFindBar()
-            return
-        }
-        guard let view = documentView else { return }
-        findGeneration += 1
-        let generation = findGeneration
-        _Concurrency.Task { @MainActor [weak self] in
-            let result = await view.stepFind(forward: forward)
-            guard let self, generation == self.findGeneration else { return }
-            self.findBar.report(result)
-        }
+        finder.previous()
     }
 
     /// ⌘E — take the query from what the reader has selected in the preview.
     public func useSelectionForFind() {
-        guard let view = documentView else { return }
-        _Concurrency.Task { @MainActor [weak self] in
-            let selection = await view.selectedText()
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let self, !selection.isEmpty else { return }
-            self.setFindBarVisible(true)
-            self.findBar.query = selection
-            self.search(selection)
-        }
-    }
-
-    /// Search the preview, highlight every match, and report the position.
-    private func search(_ query: String) {
-        findQuery = query
-        findGeneration += 1
-        let generation = findGeneration
-        guard let view = documentView else {
-            findBar.report(query.isEmpty ? nil : FindResult.empty)
-            return
-        }
-        guard !query.isEmpty else {
-            findBar.report(nil)
-            _Concurrency.Task { @MainActor in await view.clearFind() }
-            return
-        }
-        _Concurrency.Task { @MainActor [weak self] in
-            let result = await view.find(query)
-            guard let self, generation == self.findGeneration else { return }
-            self.findBar.report(result)
-        }
+        finder.useSelection()
     }
 
     /// Run the current search again, because the document underneath it moved.
-    ///
-    /// Every range the page holds points into a block element, and a patch
-    /// replaces block elements — so an edit, an external change, or a tab
-    /// switch leaves the highlights stale. `shell.js` drops them on every
-    /// document mutation; this is what puts them back.
     private func refreshFind() {
-        guard isFindBarVisible, !findQuery.isEmpty else { return }
-        search(findQuery)
+        finder.refresh()
     }
 
     /// Whether the caret is in the editor pane's text view.
@@ -1609,6 +1551,13 @@ extension MainWindowController: CommandTarget {
         // most visible thing a theme change could get wrong now that one can be
         // chosen from a menu with the editor open.
         editor.themeChanged()
+        // The markdown reference is not a tab, so the loop above cannot reach
+        // it (`2026-08-26-markdown-reference-window`). A reference page left on
+        // the old palette while every document changed is a rendering bug with
+        // a very unhelpful shape — it looks like the theme half-applied.
+        if let help = HelpWindowController.shared {
+            await help.applyTheme(resolved, previous: previous)
+        }
         saveSessionSoon()
         return ThemeSummaryForCLI(
             name: resolved.name,
@@ -1960,15 +1909,9 @@ extension MainWindowController: NSMenuItemValidation {
             editor.textView.performFindPanelAction(sender)
             return
         }
-        switch action {
-        case .showFindInterface: showFindBar()
-        case .hideFindInterface: setFindBarVisible(false)
-        case .nextMatch: findNext()
-        case .previousMatch: findPrevious()
-        case .setSearchString: useSelectionForFind()
-        default:
-            // Replace and its relatives belong to the editor. The preview is
-            // rendered output; there is nothing there to write through to.
+        // Replace and its relatives belong to the editor, and the editor does
+        // not have the focus — so there is nothing here to write through to.
+        if !finder.perform(action) {
             NSSound.beep()
         }
     }
@@ -2112,16 +2055,7 @@ extension MainWindowController: NSMenuItemValidation {
             // including Replace; the preview's can do the four that make sense
             // for something you cannot type into.
             if editorHasFocus { return true }
-            switch NSTextFinder.Action(rawValue: item.tag) ?? .showFindInterface {
-            case .showFindInterface, .setSearchString:
-                return tabs.selected != nil
-            case .nextMatch, .previousMatch:
-                return tabs.selected != nil && !findQuery.isEmpty
-            case .hideFindInterface:
-                return isFindBarVisible
-            default:
-                return false
-            }
+            return finder.validate(NSTextFinder.Action(rawValue: item.tag) ?? .showFindInterface)
         case #selector(navigateToParent(_:)):
             return sidebar.navigator.canGoUp
         case #selector(navigateBack(_:)):

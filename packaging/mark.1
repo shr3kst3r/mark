@@ -126,6 +126,12 @@ tap, the version alone does not identify a build: every install between two
 version bumps reports the same one. Two different builds on those two lines is a
 CLI and an app from separate installs, which behaves like one product that is
 subtly wrong.
+.IP
+With an app running it also prints the window and tab counts, the resident web
+views, and the memory formula evaluated over them. The count is web
+.IR views ,
+not tabs: the markdown reference's window holds one and owns no tab, and the
+line names it when it is open.
 .SS Remote
 .TP
 .BI "open " path " [--tab] [--json]"
@@ -280,11 +286,13 @@ Where the app reads and writes its session, instead of
 Set to 1 and the app neither restores nor saves a session.
 .TP
 .B MARK_RESIDENT_TABS
-How many tabs keep a live web view, across every window. Default 3; each one
-costs about 52 MB, so the app's footprint is roughly 100 MB plus 52 MB per
-resident tab. Opening a window does not raise the budget. A tab that is on
-screen \(em either group of a split, in any window \(em or has unsaved changes is
-never dehydrated, so the working set can exceed this; see
+How many live web views the app keeps, across every window. Default 3; each one
+costs about 52 MB, so the footprint is roughly 100 MB plus 52 MB per resident
+view. Opening a window does not raise the budget, and neither does the markdown
+reference \(em its window holds one of these views and spends from the same
+limit. A tab that is on screen \(em either group of a split, in any window \(em
+or has unsaved changes is never dehydrated, so the working set can exceed this;
+see
 .B doctor
 for what it actually is.
 .TP
@@ -304,6 +312,13 @@ the editor pane was open. Written atomically.
 .TP
 .I ~/.config/mark/themes/*.toml
 User themes, picked up without a rebuild.
+.TP
+.I mark.app/Contents/Resources/markdown-reference.md
+Every markdown construct the renderer supports, with the source next to the
+result. The app shows it under Help, Markdown Reference; it is an ordinary
+markdown file, so
+.B mark render
+prints it in a terminal too.
 .TP
 .I mark.app/Contents/MacOS/mark-cli
 This program.

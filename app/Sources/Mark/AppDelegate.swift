@@ -15,7 +15,7 @@ import Foundation
 /// write it at quit. Neither goes through `NSWindowRestoration`, and nothing
 /// here writes `NSQuitAlwaysKeepsWindows`.
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Every window, and the session file they share
     /// (`2026-08-26-multiple-windows-and-split-panes`).
@@ -340,6 +340,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = buildMainMenu()
         NSApp.mainMenu = mainMenu
         NSApp.windowsMenu = WindowMenu.shared
+        // Naming the Help menu is what gives it macOS's own search field, which
+        // searches this menu bar — so every shortcut built above becomes
+        // findable by typing what it is called.
+        //
+        // By title rather than by position. It *is* last, and `MenuBarTests`
+        // keeps it there because that is where macOS puts Help — but a lookup
+        // that depended on the position would hand AppKit the wrong menu the
+        // first time somebody appended one, and the symptom would be a search
+        // field quietly searching nothing.
+        NSApp.helpMenu = mainMenu.items.first { $0.submenu?.title == "Help" }?.submenu
         WindowMenu.shared?.update(with: controller.tabs)
     }
 
@@ -633,7 +643,50 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(windowItem)
         WindowMenu.shared = windowMenu
 
+        // `2026-08-26-markdown-reference-window`. **Last**, because
+        // ``installMainMenu(for:)`` hands `mainMenu.items.last` to
+        // `NSApp.helpMenu`, and because that is where macOS puts Help.
+        //
+        // `?` with `[.command]` is ⇧⌘/ — the platform's Help slot, and
+        // unclaimed by anything above. `MenuBarTests` fails the build if that
+        // ever stops being true.
+        let helpItem = NSMenuItem()
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(
+            withTitle: "Markdown Reference",
+            action: #selector(showMarkdownReference(_:)), keyEquivalent: "?"
+        ).target = self
+        helpItem.submenu = helpMenu
+        mainMenu.addItem(helpItem)
+
         return mainMenu
+    }
+
+    /// **Help ▸ Markdown Reference.**
+    ///
+    /// A window rather than a tab, and rendered by the core rather than
+    /// written as a page — see `2026-08-26-markdown-reference-window` for both.
+    @objc func showMarkdownReference(_ sender: Any?) {
+        guard HelpWindowController.show() != nil else {
+            // Validation should have prevented this; if the resource has gone
+            // missing anyway, say so instead of doing nothing visible.
+            Log.app.error("the markdown reference is not in this bundle")
+            NSSound.beep()
+            return
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// Grey the item out on a bundle assembled without the reference.
+    ///
+    /// `NSMenuItemValidation` explicitly, rather than relying on the selector
+    /// being found: this class's methods are not implicitly `@objc`, and a
+    /// validation method AppKit cannot see is one that silently never runs.
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(showMarkdownReference(_:)) {
+            return MarkdownReference.isAvailable
+        }
+        return true
     }
 
     @objc private func openDocument(_ sender: Any?) {

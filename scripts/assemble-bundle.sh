@@ -14,8 +14,9 @@
 #       Info.plist
 #       MacOS/mark          <- swift build -c release
 #       MacOS/mark-cli      <- cargo build --release
-#       Resources/          <- shell.html, shell.js, shell.css (+ the SwiftPM
-#                              resource bundle, found via Bundle.main.resourceURL)
+#       Resources/          <- shell.html, shell.js, shell.css,
+#                              markdown-reference.md (+ the SwiftPM resource
+#                              bundle, found via Bundle.main.resourceURL)
 #       Resources/man/man1/mark.1        <- M10, installed by Formula/mark.rb
 #       Resources/completions/           <- M10, zsh/bash/fish
 #
@@ -165,9 +166,17 @@ cp "${cli_bin}" "${bundle}/Contents/MacOS/mark-cli"
 
 # The shell assets, flat in Resources. `ShellAssets.data(named:)` looks in
 # Bundle.main first, so this is the path the shipped app takes.
+#
+# `markdown-reference.md` rides along with them and is not one of them: it is
+# the document behind Help ▸ Markdown Reference, read by Swift and rendered by
+# the core, and deliberately *not* on `ShellAssets.served` — the scheme handler
+# must not become a file server. Shipping it here is also what makes
+# `mark render "$(mdfind …)/Contents/Resources/markdown-reference.md"` work
+# without the app.
 cp "${root}/app/Resources/shell.html" \
    "${root}/app/Resources/shell.js" \
    "${root}/app/Resources/shell.css" \
+   "${root}/app/Resources/markdown-reference.md" \
    "${bundle}/Contents/Resources/"
 
 # The two icons, named by `CFBundleIconFile` and by the markdown document type's

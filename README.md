@@ -164,8 +164,10 @@ multiply what mark costs.
 
 > **What tabs cost, since the number here was wrong once.** Every `WKWebView`
 > gets its own WebContent process at ~52 MB, so the budget is a formula rather
-> than a constant: **~100 MB baseline + ~52 MB × resident tabs**, which is
-> ~264 MB at the default of 3 resident. `MARK_RESIDENT_TABS` changes the limit.
+> than a constant: **~100 MB baseline + ~52 MB × resident web views**, which is
+> ~264 MB at the default of 3 resident. The reference window holds one of those
+> web views and spends from the same limit, so opening it dehydrates a
+> background tab rather than adding to the ceiling. `MARK_RESIDENT_TABS` changes the limit.
 > An earlier design claimed ~1.2 MB per tab and a 110 MB ceiling for 24 of them;
 > that came from a benchmark that summed RSS by walking the app's process
 > subtree, and WebKit's content processes are children of launchd, so it counted
@@ -199,6 +201,19 @@ scrollbars — goes light. **Match System Appearance**, at the top of the same
 menu, hands the choice back to macOS, and then the half in force is ticked and
 its partner is dashed. Your own themes go in `~/.config/mark/themes/*.toml` and
 are picked up without a rebuild. `mark theme --list` names them all.
+
+**A markdown reference, rendered by the renderer it documents.** ⇧⌘/ — or
+**Help ▸ Markdown Reference** — opens every construct mark supports, with the
+source next to the result: headings and their anchors, task lists, tables,
+footnotes, GFM alerts, math, a real Mermaid diagram, frontmatter, and a section
+naming the things that look like markdown and are deliberately not supported
+(wikilinks, `:emoji:`, `{#custom-id}`, smart punctuation). It is a markdown
+*document*, shipped in the bundle and drawn by `mark_render_html` in whichever
+theme you have chosen — so it cannot drift from the code, and a construct that
+broke would break visibly on the page claiming it works. It opens in a window
+of its own with its own ⌘F, and never joins your tabs or your session. Outside
+the app it is an ordinary file:
+`mark render "$(mdfind -name mark.app | head -1)/Contents/Resources/markdown-reference.md"`.
 
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and

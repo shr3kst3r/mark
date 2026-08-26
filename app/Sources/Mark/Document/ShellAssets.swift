@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 
 /// `shell.html`, `shell.js`, `shell.css` — where they live and how they reach
-/// the web view.
+/// the web view — plus the bundle lookup everything else in `Resources` uses.
 ///
 /// They are served over a custom URL scheme through a ``ShellSchemeHandler``,
 /// **not** via `loadHTMLString` with a `file:` base URL. That alternative looks
@@ -63,7 +63,26 @@ public enum ShellAssets {
         if let bundle = moduleBundle, let data = data(named: name, in: bundle) {
             return data
         }
-        Log.shell.error("shell asset \(name, privacy: .public) not found in any bundle")
+        Log.shell.error("bundle resource \(name, privacy: .public) not found in any bundle")
+        return nil
+    }
+
+    /// The same search, answering with the file's location instead of its
+    /// bytes.
+    ///
+    /// The markdown reference needs both: the bytes to render, and a real URL
+    /// so that `#anchor` links inside it resolve and the window has something
+    /// to put in `representedURL`. Searching twice rather than returning a
+    /// pair, because the two callers want different things and the search is
+    /// two `Bundle.url(forResource:)` calls.
+    public static func url(named name: String) -> URL? {
+        if let url = Bundle.main.url(forResource: name, withExtension: nil) {
+            return url
+        }
+        if let bundle = moduleBundle, let url = bundle.url(forResource: name, withExtension: nil) {
+            return url
+        }
+        Log.shell.error("bundle resource \(name, privacy: .public) not found in any bundle")
         return nil
     }
 

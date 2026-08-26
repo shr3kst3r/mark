@@ -1812,8 +1812,19 @@ struct Doctor {
     windows: Option<u64>,
     tabs: Option<u64>,
     resident_tabs: Option<u64>,
-    /// `~100 MB baseline + ~52 MB x resident tabs`, in megabytes. The ADR's
-    /// formula, evaluated rather than left for the reader.
+    /// Resident `WKWebView`s that are **not** tabs — today, the markdown
+    /// reference's window (`2026-08-26-markdown-reference-window`).
+    ///
+    /// `tab-list` cannot see one by construction, so without asking the app
+    /// directly this report would be short by ~52 MB whenever the reference is
+    /// open. `None` from an older app that does not send the field, which is
+    /// treated as zero below.
+    auxiliary_web_views: Option<u64>,
+    /// `~100 MB baseline + ~52 MB x resident web views`, in megabytes. The
+    /// ADR's formula, evaluated rather than left for the reader.
+    ///
+    /// Counted over web views rather than over *tabs*: the budget is the
+    /// application's, and the reference window's view spends from it.
     estimated_footprint_mb: Option<u64>,
     /// `com.apple.WebKit.WebContent` processes **on the machine**, not ours.
     ///
@@ -1872,6 +1883,13 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
     };
+    // Absent on an app older than `2026-08-26-markdown-reference-window`, which
+    // is the same answer as zero: that build had nothing to count.
+    let auxiliary = pong
+        .as_ref()
+        .and_then(|value| value.get("auxiliaryWebViews"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
 
     // A second round trip, and only when an app is answering. `tab-list` is
     // reused rather than given a sibling command: it already reports every tab
@@ -1931,7 +1949,10 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         windows: residency.as_ref().map(|r| r.windows),
         tabs: residency.as_ref().map(|r| r.tabs),
         resident_tabs: residency.as_ref().map(|r| r.resident),
-        estimated_footprint_mb: residency.as_ref().map(|r| 100 + 52 * r.resident),
+        auxiliary_web_views: residency.as_ref().map(|_| auxiliary),
+        estimated_footprint_mb: residency
+            .as_ref()
+            .map(|r| 100 + 52 * (r.resident + auxiliary)),
         webcontent_processes: if running {
             webcontent_process_count()
         } else {
@@ -1991,9 +2012,23 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
             "windows             {windows} ({tabs} tab{}, {resident} resident)",
             if tabs == 1 { "" } else { "s" }
         )?;
+        // Web views, not tabs: the reference window holds one and owns no tab,
+        // and a formula that counted only tabs would be short by ~52 MB
+        // without saying so (`2026-08-26-markdown-reference-window`).
+        let auxiliary = doctor.auxiliary_web_views.unwrap_or(0);
+        let views = resident + auxiliary;
+        let breakdown = if auxiliary == 0 {
+            String::new()
+        } else {
+            format!(
+                ": {resident} tab{} + {auxiliary} reference window",
+                if resident == 1 { "" } else { "s" }
+            )
+        };
         emitln!(
             out,
-            "memory budget       ~{footprint} MB  (~100 MB + ~52 MB x {resident} resident)"
+            "memory budget       ~{footprint} MB  (~100 MB + ~52 MB x {views} web view{}{breakdown})",
+            if views == 1 { "" } else { "s" }
         )?;
         if let Some(processes) = doctor.webcontent_processes {
             // "system-wide" is not hedging. Every one of these is a child of

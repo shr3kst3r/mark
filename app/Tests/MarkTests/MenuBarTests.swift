@@ -99,4 +99,29 @@ struct MenuBarTests {
             #expect(titles.contains(expected), "\(expected) is not in the menu bar")
         }
     }
+
+    /// **Help ▸ Markdown Reference** on ⇧⌘/
+    /// (`2026-08-26-markdown-reference-window`).
+    ///
+    /// Last, because that is where macOS puts Help and where a reader looks
+    /// for it. `installMainMenu(for:)` finds it by title rather than by
+    /// position, so a menu appended after it would fail here and not in the
+    /// Help search field.
+    @Test("Help ▸ Markdown Reference is last, on ⇧⌘/")
+    func helpMenuIsPresentAndLast() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+
+        let last = try #require(menu.items.last?.submenu)
+        #expect(last.title == "Help", "Help belongs at the end of the menu bar")
+
+        let item = try #require(last.items.first { $0.title == "Markdown Reference" })
+        #expect(item.keyEquivalent == "?")
+        #expect(item.keyEquivalentModifierMask == [.command])
+        #expect(item.action == #selector(AppDelegate.showMarkdownReference(_:)))
+        #expect(item.target === delegate)
+        // Enabled, because this build ships the resource. The validation exists
+        // for a bundle assembled without it.
+        #expect(delegate.validateMenuItem(item))
+    }
 }

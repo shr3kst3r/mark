@@ -821,6 +821,42 @@ else
     pass "the plain-text document type has no icon of its own"
 fi
 
+gate "16. the bundle carries the markdown reference, and it still renders"
+# Help ▸ Markdown Reference (`2026-08-26-markdown-reference-window`) is a
+# *document* in `Contents/Resources`, so the way it breaks is a dropped `cp` in
+# `assemble-bundle.sh` — after which the menu item greys out and nothing else
+# in the suite notices. Rendering it through the installed CLI checks both
+# halves at once: that the file shipped, and that the thing it claims to
+# demonstrate still comes out the other end.
+reference="${bundle}/Contents/Resources/markdown-reference.md"
+if [[ -s "${reference}" ]]; then
+    pass "Resources/markdown-reference.md ($(du -h "${reference}" | cut -f1))"
+else
+    fail "Resources/markdown-reference.md is missing or empty"
+fi
+
+if [[ -s "${reference}" ]]; then
+    reference_html="$("${cli}" render "${reference}" --html 2>/dev/null || true)"
+    # One assertion per construct the page promises, because "it rendered" is
+    # true of a page with every diagram silently missing.
+    for probe in \
+        'class="mk-task"|a clickable task list' \
+        '<math|MathML' \
+        'class="mk-diagram"|a Mermaid diagram' \
+        'class="markdown-alert-warning"|a GFM alert' \
+        'footnote-definition|a footnote' \
+        'data-lang="rust"|a highlighted code block'
+    do
+        needle="${probe%%|*}"
+        what="${probe##*|}"
+        if grep -qF "${needle}" <<<"${reference_html}"; then
+            pass "the reference still demonstrates ${what}"
+        else
+            fail "the reference no longer demonstrates ${what}"
+        fi
+    done
+fi
+
 # ------------------------------------------------------------------ done ----
 gate "summary"
 printf '  %d passed, %d failed\n' "${passed}" "${failed}"

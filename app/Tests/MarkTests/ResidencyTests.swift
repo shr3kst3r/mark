@@ -164,6 +164,49 @@ struct ResidencyTests {
         #expect(governor.residentCount == 1)
     }
 
+    /// A web view that no tab owns still costs ~52 MB, and the budget is the
+    /// application's — so it has to be in the arithmetic
+    /// (`2026-08-26-markdown-reference-window`).
+    ///
+    /// Counting it *only* in the report would be the easy half. This asserts
+    /// the hard half too: it spends from the same limit, so opening the
+    /// markdown reference displaces a background tab instead of raising the
+    /// ceiling by one.
+    @Test("a web view that is not a tab is in the budget, and spends from it")
+    func auxiliaryWebViewsCount() throws {
+        let governor = ResidencyGovernor(limit: 3)
+        let harness = try TabHarness(governor: governor)
+        let store = harness.store
+
+        store.open(harness.file(named: "a.md"))
+        store.open(harness.file(named: "b.md"))
+        store.open(harness.file(named: "c.md"))
+        #expect(governor.residentCount == 3)
+        #expect(governor.estimatedFootprintMB == 100 + 52 * 3)
+
+        // The reference window opening. Not a tab, so nothing in `allTabs`
+        // changes — and the ceiling must still hold.
+        governor.registerAuxiliaryWebView()
+        #expect(governor.auxiliaryWebViews == 1)
+        #expect(governor.residentWebViewCount <= 3, "the reference raised the ceiling")
+        #expect(governor.residentCount == 2, "no tab was displaced to make room")
+        #expect(governor.estimatedFootprintMB == 100 + 52 * 3)
+
+        governor.unregisterAuxiliaryWebView()
+        #expect(governor.auxiliaryWebViews == 0)
+        #expect(governor.estimatedFootprintMB == 100 + 52 * governor.residentCount)
+    }
+
+    /// An unbalanced release must not make the app report a negative budget —
+    /// a number `mark doctor` prints and somebody reads.
+    @Test("releasing a web view that was never registered is not a negative budget")
+    func auxiliaryCountIsClamped() {
+        let governor = ResidencyGovernor(limit: 3)
+        governor.unregisterAuxiliaryWebView()
+        #expect(governor.auxiliaryWebViews == 0)
+        #expect(governor.estimatedFootprintMB == 100)
+    }
+
     @Test("MARK_RESIDENT_TABS still refuses nonsense rather than clamping oddly")
     func configuredLimitIsSane() {
         // The parse moved from `TabStore` to `ResidencyGovernor`; the aliases

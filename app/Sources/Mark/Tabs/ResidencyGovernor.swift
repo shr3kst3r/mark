@@ -61,6 +61,20 @@ public final class ResidencyGovernor {
     /// Monotonic MRU clock, application-wide.
     private var clock: UInt64 = 0
 
+    /// Resident `WKWebView`s that no ``TabStore`` owns.
+    ///
+    /// Today that is one thing: the markdown reference's window
+    /// (`2026-08-26-markdown-reference-window`). It is a count rather than a
+    /// list because nothing here can act on such a view — it has no tab to
+    /// dehydrate and no reader-visible state to preserve, so the only correct
+    /// response to being over budget is to evict a *tab* instead.
+    ///
+    /// It is counted at all because the alternative is a lie. The budget is the
+    /// application's, `mark doctor` prints it, and a web view left out of the
+    /// arithmetic is 52 MB the report cannot see — which is the exact failure
+    /// `2026-08-24-tab-residency-and-memory-model` was superseded for.
+    public private(set) var auxiliaryWebViews = 0
+
     public init(limit: Int = ResidencyGovernor.configuredLimit) {
         self.limit = max(1, limit)
     }
@@ -106,12 +120,29 @@ public final class ResidencyGovernor {
         allTabs.count { $0.state.isResident }
     }
 
+    /// Every resident web view in the application — tabs plus
+    /// ``auxiliaryWebViews``. This, not ``residentCount``, is what the budget
+    /// is about.
+    public var residentWebViewCount: Int { residentCount + auxiliaryWebViews }
+
     /// The ADR's formula, in megabytes: `~100 MB baseline + ~52 MB × resident`.
     ///
     /// Reported by `mark doctor` rather than inferred by a reader, which is the
     /// bullet `2026-08-24-tab-residency-and-memory-model` asked for and never
     /// got.
-    public var estimatedFootprintMB: Int { 100 + 52 * residentCount }
+    public var estimatedFootprintMB: Int { 100 + 52 * residentWebViewCount }
+
+    /// A web view that is not a tab's came into existence.
+    public func registerAuxiliaryWebView() {
+        auxiliaryWebViews += 1
+        enforce()
+    }
+
+    /// …and went away again. Clamped at zero rather than trusted: an
+    /// unbalanced release should not make the app report a negative budget.
+    public func unregisterAuxiliaryWebView() {
+        auxiliaryWebViews = max(0, auxiliaryWebViews - 1)
+    }
 
     // MARK: - Eviction
 
@@ -133,7 +164,10 @@ public final class ResidencyGovernor {
     public func enforce() {
         compact()
         let tabs = allTabs
-        var over = tabs.count { $0.state.isResident } - limit
+        // Counted over every resident web view, not every resident *tab*:
+        // opening the markdown reference displaces the least recently used
+        // background tab rather than adding 52 MB above the ceiling.
+        var over = tabs.count { $0.state.isResident } + auxiliaryWebViews - limit
         guard over > 0 else { return }
 
         // One ranking across every window: the least recently used tab in the
@@ -159,16 +193,19 @@ public final class ResidencyGovernor {
     /// the log wants to know why the app is using 420 MB, and "3 displayed,
     /// 2 dirty" answers that in a way two separate lines do not.
     private func reportExemptions() {
-        let resident = residentCount
+        let resident = residentWebViewCount
         guard resident > limit else { return }
         let pinned = allTabs.filter { $0.state.isResident && ($0.isDisplayed || $0.isDirty) }
         let displayed = pinned.count(where: \.isDisplayed)
         let dirty = pinned.count { $0.isDirty && !$0.isDisplayed }
+        let auxiliary = auxiliaryWebViews
         Log.tabs.info(
             """
             resident set is \(resident) with a limit of \(self.limit): \
-            \(displayed) displayed and \(dirty) dirty tab(s) are exempt from eviction \
-            (~\(52 * pinned.count) MB) — a document on screen and unsaved work are never dehydrated
+            \(displayed) displayed and \(dirty) dirty tab(s) are exempt from eviction, \
+            \(auxiliary) web view(s) are not tabs \
+            (~\(52 * (pinned.count + auxiliary)) MB) — a document on screen, unsaved work, \
+            and the markdown reference are never dehydrated
             """
         )
     }

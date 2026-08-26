@@ -888,6 +888,16 @@ public final class CommandRouter {
                 "build": .string(BuildInfo.summary),
                 "socket": .string(socketPathForReport),
                 "tabs": .int(target.documentTabs().count),
+                // Resident web views that no tab owns — today, the markdown
+                // reference's window (`2026-08-26-markdown-reference-window`).
+                // `mark doctor` derives the memory formula from `tab-list`,
+                // which by construction cannot see one, so without this the
+                // report is short by ~52 MB whenever the reference is open.
+                //
+                // Read from the shared governor rather than from `target`: the
+                // budget is the application's, not the key window's, and there
+                // is one of it.
+                "auxiliaryWebViews": .int(ResidencyGovernor.shared.auxiliaryWebViews),
                 "commands": .int(commandCount),
             ]
 

@@ -20,9 +20,29 @@ public final class WindowCoordinator {
     /// ADR-4's own JSON file, now describing all of them.
     private let session: Session
 
+    /// The application's opened-file history
+    /// (`2026-08-26-opened-file-history`).
+    ///
+    /// **Owned here rather than in an `OpenHistory.shared`**, and the default
+    /// is a fresh instance rather than a shared one. This is the type that owns
+    /// the session file, so it is the type that owns the state the session file
+    /// records; and a shared default would mean a coordinator built in a test —
+    /// which, with the default `Session()`, writes the developer's own
+    /// `session.json` — recording fixture paths into the developer's real
+    /// history. ``OpenHistory`` says more about that.
+    ///
+    /// There is one coordinator in a running app, so one history. Windows
+    /// record *into* it; nothing else writes it.
+    public let history: OpenHistory
+
     /// Injectable so tests can build windows without one.
-    public init(session: Session = Session()) {
+    public init(session: Session = Session(), history: OpenHistory = OpenHistory()) {
         self.session = session
+        self.history = history
+        // A recorded open is a session change like any other, and it goes
+        // through the same debounce — one write for the burst that opening a
+        // document produces, rather than one per notification.
+        history.onChange = { [weak self] _ in self?.saveSoon() }
     }
 
     public var count: Int { controllers.count }
@@ -66,7 +86,7 @@ public final class WindowCoordinator {
 
     @discardableResult
     public func makeWindow(root: URL, collapsedSidebar: Bool = false) -> MainWindowController {
-        let controller = MainWindowController(root: root, session: session)
+        let controller = MainWindowController(root: root, session: session, history: history)
         controller.windows = self
         controllers.append(controller)
         if collapsedSidebar {
@@ -92,6 +112,10 @@ public final class WindowCoordinator {
     public func adopt(_ controller: MainWindowController) {
         guard !controllers.contains(where: { $0 === controller }) else { return }
         controller.windows = self
+        // A window built elsewhere — `mark-bench` and the tests build their own
+        // — records into this coordinator's history once adopted, so an adopted
+        // window is not quietly the one window whose opens go unrecorded.
+        controller.history = history
         controllers.append(controller)
     }
 
@@ -176,6 +200,10 @@ public final class WindowCoordinator {
         // system. Both fields sit on `SessionState` rather than
         // `SessionWindow` for that reason.
         state.themeAppearance = ThemeController.shared.appearance.rawValue
+        // App-wide for the same reason, and written even when empty so that
+        // clearing the history is a change the file records rather than one an
+        // absent key leaves ambiguous.
+        state.history = history.sessionEntries
         return state
     }
 
@@ -199,6 +227,10 @@ public final class WindowCoordinator {
         ThemeController.shared.restore(
             named: state.theme,
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
+        // Before the windows, so that a file named on the command line — which
+        // opens as those windows come up — is recorded on *top* of the restored
+        // history rather than underneath it.
+        history.restore(session: state.history ?? [])
         let windows = state.effectiveWindows
         guard !windows.isEmpty else { return }
         for (index, window) in windows.enumerated() {

@@ -293,6 +293,36 @@ public struct SessionWindow: Codable, Equatable, Sendable {
     }
 }
 
+/// One file in the opened-file history, as the session file records it.
+///
+/// `2026-08-26-opened-file-history`. A path and an epoch timestamp — the same
+/// `String` path ``SessionTab`` uses, for the same stated reason, and a `Double`
+/// rather than a `Date` because this file has no date-encoding strategy and
+/// should not grow one for a scalar that `JSONEncoder` would otherwise spell
+/// differently than every other number here.
+///
+/// Decoded by hand with defaults, like everything else in this file.
+public struct SessionHistoryEntry: Codable, Equatable, Sendable {
+    public var path: String
+    /// Seconds since 1970.
+    public var lastOpened: Double
+
+    public init(path: String, lastOpened: Double) {
+        self.path = path
+        self.lastOpened = lastOpened
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, lastOpened
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        lastOpened = try container.decodeIfPresent(Double.self, forKey: .lastOpened) ?? 0
+    }
+}
+
 /// What `mark` remembers between launches.
 public struct SessionState: Codable, Equatable, Sendable {
 
@@ -361,6 +391,25 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// tabs to buy nothing.
     public var windows: [SessionWindow]?
 
+    /// The opened-file history, most recent first
+    /// (`2026-08-26-opened-file-history`).
+    ///
+    /// **Top-level, beside ``theme``, rather than on ``SessionWindow``**,
+    /// because the history is the application's and not a window's — a file
+    /// opened in one window is a file that was opened. The two app-wide things
+    /// this file records therefore sit together.
+    ///
+    /// It lives here rather than in a `history.json` of its own for one
+    /// practical reason: `MARK_SESSION_FILE` is how `mark-bench` and the
+    /// integration checks stay out of a developer's real state, so a history
+    /// inside this file is hermetic in those runs for free, while a second file
+    /// would write a developer's real history on every bench until a second
+    /// override was added everywhere.
+    ///
+    /// Optional and additive like every field added since M8, so
+    /// ``currentVersion`` does not move.
+    public var history: [SessionHistoryEntry]?
+
     /// The windows to restore: the new field when present, else the flat
     /// fields read as a single window.
     ///
@@ -393,7 +442,8 @@ public struct SessionState: Codable, Equatable, Sendable {
         theme: String? = nil,
         themeAppearance: String? = nil,
         editorVisible: Bool? = nil,
-        windows: [SessionWindow]? = nil
+        windows: [SessionWindow]? = nil,
+        history: [SessionHistoryEntry]? = nil
     ) {
         self.version = version
         self.tabs = tabs
@@ -406,6 +456,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.themeAppearance = themeAppearance
         self.editorVisible = editorVisible
         self.windows = windows
+        self.history = history
     }
 
     /// Assemble a state from windows, mirroring the first into the flat fields.

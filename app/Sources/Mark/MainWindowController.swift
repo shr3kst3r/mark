@@ -111,6 +111,22 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let splitViewController: NSSplitViewController
     private let session: Session
 
+    /// Where this window records the files it opens
+    /// (`2026-08-26-opened-file-history`).
+    ///
+    /// A `var` rather than a `let`, so ``WindowCoordinator/adopt(_:)`` can
+    /// re-point a window built directly at the coordinator's history — the same
+    /// shape as ``TabStore``'s `governor`.
+    ///
+    /// **The default is a private history, not a shared one.** A window built
+    /// outside a coordinator — `mark-bench`, most tests — records into
+    /// something that goes nowhere, which is what keeps a test run out of the
+    /// developer's real history; ``OpenHistory`` explains why that matters.
+    /// Never optional, though: a window whose opens go unrecorded because a
+    /// reference was `nil` is a bug that looks exactly like the feature not
+    /// working.
+    public var history: OpenHistory = OpenHistory()
+
     /// The other windows, and the shared session file.
     ///
     /// `nil` for a controller built directly rather than through
@@ -142,8 +158,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// web view exists" bug the ADR warns about.
     public var documentView: DocumentView? { tabs.selected?.documentView }
 
-    public init(root: URL, session: Session = Session()) {
+    public init(root: URL, session: Session = Session(), history: OpenHistory = OpenHistory()) {
         self.session = session
+        self.history = history
         sidebar = TreeViewController(root: root)
         toc = TableOfContentsViewController()
         sidebarPane = SidebarPaneController(tree: sidebar, contents: toc)
@@ -332,6 +349,31 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     @discardableResult
     func openInFocusedGroup(_ url: URL, preview: Bool = false) -> DocumentTab {
         let standardized = url.standardizedFileURL
+
+        // **The one place the opened-file history is written**
+        // (`2026-08-26-opened-file-history`). This method is the funnel every
+        // route in already passes through — the sidebar, ⌘O and ⌘T's panel, a
+        // drop, `mark open`, a `mark://` URL, LaunchServices at launch, File ▸
+        // New Document — which is why the history costs one call rather than
+        // one per route, and why a route added later records by construction.
+        //
+        // Two things about the placement are deliberate:
+        //
+        // * **`!preview`.** The sidebar's single click is a skim, and
+        //   `TabStore.open` already models a skim as not the same act as
+        //   opening. Clicking down forty files leaves one tab; it leaves no
+        //   history. A double click, or `mark open` on the file being skimmed,
+        //   arrives here with `preview: false` and *is* recorded — that is the
+        //   moment the reader named the file.
+        // * **Above the branch below, not after it.** Being sent to a document
+        //   already open in the other group is still the reader asking to open
+        //   it, so it moves to the front of the history like any other open.
+        //
+        // Session restore does **not** reach here — `TabStore.restore(_:)`
+        // builds tabs directly — and `OpenHistory` explains why that is a rule
+        // rather than an accident.
+        if !preview { history.record(standardized) }
+
         if let existing = tab(for: standardized),
             groups.group(of: existing) !== groups.focused
         {

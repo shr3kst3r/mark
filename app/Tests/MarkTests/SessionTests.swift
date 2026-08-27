@@ -385,6 +385,79 @@ struct SessionTests {
         #expect(try fixture.session.load()?.tabs.isEmpty == true)
     }
 
+    // MARK: - The opened-file history (`2026-08-26-opened-file-history`)
+
+    @Test("the opened-file history round-trips")
+    func historyRoundTrips() throws {
+        let fixture = try TabFixture()
+        var state = SessionState(tabs: [])
+        state.history = [
+            SessionHistoryEntry(path: "/notes/a.md", lastOpened: 1_756_000_000),
+            SessionHistoryEntry(path: "/notes/b.md", lastOpened: 1_755_000_000),
+        ]
+        try fixture.session.save(state)
+
+        let loaded = try #require(try fixture.session.load())
+        #expect(loaded.history?.map(\.path) == ["/notes/a.md", "/notes/b.md"])
+        #expect(loaded.history?.first?.lastOpened == 1_756_000_000)
+    }
+
+    /// **The regression the whole hand-written-decoder convention exists to
+    /// prevent.** A session file written before this feature has no `history`
+    /// key, and it must come back with its tabs rather than throwing.
+    @Test("a session file with no history key still restores its tabs")
+    func historyIsAdditive() throws {
+        let fixture = try TabFixture()
+        let json = """
+            {
+              "version": 1,
+              "selectedIndex": 0,
+              "tabs": [{ "path": "/notes/a.md", "scrollOffset": 0 }]
+            }
+            """
+        try json.write(to: fixture.session.url, atomically: true, encoding: .utf8)
+
+        let loaded = try #require(try fixture.session.load())
+        #expect(loaded.tabs.map(\.path) == ["/notes/a.md"])
+        #expect(loaded.history == nil)
+        // And an absent key restores as an empty history, not as a failure.
+        let history = OpenHistory()
+        history.restore(session: loaded.history ?? [])
+        #expect(history.isEmpty)
+    }
+
+    /// Adding a field never bumps the version — a bump refuses yesterday's
+    /// session and loses the user's tabs to buy nothing.
+    @Test("the history did not move the session version")
+    func versionDidNotMove() {
+        #expect(SessionState.currentVersion == 1)
+    }
+
+    /// The history is the application's, so it sits beside `theme` rather than
+    /// on a window — and it is written even when empty, so that clearing it is
+    /// a change the file records.
+    @Test("the coordinator writes the history app-wide, including when empty")
+    func coordinatorSnapshotsHistory() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let coordinator = WindowCoordinator(session: fixture.session, history: history)
+        coordinator.makeWindow(root: fixture.directory)
+
+        #expect(coordinator.snapshot().history?.isEmpty == true)
+
+        history.record(fixture.file(named: "a.md"))
+        let snapshot = coordinator.snapshot()
+        #expect(snapshot.history?.map { ($0.path as NSString).lastPathComponent } == ["a.md"])
+        // Not on a window: two windows do not each get a copy.
+        #expect(snapshot.windows?.allSatisfy { _ in true } == true)
+
+        // And it comes back.
+        let restored = OpenHistory()
+        let second = WindowCoordinator(session: fixture.session, history: restored)
+        second.restore(snapshot)
+        #expect(restored.entries.map(\.url.lastPathComponent) == ["a.md"])
+    }
+
     @Test("the default session path is under Application Support, not ~/.config")
     func defaultPath() {
         let path = Session.defaultURL.path

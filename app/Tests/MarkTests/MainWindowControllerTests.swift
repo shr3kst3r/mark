@@ -351,3 +351,179 @@ struct MainWindowControllerTests {
         #expect(controller.tabBar.isHidden)
     }
 }
+
+/// **What counts as opening a file** (`2026-08-26-opened-file-history`).
+///
+/// `MainWindowController.openInFocusedGroup(_:preview:)` is the funnel every
+/// route into a document already passes through, and it is the one place the
+/// history is written. These are the rules that make the history worth reading
+/// rather than a log of everything that touched a file.
+@Suite("MainWindowController — the opened-file history")
+@MainActor
+struct MainWindowHistoryTests {
+
+    private func make(_ fixture: TabFixture, _ history: OpenHistory) -> MainWindowController {
+        MainWindowController(root: fixture.directory, session: fixture.session, history: history)
+    }
+
+    @Test("a permanent open is recorded")
+    func permanentOpenRecords() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let controller = make(fixture, history)
+
+        controller.open(fixture.file(named: "a.md"))
+        #expect(history.entries.map(\.url.lastPathComponent) == ["a.md"])
+
+        controller.open(fixture.file(named: "b.md"))
+        #expect(history.entries.map(\.url.lastPathComponent) == ["b.md", "a.md"])
+    }
+
+    /// The sidebar's single click is a skim. `TabStore.open` already models a
+    /// skim as not the same act as opening — *"clicking down forty files leaves
+    /// one tab rather than forty"* — and the history follows it, or forty
+    /// glances would evict everything the reader actually chose.
+    @Test("a preview open records nothing")
+    func previewOpenRecordsNothing() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let controller = make(fixture, history)
+
+        for name in ["a.md", "b.md", "c.md", "d.md"] {
+            controller.open(fixture.file(named: name), preview: true)
+        }
+        #expect(history.isEmpty)
+        // And the skims really did happen — one preview tab, as the store
+        // promises.
+        #expect(controller.tabs.count == 1)
+    }
+
+    /// Promotion is the moment the reader named the file.
+    @Test("promoting a skimmed file to a permanent tab records it")
+    func promotionRecords() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let controller = make(fixture, history)
+
+        let file = fixture.file(named: "a.md")
+        controller.open(file, preview: true)
+        #expect(history.isEmpty)
+
+        controller.open(file)
+        #expect(history.entries.map(\.url.lastPathComponent) == ["a.md"])
+        #expect(controller.tabs.selected?.isPreview == false)
+    }
+
+    /// **The ADR's rule, pinned.**
+    ///
+    /// Restore records nothing. This holds today because `TabStore.restore(_:)`
+    /// builds tabs directly rather than calling `open(_:preview:)` — which is a
+    /// rule and not a happy accident. Route restore through the open path
+    /// without suppressing recording and every relaunch stamps every restored
+    /// tab with the launch time, turning a history of documents into a list of
+    /// launches. That refactor looks like a simplification; this test is what
+    /// tells whoever writes it that it is not.
+    @Test("restoring a session records nothing")
+    func restoreRecordsNothing() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let controller = make(fixture, history)
+
+        controller.restore(
+            SessionWindow(
+                tabs: [
+                    SessionTab(path: fixture.file(named: "a.md").path),
+                    SessionTab(path: fixture.file(named: "b.md").path),
+                ],
+                selectedIndex: 0
+            ))
+
+        #expect(controller.tabs.count == 2)
+        #expect(history.isEmpty)
+    }
+
+    /// Being sent to a document already open in the other half of a split is
+    /// still the reader asking to open it, so it moves to the front.
+    @Test("re-opening a document held by the other group still records")
+    func openingAcrossGroupsRecords() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let controller = make(fixture, history)
+
+        controller.open(fixture.file(named: "a.md"))
+        controller.open(fixture.file(named: "b.md"))
+        #expect(controller.groups.splitRight())
+        #expect(controller.groups.isSplit)
+
+        // `b.md` is now alone in the second group and `a.md` is selected in the
+        // first, so opening `b.md` takes the "already open over there" branch.
+        controller.open(fixture.file(named: "a.md"))
+        controller.open(fixture.file(named: "b.md"))
+
+        #expect(history.entries.map(\.url.lastPathComponent) == ["b.md", "a.md"])
+        // And it went there rather than making a second tab and a second web
+        // view for one document.
+        #expect(controller.groups.allTabs.count == 2)
+    }
+
+    /// The history is the application's, not a window's: two windows, one list.
+    @Test("two windows share one history")
+    func windowsShareOneHistory() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let coordinator = WindowCoordinator(session: fixture.session, history: history)
+
+        let first = coordinator.makeWindow(root: fixture.directory)
+        let second = coordinator.makeWindow(root: fixture.directory)
+        first.open(fixture.file(named: "a.md"))
+        second.open(fixture.file(named: "b.md"))
+
+        #expect(history.entries.map(\.url.lastPathComponent) == ["b.md", "a.md"])
+    }
+
+    /// **A test must not be able to write the developer's real history.**
+    ///
+    /// There is no `OpenHistory.shared`, and the default on both
+    /// `MainWindowController` and `WindowCoordinator` is a *fresh* history
+    /// rather than a shared one. That matters because `just swift-test` does
+    /// not set `MARK_SESSION_FILE`, so a `WindowCoordinator()` built with the
+    /// default `Session()` saves to `~/Library/Application Support/mark/
+    /// session.json` — the developer's own. With a shared default, every test
+    /// in this file that opens a fixture document would have recorded a path
+    /// under `/var/folders/…` into the history the developer sees in ⌘Y.
+    ///
+    /// Two windows built with no history given are therefore isolated from each
+    /// other, which is the observable form of that property.
+    @Test("windows built without a coordinator do not share a history")
+    func defaultHistoriesAreIsolated() throws {
+        let fixture = try TabFixture()
+        let first = MainWindowController(root: fixture.directory, session: fixture.session)
+        let second = MainWindowController(root: fixture.directory, session: fixture.session)
+
+        first.open(fixture.file(named: "a.md"))
+        #expect(first.history.count == 1)
+        #expect(second.history.isEmpty)
+
+        // Same for coordinators: two of them do not see each other's opens.
+        let left = WindowCoordinator(session: fixture.session)
+        let right = WindowCoordinator(session: fixture.session)
+        left.makeWindow(root: fixture.directory).open(fixture.file(named: "b.md"))
+        #expect(left.history.count == 1)
+        #expect(right.history.isEmpty)
+    }
+
+    /// A window built directly and then adopted must not be the one window
+    /// whose opens go unrecorded.
+    @Test("an adopted window records into the coordinator's history")
+    func adoptedWindowRecords() throws {
+        let fixture = try TabFixture()
+        let history = OpenHistory()
+        let coordinator = WindowCoordinator(session: fixture.session, history: history)
+
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        coordinator.adopt(controller)
+        controller.open(fixture.file(named: "a.md"))
+
+        #expect(history.entries.map(\.url.lastPathComponent) == ["a.md"])
+    }
+}

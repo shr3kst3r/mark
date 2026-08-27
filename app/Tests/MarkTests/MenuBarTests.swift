@@ -138,6 +138,30 @@ struct MenuBarTests {
     /// **Help ▸ Markdown Reference** on ⇧⌘/
     /// (`2026-08-26-markdown-reference-window`).
     ///
+    /// `2026-08-26-opened-file-history`. Under Open…, because it is the other
+    /// way to open a file you already have, and on ⌘Y because that is what a
+    /// browser has meant by History for twenty years.
+    ///
+    /// `keyEquivalentsAreUnique` above is what guarantees ⌘Y was free.
+    @Test("File ▸ History is under Open…, on ⌘Y")
+    func historyItem() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let file = try #require(menu.items.first { $0.submenu?.title == "File" }?.submenu)
+
+        let open = try #require(file.items.firstIndex { $0.title == "Open…" })
+        let history = try #require(file.items.firstIndex { $0.title == "History" })
+        #expect(history == open + 1)
+
+        let item = file.items[history]
+        #expect(item.keyEquivalent == "y")
+        #expect(item.keyEquivalentModifierMask == [.command])
+        #expect(item.action == #selector(AppDelegate.showHistory(_:)))
+        #expect(item.target === delegate)
+        // No ellipsis: it shows a window, it does not ask for input first.
+        #expect(!item.title.hasSuffix("…"))
+    }
+
     /// Last, because that is where macOS puts Help and where a reader looks
     /// for it. `installMainMenu(for:)` finds it by title rather than by
     /// position, so a menu appended after it would fail here and not in the

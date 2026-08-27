@@ -221,6 +221,19 @@ of its own with its own ⌘F, and never joins your tabs or your session. Outside
 the app it is an ordinary file:
 `mark render "$(mdfind -name mark.app | head -1)/Contents/Resources/markdown-reference.md"`.
 
+**A history of what you opened.** ⌘Y — or **File ▸ History** — lists the files
+you have opened, most recent first, with the folder each one is in and when you
+last opened it. Filter it by name or by folder, click a column
+heading to re-order it, ↩ or double-click to open one into the window you were
+in, ⌫ to forget one, **Clear History** to forget all of them. It remembers the last 64 files and it survives closing the tab, closing the
+window and quitting. Two things it deliberately does not count: skimming a file
+with a single click in the sidebar, which is browsing rather than opening, and
+the tabs restored at launch, which are the app remembering rather than you
+opening. A file that has since moved or been deleted stays in the list, greyed
+and marked *missing*, because an unmounted volume is not a deletion. The window
+is a plain list — it holds no rendered page, so opening it never displaces a
+document from the memory budget.
+
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and
 accessibility are the system's rather than ours. The preview updates as you

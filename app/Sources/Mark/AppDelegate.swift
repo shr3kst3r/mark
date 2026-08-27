@@ -407,6 +407,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         fileMenu.addItem(
             withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o"
         ).target = self
+        // `2026-08-26-opened-file-history`. Under Open…, because it is the
+        // other way to open a file you already have.
+        //
+        // **⌘Y**, which is what a browser has meant by History for twenty
+        // years, and which nothing in this menu bar had claimed — the "no two
+        // menu items share a key equivalent" test in `MenuBarTests` is what
+        // keeps that true.
+        //
+        // No ellipsis, matching Help ▸ Markdown Reference: this shows a window,
+        // it does not open a dialog that wants more input first.
+        fileMenu.addItem(
+            withTitle: "History", action: #selector(showHistory(_:)), keyEquivalent: "y"
+        ).target = self
         fileMenu.addItem(
             withTitle: "Reload", action: #selector(MainWindowController.reloadDocument(_:)),
             keyEquivalent: "r")
@@ -690,6 +703,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             Log.app.error("the markdown reference is not in this bundle")
             NSSound.beep()
             return
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// **File ▸ History** — the opened-file history
+    /// (`2026-08-26-opened-file-history`).
+    ///
+    /// The window is handed the *route*, not the coordinator: opening a row
+    /// goes through ``MainWindowController/open(_:)`` on the key window, so the
+    /// document lands in the focused group exactly as every other route in does
+    /// (`2026-08-26-editor-groups-per-pane-tab-bars`). With no window open —
+    /// every one of them closed while the app kept running — one is made first,
+    /// rooted where the file is, rather than the click doing nothing.
+    @objc func showHistory(_ sender: Any?) {
+        // The coordinator owns the one history there is — there is no
+        // `OpenHistory.shared` to fall back to, deliberately, and falling back
+        // to a fresh one would put an empty window on screen over a history
+        // that is not empty. `windows` is set before the menu exists, so this
+        // is a guard rather than a case.
+        guard let coordinator = windows else {
+            Log.app.error("File ▸ History before the window coordinator exists")
+            NSSound.beep()
+            return
+        }
+        HistoryWindowController.show(history: coordinator.history) { [weak coordinator] url in
+            guard let coordinator else { return }
+            let controller =
+                coordinator.keyController
+                ?? coordinator.makeWindow(root: url.deletingLastPathComponent())
+            controller.open(url)
+            controller.showWindow(activating: true)
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
     }

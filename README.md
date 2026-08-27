@@ -88,6 +88,15 @@ without moving the root or clearing your filter. ⌘⇧O is the deliberate versi
 that does move the root, for a file outside it; ⌘⌥R reveals it in Finder. Drop a
 folder on the window to root there.
 
+**It keeps up with the disk on its own.** A file a script writes into a folder
+you have open appears within about two seconds, and one that is deleted goes,
+without touching ⌘R. The check costs one `stat` per folder you have expanded and
+reads no directory unless that folder's own timestamp moved, so it stays flat
+while a build churns through a hundred thousand files under a folder nobody
+opened — and it stops entirely when the window is covered or the sidebar is
+collapsed. Whatever you had expanded stays expanded and whatever was selected
+stays selected, even when the new file sorts above it.
+
 ⌘O and ⌘T are the same open panel — several files at once, starting in the
 folder you are reading, and a folder itself is a valid choice that roots the
 tree there. Both offer **every** extension mark counts as markdown — `.md`,

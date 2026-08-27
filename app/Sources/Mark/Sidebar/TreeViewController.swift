@@ -496,6 +496,128 @@ public final class TreeViewController: NSViewController {
         badges.request(url)
     }
 
+    // MARK: - Polling
+
+    /// How often the sidebar re-checks the directories it is showing.
+    ///
+    /// Two seconds is short enough that a file written by a script in the
+    /// terminal beside the window is there by the time you look for it, and
+    /// long enough that the check disappears into the noise: a poll that finds
+    /// nothing is one `stat` per **expanded** directory, which for any sidebar
+    /// a person can actually read is a few dozen syscalls.
+    public static let pollInterval: TimeInterval = 2
+
+    /// Slack given to the timer so the kernel can coalesce its wakeups with
+    /// whatever else the app is doing. A refresh half a second late is a
+    /// refresh; a timer that insists on waking a sleeping CPU every two
+    /// seconds is a battery complaint.
+    public static let pollTolerance: TimeInterval = 0.5
+
+    private var pollTimer: Timer?
+
+    /// Whether the tree is on screen and worth polling.
+    ///
+    /// Three ways it can fail to be: the view is not in a window, the split
+    /// view has collapsed the sidebar, or the window is fully covered by
+    /// another one — which is also what the app being hidden looks like.
+    private var shouldPoll: Bool {
+        guard isViewLoaded, !view.isHiddenOrHasHiddenAncestor else { return false }
+        guard let window = view.window else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    public override func viewDidAppear() {
+        super.viewDidAppear()
+        if let window = view.window {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pollingConditionsChanged),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: window)
+        }
+        // Whatever changed on disk while the window was closed or covered is
+        // news now, so the first check happens immediately rather than one
+        // interval from now.
+        updatePolling()
+        pollForChanges()
+    }
+
+    public override func viewDidDisappear() {
+        super.viewDidDisappear()
+        NotificationCenter.default.removeObserver(
+            self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        stopPolling()
+    }
+
+    @objc private func pollingConditionsChanged() {
+        let wasPolling = pollTimer != nil
+        updatePolling()
+        // Uncovering the window is exactly the moment the listing is most
+        // likely to be stale, and waiting a further two seconds to say so is
+        // the delay the reader would notice.
+        if !wasPolling, pollTimer != nil { pollForChanges() }
+    }
+
+    private func updatePolling() {
+        if shouldPoll { startPolling() } else { stopPolling() }
+    }
+
+    private func startPolling() {
+        guard pollTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.pollTick() }
+        }
+        // `.default` mode on purpose, which is what `scheduledTimer` gives:
+        // the poll does not fire while a menu is open or a drag is in flight,
+        // and a tree that reloaded out from under an open context menu would
+        // be a worse bug than a listing two seconds behind.
+        timer.tolerance = Self.pollTolerance
+        pollTimer = timer
+        Log.tree.debug("sidebar poll started at \(Self.pollInterval)s")
+    }
+
+    private func stopPolling() {
+        guard let pollTimer else { return }
+        pollTimer.invalidate()
+        self.pollTimer = nil
+        Log.tree.debug("sidebar poll stopped")
+    }
+
+    /// Re-check the directories on screen, and update the rows if the disk
+    /// disagrees with them.
+    ///
+    /// Cheap when nothing changed — one `stat` per expanded directory and no
+    /// reload at all — which is what makes it safe to run on a timer. Public
+    /// so a test can drive a poll without a run loop.
+    ///
+    /// - Returns: whether anything on screen changed.
+    @discardableResult
+    public func pollForChanges() -> Bool {
+        guard outlineView != nil else { return false }
+        let change = dataSource.reconcile()
+        guard !change.isEmpty else { return false }
+
+        for node in change.removed {
+            expanded.removeValue(forKey: ObjectIdentifier(node))
+            badges.invalidate(node.url)
+        }
+        Log.tree.info(
+            "poll: \(change.changed.count) director(ies) changed, +\(change.added.count) −\(change.removed.count)"
+        )
+        // Every surviving row is the same object it was, so the expansion
+        // replay and the reselection both land on what the reader was looking
+        // at — a row that moved down because a file was added above it, not a
+        // different file at the same index.
+        reloadPreservingExpansion(selecting: selectedNode)
+        return true
+    }
+
+    private func pollTick() {
+        guard shouldPoll else { return }
+        pollForChanges()
+    }
+
     // MARK: - Session
 
     public func snapshot() -> SidebarState {
@@ -529,7 +651,14 @@ public final class TreeViewController: NSViewController {
     /// Parents first — expanding a child before its parent is a no-op, and the
     /// bug it produces (a filter that quietly closes one level) is exactly what
     /// plan §2 M8's gate is about.
-    private func reloadPreservingExpansion() {
+    ///
+    /// `selection` puts a row back afterwards, which the poll needs and the
+    /// sort and the filter do not: `reloadData` keeps the selected *index*,
+    /// and a file appearing above the selection moves the row the reader
+    /// picked without moving the highlight. Restoring it is done under
+    /// ``isFollowing``, so putting the highlight back where it already was
+    /// does not read as the reader asking for that file again and open a tab.
+    private func reloadPreservingExpansion(selecting selection: TreeNode? = nil) {
         guard let outlineView else { return }
         let nodes = expanded.values.sorted { $0.url.pathComponents.count < $1.url.pathComponents.count }
         outlineView.reloadData()
@@ -539,6 +668,19 @@ public final class TreeViewController: NSViewController {
             outlineView.expandItem(node)
         }
         isRestoringExpansion = false
+
+        guard let selection else { return }
+        isFollowing = true
+        defer { isFollowing = false }
+        let row = outlineView.row(forItem: selection)
+        if row >= 0 {
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        } else {
+            // The selected row was deleted. Whatever now sits at that index is
+            // not what the reader chose, and leaving it highlighted would say
+            // it is.
+            outlineView.deselectAll(nil)
+        }
     }
 
     // MARK: - Badges

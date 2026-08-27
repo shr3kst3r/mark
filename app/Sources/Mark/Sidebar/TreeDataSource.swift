@@ -100,6 +100,56 @@ public enum TreeSort: String, CaseIterable, Sendable {
     }
 }
 
+// MARK: - Freshness
+
+/// A directory's own `mtime`, to the nanosecond, as something two polls can
+/// compare exactly.
+///
+/// `timespec` rather than `Date` because `Date` is a `Double` counting from
+/// 2001, and at present-day magnitudes it cannot hold a nanosecond — comparing
+/// two of them is comparing rounded numbers. And a `stat(2)` rather than
+/// `URL.resourceValues`, because this runs once per listed directory per poll
+/// and because the whole point is to see a change: a value that Foundation is
+/// entitled to serve from a cache is the wrong tool for asking "has this moved
+/// since I last looked?".
+struct DirectoryStamp: Equatable {
+    let seconds: Int
+    let nanoseconds: Int
+
+    static func of(_ path: String) -> DirectoryStamp? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return DirectoryStamp(
+            seconds: Int(info.st_mtimespec.tv_sec),
+            nanoseconds: Int(info.st_mtimespec.tv_nsec))
+    }
+}
+
+/// What a whole pass of ``TreeDataSource/reconcile()`` turned up.
+public struct TreeReconciliation {
+    /// The directories whose listings actually differ from what is on screen.
+    public internal(set) var changed: [URL] = []
+    /// Files and folders that have just appeared.
+    public internal(set) var added: [URL] = []
+    /// Rows that are gone, including everything that had been listed below
+    /// them — so the controller can forget their expansion state and badges
+    /// rather than hold the last reference to a subtree nobody can reach.
+    public internal(set) var removed: [TreeNode] = []
+
+    public var isEmpty: Bool { changed.isEmpty }
+}
+
+/// What re-reading one directory turned up.
+struct TreeChange {
+    /// Rows that were not in the previous listing.
+    var added: [TreeNode] = []
+    /// Rows that are no longer in the directory — including a name whose kind
+    /// changed, which is a different row wearing the same label.
+    var removed: [TreeNode] = []
+
+    var isEmpty: Bool { added.isEmpty && removed.isEmpty }
+}
+
 // MARK: - The node
 
 /// One row in the sidebar.
@@ -118,6 +168,29 @@ public final class TreeNode {
     /// Set when a listing failed, so the row can say so instead of silently
     /// appearing to be an empty directory.
     public private(set) var listingError: String?
+
+    /// The directory's **own** `mtime` when ``children`` was read.
+    ///
+    /// The poll's gate, and the reason a background refresh is affordable at
+    /// all: a directory that has not gained, lost, or renamed an entry has not
+    /// moved its own `mtime`, so the poll can skip re-reading it after a single
+    /// `stat`. Content changes inside a file do *not* move it — which is
+    /// correct, because they do not change the listing either.
+    private var listingStamp: DirectoryStamp?
+
+    /// Set when ``listingStamp`` was read less than a second before the
+    /// listing itself.
+    ///
+    /// APFS timestamps are nanosecond-resolution, but HFS+ and most network
+    /// mounts round to the second — and there, a file written in the *same
+    /// second* as the listing leaves the stamp unchanged and would stay
+    /// invisible for as long as nothing else touched the directory. Such a
+    /// listing is therefore re-read once on the next poll, by which time the
+    /// second has passed and the stamp can be trusted. It costs one extra
+    /// listing per directory the reader expands, and it is the difference
+    /// between a refresh that works everywhere and one that works on the
+    /// developer's laptop.
+    private var listingStampIsProvisional = false
 
     /// ``children`` after the current sort and filter. Recomputed when the
     /// data source's arrangement stamp moves, so flipping a sort or typing in
@@ -195,6 +268,10 @@ public final class TreeNode {
             children = []
             return []
         }
+        // Stamped *before* the read, so a write that lands between the two is
+        // caught by the next poll rather than missed forever.
+        let stamp = DirectoryStamp.of(url.path)
+        defer { recordListing(stamp: stamp) }
         do {
             let entries = try lister.entries(in: url.path)
             let loaded = entries.map(TreeNode.init(entry:))
@@ -204,7 +281,8 @@ public final class TreeNode {
             return loaded
         } catch {
             // One unreadable directory should not cost the user the rest of the
-            // tree, and it should not be retried on every scroll either.
+            // tree, and it should not be retried on every scroll either — nor,
+            // since the stamp is recorded above, on every poll.
             listingError = String(describing: error)
             children = []
             Log.tree.error("\(self.url.path, privacy: .public): \(String(describing: error))")
@@ -216,10 +294,108 @@ public final class TreeNode {
     public func invalidate() {
         children = nil
         listingError = nil
+        listingStamp = nil
+        listingStampIsProvisional = false
         arranged = nil
         arrangementStamp = 0
         didStat = false
         cachedModified = nil
+    }
+
+    // MARK: - Polling
+
+    /// Whether the directory has changed since ``children`` was read.
+    ///
+    /// One `stat`, and nothing else — this is asked of every listed directory
+    /// every couple of seconds, so it is the one thing here that must not be a
+    /// directory read. A node that has never been listed is never stale: there
+    /// is nothing on screen under it to be wrong.
+    ///
+    /// A directory that cannot be `stat`ed is reported as *not* stale rather
+    /// than as always stale: the poll could not have read it either, and a
+    /// directory that fails both is one that would otherwise be re-listed
+    /// every two seconds for the life of the window. Its disappearance is
+    /// still noticed — by its parent, whose own listing loses the row.
+    var listingIsStale: Bool {
+        guard isDirectory, children != nil else { return false }
+        if listingStampIsProvisional { return true }
+        guard let listingStamp, let current = DirectoryStamp.of(url.path) else { return false }
+        return current != listingStamp
+    }
+
+    /// Take a fresh listing, **keeping the existing node for every entry that
+    /// is still there**.
+    ///
+    /// Identity is the load-bearing part. `NSOutlineView` addresses rows by
+    /// object and ``TreeViewController`` keys its expansion set by one, so
+    /// replacing a surviving row's node would collapse the directory under it
+    /// and move the selection off it. A refresh that closed folders while
+    /// someone was reading would be worse than one that never ran.
+    ///
+    /// - Returns: what arrived and what left. Empty when the directory moved
+    ///   its `mtime` without changing anything the sidebar shows — a
+    ///   `.gitignore`d file appearing, most often — which is why the stamp is
+    ///   recorded either way.
+    @discardableResult
+    func adopt(_ entries: [TreeEntry], stamp: DirectoryStamp?) -> TreeChange {
+        recordListing(stamp: stamp)
+        listingError = nil
+        arranged = nil
+        arrangementStamp = 0
+
+        var change = TreeChange()
+        var survivors: [String: TreeNode] = [:]
+        for child in children ?? [] { survivors[child.url.path] = child }
+
+        var next: [TreeNode] = []
+        next.reserveCapacity(entries.count)
+        for entry in entries {
+            // A name whose *kind* changed — a file replaced by a directory —
+            // is not the same row. Leaving it in `survivors` reports it as
+            // departed, which it is.
+            if let kept = survivors[entry.path], kept.isDirectory == entry.isDirectory {
+                survivors.removeValue(forKey: entry.path)
+                // The listing changed, so a file in it may have been rewritten
+                // as well as added; forget the cached `mtime` so a modified
+                // sort can still move the row. Paid lazily, and only for a
+                // directory that actually changed.
+                kept.forgetModified()
+                next.append(kept)
+            } else {
+                let node = TreeNode(entry: entry)
+                change.added.append(node)
+                next.append(node)
+            }
+        }
+        change.removed = Array(survivors.values)
+        children = next
+        return change
+    }
+
+    /// This node and every descendant whose listing was read.
+    ///
+    /// What a departing directory hands back, so the controller can forget the
+    /// expansion state and the badges of everything that went with it.
+    func listedSubtree() -> [TreeNode] {
+        var result: [TreeNode] = []
+        var stack: [TreeNode] = [self]
+        while let node = stack.popLast() {
+            result.append(node)
+            if let children = node.children { stack.append(contentsOf: children) }
+        }
+        return result
+    }
+
+    /// Forget the cached `mtime`, so the next modified sort re-stats.
+    private func forgetModified() {
+        didStat = false
+        cachedModified = nil
+    }
+
+    private func recordListing(stamp: DirectoryStamp?) {
+        listingStamp = stamp
+        listingStampIsProvisional =
+            stamp.map { Date().timeIntervalSince1970 - Double($0.seconds) < 1 } ?? false
     }
 
     /// `mtime`, or `nil` for a file that cannot be stat'ed.
@@ -291,6 +467,58 @@ public final class TreeDataSource: NSObject, NSOutlineViewDataSource {
     public func invalidate() {
         root.invalidate()
         rearrange()
+    }
+
+    /// Re-read the directories the sidebar is showing whose contents have
+    /// actually moved, keeping every row that is still there.
+    ///
+    /// The background refresh, run every ``TreeViewController/pollInterval``.
+    /// Its whole cost model is one `stat` per **listed** directory: a
+    /// directory that has not gained, lost, or renamed an entry has not moved
+    /// its own `mtime`, and is not read. So the work is bounded by what the
+    /// reader has expanded — never by the size of the tree — and stays flat
+    /// while a build churns through a hundred thousand files somewhere below
+    /// a folder nobody has opened.
+    ///
+    /// It reads no directory that ``arrangedChildren(of:)`` had not already
+    /// read, which is the same promise the rest of this file makes.
+    ///
+    /// One thing it deliberately does not see: a file whose *bytes* changed
+    /// without the directory changing. That moves no row and renames nothing;
+    /// it only stales a task badge, which is what ⌘R and the document
+    /// watcher are for.
+    @discardableResult
+    public func reconcile() -> TreeReconciliation {
+        // Snapshotted first: re-listing a directory mutates the very array
+        // that walking it would be iterating.
+        var listed: [TreeNode] = []
+        var stack: [TreeNode] = [root]
+        while let node = stack.popLast() {
+            guard node.isDirectory, let children = node.children else { continue }
+            listed.append(node)
+            stack.append(contentsOf: children)
+        }
+
+        var result = TreeReconciliation()
+        for node in listed where node.listingIsStale {
+            let stamp = DirectoryStamp.of(node.url.path)
+            guard let entries = try? lister.entries(in: node.url.path) else {
+                // A directory mid-rename, or one that just lost its
+                // permissions. Keep what is on screen rather than blanking it
+                // on a transient read; if it is really gone, the parent's own
+                // listing drops the row on this same pass.
+                Log.tree.info("poll: could not re-read \(node.url.path, privacy: .public)")
+                continue
+            }
+            let change = node.adopt(entries, stamp: stamp)
+            guard !change.isEmpty else { continue }
+            result.changed.append(node.url)
+            result.added.append(contentsOf: change.added.map(\.url))
+            result.removed.append(contentsOf: change.removed.flatMap { $0.listedSubtree() })
+        }
+
+        if !result.isEmpty { rearrange() }
+        return result
     }
 
     /// Recompute every node's order and visibility on next access.

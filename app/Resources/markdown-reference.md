@@ -167,31 +167,88 @@ Indent to keep a paragraph, a quote or a code block inside a list item:
 
 ## Task lists
 
-A list item beginning with `[ ]` or `[x]` becomes a checkbox — a real one.
+A list item beginning with a bracketed character becomes a checkbox — a real
+one. There are **five** states, one per byte:
+
+| Marker | State | Still to do? |
+|---|---|---|
+| `[ ]` | open | yes |
+| `[/]` | in progress | yes |
+| `[x]` | done | no |
+| `[-]` | cancelled | no, and it leaves the count |
+| `[?]` | blocked | yes |
 
 ````markdown
 - [x] Write the reference
 - [ ] Read the reference
-- [ ] Tick this box
+- [/] Try the states out
+- [?] Blocked on someone else
+- [-] Something dropped
 ````
 
 - [x] Write the reference
 - [ ] Read the reference
-- [ ] Tick this box
+- [/] Try the states out
+- [?] Blocked on someone else
+- [-] Something dropped
+
+A cancelled item is struck through and dimmed because of what it *is*, not
+because you typed `~~`. It also leaves the denominator: a list where you
+abandoned two of seven items reads `3/5`, not `3/7`, which is the whole reason
+the state exists. Striking a parent strikes its subtasks with it — CSS gives a
+child no way out of it — which matches what dropping a parent means.
+
+Only `[ ]` and `[x]` are GitHub-flavoured markdown; GitHub shows the other three
+as literal brackets. `mark normalize` rewrites them losslessly for publishing:
+`[-]` becomes `[x] ~~struck~~`, and `[/]` and `[?]` become `[ ]` carrying a
+`@doing` or `@blocked` tag.
 
 **Clicking a checkbox writes one byte to your file** — the character between the
-brackets — and nothing else. The document is re-parsed immediately before the
-write, and if the target is no longer a task marker the write is refused rather
-than guessed.
+brackets — and nothing else. A plain click ticks the box (and unticks a ticked
+one); **⌥-click** cancels; **right-click** offers all five. The document is
+re-parsed immediately before the write, and if the target is no longer a task
+marker the write is refused rather than guessed.
 
 The boxes on *this* page are the exception: it lives inside the app bundle, so
 clicking one is refused and logged.
 
-The CLI does the same thing from a script:
+### Metadata in a task
+
+A task can carry `@tags`, keyed values, and a priority, all in its own text, all
+still ordinary markdown that every other tool shows as prose:
+
+````markdown
+- [ ] Draft the invoice @work @due(2026-09-01) !!
+- [/] Chase the reply @waiting-on-legal @start(2026-08-27)
+- [x] File it @done(2026-08-26) !
+````
+
+- [ ] Draft the invoice @work @due(2026-09-01) !!
+- [/] Chase the reply @waiting-on-legal @start(2026-08-27)
+- [x] File it @done(2026-08-26) !
+
+`@due`, `@start` and `@done` take an ISO `YYYY-MM-DD` date; any other name is a
+tag with a value. `!`, `!!` and `!!!` are priority, low to high. A token counts
+only when it stands alone as a word, so `bob@example.com` is an email address
+and `ship it!!!` in the middle of a sentence is prose. Metadata inside a code
+span is documentation rather than metadata, which is why writing `@due(x)` in
+this sentence describes the syntax instead of using it.
+
+An overdue date is coloured in the app. It is deliberately *not* coloured by
+`mark render --html`: that output is a pure function of your file, so the same
+document renders the same bytes tomorrow.
+
+No tag ever changes a count. The marker byte owns the arithmetic; a tag is
+something to filter on.
+
+The CLI does all of it from a script:
 
 ```sh
-mark tasks notes.md --open --json     # every unticked task, with byte spans
-mark check notes.md --item 3 --toggle # flip one
+mark tasks notes.md --open --json         # every outstanding task, with byte spans
+mark tasks ~/notes --overdue --tag @work --sort due
+mark check notes.md --item 3 --toggle     # flip one
+mark check notes.md --item 3 --state cancelled --stamp
+mark normalize notes.md --gfm             # to stdout; --in-place to rewrite
 ```
 
 ## Links

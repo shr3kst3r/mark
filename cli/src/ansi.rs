@@ -22,6 +22,7 @@ use std::fmt::Write as _;
 
 use mark_core::highlight;
 use mark_core::parse::{Document, code_language};
+use mark_core::tasks;
 use mark_core::theme;
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Tag, TagEnd};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -178,9 +179,48 @@ impl Writer {
     fn run(&mut self, doc: &Document<'_>, prefix_blocks: Option<usize>) {
         let end = prefix_blocks.unwrap_or(usize::MAX).min(doc.blocks().len());
         for block in &doc.blocks()[..end] {
-            for (event, _) in doc.block_events(block) {
-                self.event(event);
+            let events = doc.block_events(block);
+            let mut index = 0;
+            while index < events.len() {
+                // `[/]`, `[-]` and `[?]` are three `Text` events the parser has
+                // no opinion about, so they are recognised with the core's own
+                // structural rule and drawn as one marker — otherwise they
+                // would print as prose and the terminal formats would be the
+                // only ones that disagreed about what a task is.
+                if let Some((state, _)) = tasks::extended_marker(events, index, doc.source()) {
+                    self.task_marker(state, false);
+                    index += 3;
+                    continue;
+                }
+                self.event(&events[index].0);
+                index += 1;
             }
+        }
+    }
+
+    /// One task marker, in the same five spellings the document uses.
+    ///
+    /// `--plain` emits the marker bytes and no styling at all, which is what
+    /// makes it a byte-for-byte round trip of the source.
+    ///
+    /// `spaced` distinguishes the two shapes the parser hands us: a GFM marker
+    /// arrives with the following space consumed, an extended one does not, and
+    /// re-emitting the wrong one would move a byte.
+    fn task_marker(&mut self, state: tasks::State, spaced: bool) {
+        self.style(match state {
+            tasks::State::Open => "33",
+            tasks::State::InProgress => "36",
+            tasks::State::Done => "32",
+            // Dim and struck: the terminal's version of what the HTML does to a
+            // cancelled item.
+            tasks::State::Cancelled => "2;9",
+            tasks::State::Blocked => "35",
+        });
+        let marker = format!("[{}]", char::from(state.byte()));
+        self.text(&marker);
+        self.reset();
+        if spaced {
+            self.text(" ");
         }
     }
 
@@ -290,16 +330,14 @@ impl Writer {
                 self.reset();
                 self.newline();
             }
-            Event::TaskListMarker(checked) => {
+            Event::TaskListMarker(checked) => self.task_marker(
                 if *checked {
-                    self.style("32");
-                    self.text("[x] ");
+                    tasks::State::Done
                 } else {
-                    self.style("33");
-                    self.text("[ ] ");
-                }
-                self.reset();
-            }
+                    tasks::State::Open
+                },
+                true,
+            ),
             Event::Html(html) | Event::InlineHtml(html) => {
                 self.style("2");
                 self.text(html.trim_end());
@@ -729,6 +767,45 @@ mod tests {
     fn task_markers_render_as_brackets() {
         let out = plain("- [ ] open\n- [x] done\n");
         assert_eq!(out, "- [ ] open\n- [x] done\n");
+    }
+
+    /// All five markers survive `--plain` byte for byte, which is what makes it
+    /// a diffable representation of the source. The extended three arrive as
+    /// three `Text` events rather than as a `TaskListMarker`, so this is really
+    /// asserting that the terminal renderer recognises them the same way the
+    /// core does — including that `- [-]nospace` is *not* a marker and is
+    /// therefore reproduced as the prose it is.
+    #[test]
+    fn five_state_markers_round_trip_through_plain() {
+        let source = "- [ ] open\n- [/] doing\n- [x] done\n- [-] dropped\n- [?] stuck\n";
+        assert_eq!(plain(source), source);
+
+        let literal = "- [-]nospace\n- [!] not a marker\n";
+        assert_eq!(plain(literal), literal);
+
+        // A bare marker at end of line keeps its shape too, with no space
+        // invented after it.
+        assert_eq!(plain("- [-]\n"), "- [-]\n");
+    }
+
+    /// ...and `--ansi` colours each of them differently, with cancelled struck.
+    #[test]
+    fn each_state_gets_its_own_colour() {
+        let out = colored("- [ ] a\n- [/] b\n- [x] c\n- [-] d\n- [?] e\n");
+        for code in [
+            "\x1b[33m[ ]",
+            "\x1b[36m[/]",
+            "\x1b[32m[x]",
+            "\x1b[2;9m[-]",
+            "\x1b[35m[?]",
+        ] {
+            assert!(out.contains(code), "missing {code:?} in {out:?}");
+        }
+        // The words themselves are untouched by the styling.
+        assert_eq!(
+            strip_escapes(&out),
+            "- [ ] a\n- [/] b\n- [x] c\n- [-] d\n- [?] e\n"
+        );
     }
 
     #[test]

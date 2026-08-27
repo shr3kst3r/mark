@@ -288,8 +288,8 @@ public final class TabBarView: NSView {
     /// Used by the overflow menu and by the Window menu's tab list, so the two
     /// read identically.
     public static func menuTitle(for tab: DocumentTab) -> String {
-        guard let open = tab.openTaskCount else { return tab.title }
-        return "\(tab.title) — \(open) open"
+        guard let outstanding = tab.openTaskCount else { return tab.title }
+        return "\(tab.title) — \(outstanding) outstanding"
     }
 
     @objc private func overflowPick(_ sender: NSMenuItem) {
@@ -670,7 +670,7 @@ public final class TabItemView: NSView {
         NSColor.separatorColor.setFill()
         NSRect(x: bounds.width - 1, y: 4, width: 1, height: bounds.height - 8).fill()
 
-        let badgeWidth = drawBadge(open: tab.openTaskCount)
+        let badgeWidth = drawBadge(outstanding: tab.openTaskCount)
         let dirtyWidth = drawDirtyDot(tab.isDirty)
 
         let leading = TabBarView.horizontalPadding + TabBarView.closeButtonSize + dirtyWidth
@@ -751,11 +751,16 @@ public final class TabItemView: NSView {
         return diameter + 4
     }
 
-    /// The open-task badge. Returns the width it consumed so the title can
-    /// avoid it.
+    /// The outstanding-task badge. Returns the width it consumed so the title
+    /// can avoid it.
+    ///
+    /// One number, not two: the bar has room for a count and the sidebar is
+    /// where `outstanding/active` is spelled out. It counts open, in-progress
+    /// and blocked, and no longer counts a cancelled item at all
+    /// (`2026-08-27-five-task-states`).
     @discardableResult
-    private func drawBadge(open: Int?) -> CGFloat {
-        guard let open else { return 0 }
+    private func drawBadge(outstanding: Int?) -> CGFloat {
+        guard let open = outstanding else { return 0 }
         let text = "\(open)" as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize - 1, weight: .semibold),
@@ -805,14 +810,22 @@ public final class TabItemView: NSView {
         // matters more than most: a preview tab is the one that disappears
         // when you open the next document.
         let preview = tab.isPreview ? ", preview" : ""
-        guard let open = tab.openTaskCount else { return tab.title + preview + edited }
-        return "\(tab.title)\(preview)\(edited), \(open) open \(open == 1 ? "task" : "tasks")"
+        guard let outstanding = tab.openTaskCount else { return tab.title + preview + edited }
+        return
+            "\(tab.title)\(preview)\(edited), \(outstanding) outstanding \(outstanding == 1 ? "task" : "tasks")"
     }
 
+    /// The badge, read out.
+    ///
+    /// "Outstanding" rather than "open" since `2026-08-27-five-task-states`:
+    /// open is one of five states now, and in-progress and blocked are also
+    /// still to do. Cancelled items leave both numbers, so the count VoiceOver
+    /// reads and the count the badge draws are the same arithmetic —
+    /// ``TaskCounts``' — rather than two.
     public override func accessibilityValueDescription() -> String? {
         guard let tab else { return nil }
-        guard let counts = tab.metadata?.tasks, counts.total > 0 else { return "no tasks" }
-        return "\(counts.open) of \(counts.total) tasks open"
+        guard let counts = tab.metadata?.tasks, counts.active > 0 else { return "no tasks" }
+        return "\(counts.outstanding) of \(counts.active) tasks outstanding"
     }
 
     public override func accessibilityValue() -> Any? { isSelected }

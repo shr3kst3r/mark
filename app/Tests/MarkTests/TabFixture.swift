@@ -55,6 +55,30 @@ final class TabFixture {
         }
     }
 
+    /// A document using all five task states, for the badge arithmetic
+    /// `2026-08-27-five-task-states` changed.
+    ///
+    /// Three outstanding (open, in-progress, blocked), one done, two
+    /// cancelled — so the badge is `3/4` where a count of "not ticked" over
+    /// "every task" would say `5/7`, and the difference is the point.
+    @discardableResult
+    func makeExtendedDocument(named name: String = "extended.md") throws -> URL {
+        let body = """
+            # Every state
+
+            - [ ] open
+            - [/] in progress
+            - [?] blocked
+            - [x] done
+            - [-] dropped
+            - [-] also dropped
+
+            """
+        let url = file(named: name)
+        try body.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
     /// A document long enough that a scroll offset of a few thousand points is
     /// actually reachable, for the rehydration test.
     func makeLongDocument(named name: String, paragraphs: Int = 400) throws -> URL {

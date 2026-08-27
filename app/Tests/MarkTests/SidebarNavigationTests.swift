@@ -381,9 +381,70 @@ struct SidebarNavigationTests {
         #expect(controller.badges.badge(for: top) == nil, "request() must not compute inline")
 
         let landed = await waitForBadge(controller, url: top)
-        #expect(landed == TaskBadge(open: 3, total: 5))
+        #expect(landed == TaskBadge(counts: TaskCounts(open: 3, done: 2, total: 5)))
+        #expect(landed?.label == "3/5")
         // Computing a badge is a file read, not a directory read.
         #expect(!lister.listings.contains { $0.hasSuffix("top.md") })
+    }
+
+    /// `2026-08-27-five-task-states`' central claim about the badge, and the
+    /// one worth a test of its own: **cancelled is the only state that leaves
+    /// the denominator.** A list where two of seven items were dropped reads
+    /// `3/5`, not `3/7`, and in-progress and blocked stay in the numerator
+    /// because they are still things you have to do.
+    @Test("cancelled leaves the badge's denominator, and nothing else does")
+    func cancelledLeavesTheDenominator() async throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        let url = fixture.url("five.md")
+        try """
+            # Five
+
+            - [ ] open
+            - [/] in progress
+            - [?] blocked
+            - [x] done
+            - [-] dropped
+            - [-] also dropped
+            - [x] done twice
+            """.write(to: url, atomically: true, encoding: .utf8)
+
+        let badge = try #require(await waitForBadge(controller, url: url))
+        #expect(badge.counts == TaskCounts(
+            open: 1, inProgress: 1, done: 2, cancelled: 2, blocked: 1, total: 7))
+        #expect(badge.outstanding == 3, "open + in-progress + blocked")
+        #expect(badge.active == 5, "seven tasks, two of them dropped")
+        #expect(badge.label == "3/5")
+    }
+
+    /// The other half of the same claim: *"for a document containing only GFM
+    /// markers every extended count is zero […] so no existing document's
+    /// badge changes."* Asserted against the arithmetic the badge used before
+    /// there were five states, computed here the old way on purpose.
+    @Test("a GFM-only document's badge is the number it always was")
+    func gfmOnlyBadgesAreUnchanged() async throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        for name in ["top.md", "docs/guide.md", "notes/alpha.md", "notes/beta.md"] {
+            let url = fixture.url(name)
+            let badge = try #require(await waitForBadge(controller, url: url))
+            let tasks = try MarkCore.tasks(source: String(contentsOf: url, encoding: .utf8))
+            #expect(badge.outstanding == tasks.filter { !$0.checked }.count, "\(name)")
+            #expect(badge.active == tasks.count, "\(name)")
+        }
+    }
+
+    /// A file whose every task was dropped shows no badge, on exactly the
+    /// grounds the existing code gives for suppressing `0/0`: it is noise.
+    @Test("a document whose every task is cancelled shows no badge")
+    func allCancelledShowsNoBadge() async throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        let url = fixture.url("dropped.md")
+        try "- [-] one\n- [-] two\n".write(to: url, atomically: true, encoding: .utf8)
+        let badge = try #require(await waitForBadge(controller, url: url))
+        #expect(badge.active == 0)
+        #expect(badge.label == nil)
     }
 
     @Test("badges are computed once and served from cache after that")
@@ -405,7 +466,7 @@ struct SidebarNavigationTests {
         let (controller, _) = make(fixture)
         let badge = try #require(
             await waitForBadge(controller, url: fixture.url("docs/deep/buried.md")))
-        #expect(badge == TaskBadge(open: 0, total: 0))
+        #expect(badge == TaskBadge(counts: TaskCounts(total: 0)))
         #expect(badge.label == nil)
     }
 

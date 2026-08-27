@@ -229,14 +229,13 @@ fn stats(path: &Path) -> (Option<String>, Option<tasks::Counts>) {
         return (None, None);
     };
     let doc = Document::parse(&source);
-    let mut counts = tasks::Counts::default();
-    for task in tasks::enumerate(&doc) {
-        counts.total += 1;
-        if !task.checked {
-            counts.open += 1;
-        }
-    }
-    (doc.title(), Some(counts))
+    // Per-state, and through the core's own counter rather than a local
+    // `!checked` — `2026-08-27-five-task-states` puts the badge arithmetic
+    // (outstanding over total-minus-cancelled) in one place, and this is one of
+    // the call sites that used to decide for itself what "open" meant. It also
+    // no longer materialises every label, which a directory listing never
+    // reads.
+    (doc.title(), Some(tasks::counts_in(&doc)))
 }
 
 /// The ignore rules in force for one listing: one matcher per directory that

@@ -16,33 +16,95 @@ struct ScriptBridgeTests {
         #expect(try ScriptBridge.decode(["kind": "ready"]) == .ready)
     }
 
-    @Test("a checkbox click carries its index and byte span")
+    @Test("a checkbox click carries its index, byte span, and both states by name")
     func toggle() throws {
         let message = try ScriptBridge.decode([
             "kind": "toggle", "index": 3, "start": 140, "end": 143,
-            "checked": true, "rendered": false,
+            "state": "done", "renderedState": "open",
         ])
-        #expect(message == .toggle(index: 3, start: 140, end: 143, checked: true, rendered: false))
+        #expect(
+            message == .toggle(index: 3, start: 140, end: 143, state: .done, renderedState: .open))
+    }
+
+    /// The four states a plain click cannot reach are reachable through the
+    /// same message — ⌥-click sends `cancelled`, and the context menu sends
+    /// whichever item was picked — so every one of the five has to decode.
+    @Test("every one of the five states decodes, in both positions")
+    func everyState() throws {
+        for state in TaskState.allCases {
+            let message = try ScriptBridge.decode([
+                "kind": "toggle", "index": 0, "start": 2, "end": 5,
+                "state": state.rawValue, "renderedState": state.rawValue,
+            ])
+            #expect(
+                message == .toggle(index: 0, start: 2, end: 5, state: state, renderedState: state))
+        }
     }
 
     @Test("JS numbers arriving as doubles still decode as byte offsets")
     func doubleNumbers() throws {
         let message = try ScriptBridge.decode([
             "kind": "toggle", "index": 0.0, "start": 14.0, "end": 17.0,
-            "checked": false, "rendered": true,
+            "state": "open", "renderedState": "done",
         ])
-        #expect(message == .toggle(index: 0, start: 14, end: 17, checked: false, rendered: true))
+        #expect(
+            message == .toggle(index: 0, start: 14, end: 17, state: .open, renderedState: .done))
     }
 
     /// M5 carries the *rendered* state alongside the requested one, because
     /// they answer different questions: what the user wants, and what the page
     /// believed the file said. Inferring the second from the first would work
-    /// today and break silently the day the click activation behaviour changes.
+    /// for a plain click and quietly turn an ⌥-click into a tick.
     @Test("a toggle without the rendered state is refused rather than guessed")
     func missingRenderedState() {
         #expect(throws: ShellMessageError.self) {
             try ScriptBridge.decode([
-                "kind": "toggle", "index": 0, "start": 14, "end": 17, "checked": true,
+                "kind": "toggle", "index": 0, "start": 14, "end": 17, "state": "done",
+            ])
+        }
+    }
+
+    /// A state name this binary does not know means `shell.js` is newer than
+    /// the app. Rounding it to done would write a byte for a state nobody
+    /// asked for, which is the one thing the write path never does.
+    @Test("an unknown state name is refused, in either position")
+    func unknownStateName() {
+        let payloads: [[String: Any]] = [
+            ["kind": "toggle", "index": 0, "start": 2, "end": 5,
+             "state": "deferred", "renderedState": "open"],
+            ["kind": "toggle", "index": 0, "start": 2, "end": 5,
+             "state": "done", "renderedState": "deferred"],
+            // Not the JSON spelling: the aria one, which is a different string
+            // on purpose and must not decode.
+            ["kind": "toggle", "index": 0, "start": 2, "end": 5,
+             "state": "in progress", "renderedState": "open"],
+        ]
+        for payload in payloads {
+            #expect(throws: ShellMessageError.self) { try ScriptBridge.decode(payload) }
+        }
+    }
+
+    /// The right-click menu's message: the same marker reference, plus where
+    /// to put the menu. It carries no requested state — the user has not picked
+    /// one yet, which is the whole reason a menu is being shown.
+    @Test("a right-click on a checkbox decodes with its position")
+    func taskMenu() throws {
+        let message = try ScriptBridge.decode([
+            "kind": "taskMenu", "index": 2, "start": 40, "end": 43,
+            "renderedState": "in-progress", "x": 120.0, "y": 64.5,
+        ])
+        #expect(
+            message
+                == .taskMenu(
+                    index: 2, start: 40, end: 43, renderedState: .inProgress, x: 120, y: 64.5))
+    }
+
+    @Test("a right-click without a position is refused")
+    func taskMenuWithoutPosition() {
+        #expect(throws: ShellMessageError.self) {
+            try ScriptBridge.decode([
+                "kind": "taskMenu", "index": 2, "start": 40, "end": 43,
+                "renderedState": "open",
             ])
         }
     }
@@ -52,7 +114,7 @@ struct ScriptBridgeTests {
         #expect(throws: ShellMessageError.self) {
             try ScriptBridge.decode([
                 "kind": "toggle", "index": 0, "start": -1, "end": 17,
-                "checked": true, "rendered": false,
+                "state": "done", "renderedState": "open",
             ])
         }
     }
@@ -63,7 +125,8 @@ struct ScriptBridgeTests {
     func fractionalOffset() {
         #expect(throws: ShellMessageError.self) {
             try ScriptBridge.decode([
-                "kind": "toggle", "index": 0, "start": 14.5, "end": 17, "checked": false,
+                "kind": "toggle", "index": 0, "start": 14.5, "end": 17, "state": "done",
+                "renderedState": "open",
             ])
         }
     }
@@ -74,7 +137,8 @@ struct ScriptBridgeTests {
         // byte for that would be writing a guessed byte.
         #expect(throws: ShellMessageError.self) {
             try ScriptBridge.decode([
-                "kind": "toggle", "index": -1, "start": 14, "end": 17, "checked": false,
+                "kind": "toggle", "index": -1, "start": 14, "end": 17, "state": "done",
+                "renderedState": "open",
             ])
         }
     }
@@ -83,7 +147,8 @@ struct ScriptBridgeTests {
     func invertedSpan() {
         #expect(throws: ShellMessageError.self) {
             try ScriptBridge.decode([
-                "kind": "toggle", "index": 0, "start": 17, "end": 14, "checked": false,
+                "kind": "toggle", "index": 0, "start": 17, "end": 14, "state": "done",
+                "renderedState": "open",
             ])
         }
     }

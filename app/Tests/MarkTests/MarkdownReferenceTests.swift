@@ -57,13 +57,66 @@ struct MarkdownReferenceTests {
     }
 
     /// The task-list section claims clickable checkboxes, so there had better
-    /// be some — and one of each state, since the page shows both.
-    @Test("its task-list section really contains tasks")
+    /// be some — and one of **each of the five states**, because the page shows
+    /// a table of all five and then demonstrates them. A state that stopped
+    /// being recognised would leave that section teaching something false while
+    /// every other test still passed.
+    @Test("its task-list section really contains tasks, in every state")
     func tasksAreReal() throws {
         let source = try #require(MarkdownReference.source)
         let tasks = try MarkCore.tasks(source: source)
         #expect(tasks.contains { $0.checked })
         #expect(tasks.contains { !$0.checked })
+        for state in TaskState.allCases {
+            #expect(
+                tasks.contains { $0.state == state },
+                "the reference documents \(state.rawValue) and demonstrates no such task")
+        }
+    }
+
+    /// The metadata section is the same kind of claim: it shows tags, dates and
+    /// a priority in a live list, and a reader has to be able to see the chips.
+    /// It also demonstrates the code-span rule, which means the page must
+    /// contain a `@due(...)` that is deliberately *not* metadata.
+    @Test("its metadata section demonstrates tags, dates, priority — and the code-span rule")
+    func metadataIsReal() throws {
+        let source = try #require(MarkdownReference.source)
+        let tasks = try MarkCore.tasks(source: source)
+        #expect(tasks.contains { $0.due != nil }, "no @due(...) survives in the page")
+        #expect(tasks.contains { $0.startDate != nil })
+        #expect(tasks.contains { $0.done != nil })
+        #expect(tasks.contains { $0.priority > 0 })
+        #expect(tasks.contains { $0.tags.contains { $0.name == "work" } })
+        // The label is what a human-facing list shows: the tokens come out of
+        // it, and `text` keeps them.
+        let tagged = try #require(tasks.first { $0.tags.contains { $0.name == "work" } })
+        #expect(!tagged.label.contains("@work"))
+        #expect(tagged.text.contains("@work"))
+
+        let html = try MarkCore.renderHTML(source: source)
+        #expect(html.contains("class=\"mk-tag\""), "the chips are not being drawn")
+        #expect(html.contains("data-mk-due="))
+        // The renderer may not read a clock, so nothing on this page can be
+        // coloured by one (`2026-08-27-inline-task-metadata`).
+        #expect(!html.contains("mk-overdue"))
+    }
+
+    /// Every state is drawn, and drawn by us: `data-mk-state` on an
+    /// `input.mk-task`, with `checked` emitted for done alone. A cancelled item
+    /// is terminal in the JSON and must still not arrive ticked.
+    @Test("the rendered reference carries a data-mk-state for every state it shows")
+    func everyStateReachesTheMarkup() throws {
+        let source = try #require(MarkdownReference.source)
+        let html = try MarkCore.renderHTML(source: source)
+        for state in TaskState.allCases {
+            #expect(
+                html.contains("data-mk-state=\"\(state.rawValue)\""),
+                "\(state.rawValue) is documented and not rendered")
+        }
+        // One `checked` per done task, and none anywhere else.
+        let tasks = try MarkCore.tasks(source: source)
+        let done = tasks.filter { $0.state == .done }.count
+        #expect(html.components(separatedBy: "\" checked>").count - 1 == done)
     }
 
     /// The point of the whole design: the page is produced by the renderer it

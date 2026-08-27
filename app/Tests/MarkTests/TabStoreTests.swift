@@ -192,6 +192,24 @@ struct TabStoreTests {
         #expect(c.openTaskCount == nil)
     }
 
+    /// A dehydrated tab's badge over all five states: the count still comes
+    /// from the file rather than a DOM, and it is now *outstanding* over
+    /// *active* (`2026-08-27-five-task-states`) — so a document where two items
+    /// were dropped badges 3, not 5.
+    @Test("a dehydrated tab's badge counts the extended states correctly")
+    func badgeCountsExtendedStatesWhileDehydrated() async throws {
+        let harness = try TabHarness(residentLimit: 1)
+        let extended = harness.store.open(try harness.fixture.makeExtendedDocument())
+        let other = harness.open("c.md")
+
+        #expect(await harness.waitForMetadata(of: [extended, other]), "metadata never arrived")
+        #expect(extended.state == .dehydrated, "limit 1 should have evicted extended.md")
+        #expect(extended.webView == nil)
+        #expect(extended.openTaskCount == 3, "open + in-progress + blocked")
+        #expect(extended.metadata?.tasks.active == 4, "two of six were dropped")
+        #expect(extended.metadata?.tasks.cancelled == 2)
+    }
+
     /// The prose-bracket regression from research §2.4, asserted from the tab
     /// layer because that is where a wrong count would actually be seen.
     @Test("a literal [ ] in prose is not counted in the badge")

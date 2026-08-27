@@ -192,6 +192,17 @@ func watchGateRoundTrip(_ harness: WatchBenchHarness) async {
         return
     }
 
+    // The page has to be running *this* build's `shell.js`, and it is worth one
+    // assertion rather than a puzzle: the click path is the one place where an
+    // app built from these sources and a page served from a stale resource
+    // bundle disagree silently, and every write gate below then fails with the
+    // reason only in OSLog. It is not hypothetical: `just bench-app` passes
+    // two `--product` flags to one `swift build`, and this SwiftPM honours
+    // only the last of them, so the `mark-bench` this runs can be older than
+    // the tree it was invoked from.
+    require(
+        (try? await view.call("return typeof window.mark.paintDue;")) as? String == "function",
+        "gate 1: the page is running this build's shell.js")
     let before = (try? Data(contentsOf: tab.url)) ?? Data()
     let statsBefore = await view.stats()
     let scrollBefore = PaintReport.double(try? await view.call("return window.pageYOffset;"))
@@ -217,8 +228,14 @@ func watchGateRoundTrip(_ harness: WatchBenchHarness) async {
         "gate 1: the task the user clicked is the one that changed")
 
     let patched = await harness.waitUntil("the DOM to catch up") {
+        // `[data-mk-state="done"]`, not `[checked]`: the attribute is emitted
+        // for done only, so the two agree today — but `checked` is the
+        // *terminal* question in the core's JSON, and selecting on it is the
+        // shape of assertion that goes quietly wrong for a cancelled marker
+        // (`2026-08-27-five-task-states`).
         let checked = try? await view.call(
-            "return document.querySelectorAll('#mk-doc input.mk-task[checked]').length;")
+            "return document.querySelectorAll('#mk-doc input.mk-task[data-mk-state=\"done\"]').length;"
+        )
         return ((checked as? NSNumber)?.intValue ?? 0) == 1
     }
     require(patched, "gate 1: the watcher patched the document")

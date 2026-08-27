@@ -93,28 +93,34 @@ final class EditorHarness {
         #expect((clicked as? Bool) == true, "no checkbox at position \(position)")
     }
 
-    /// Every checkbox in the DOM as `(idx, start, end, checked)`.
-    func domTasks(in tab: DocumentTab) async throws -> [[Int]] {
+    /// Every checkbox in the DOM as `idx:start:end:state`.
+    ///
+    /// The last field is `data-mk-state` and **not** the `checked` attribute:
+    /// since `2026-08-27-five-task-states` the core's `checked` means "the
+    /// state is terminal", which is true for a cancelled marker that the page
+    /// deliberately draws unticked. Comparing `hasAttribute('checked')` against
+    /// it therefore reports a disagreement that is not one — and, worse, would
+    /// call two genuinely different states equal.
+    func domTasks(in tab: DocumentTab) async throws -> [String] {
         let view = try #require(tab.documentView)
         let value = try await view.call(
             """
             var out = [];
             var boxes = document.querySelectorAll('#mk-doc input.mk-task');
             for (var i = 0; i < boxes.length; i++) {
-              out.push([Number(boxes[i].getAttribute('data-mk-idx')),
-                        Number(boxes[i].getAttribute('data-mk-start')),
-                        Number(boxes[i].getAttribute('data-mk-end')),
-                        boxes[i].hasAttribute('checked') ? 1 : 0]);
+              out.push([boxes[i].getAttribute('data-mk-idx'),
+                        boxes[i].getAttribute('data-mk-start'),
+                        boxes[i].getAttribute('data-mk-end'),
+                        boxes[i].getAttribute('data-mk-state')].join(':'));
             }
             return out;
             """)
-        return (value as? [[Any]])?.map { row in row.map { ($0 as? NSNumber)?.intValue ?? -1 } }
-            ?? []
+        return (value as? [String]) ?? []
     }
 
-    func coreTasks(of source: String) throws -> [[Int]] {
+    func coreTasks(of source: String) throws -> [String] {
         try MarkCore.tasks(source: source).map {
-            [$0.index, $0.start, $0.end, $0.checked ? 1 : 0]
+            "\($0.index):\($0.start):\($0.end):\($0.state.rawValue)"
         }
     }
 

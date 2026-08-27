@@ -149,7 +149,11 @@ struct TabBarTests {
         #expect(children.count == 3)
     }
 
-    @Test("each tab announces its filename and its open-task count")
+    /// "Outstanding" rather than "open" since `2026-08-27-five-task-states`:
+    /// open is one of five states now, and a badge that says "open" while
+    /// counting in-progress and blocked items would be lying to the one user
+    /// who cannot see the number.
+    @Test("each tab announces its filename and its outstanding-task count")
     func tabsAnnounceTitleAndTasks() async throws {
         let harness = try TabHarness(files: ["a.md", "c.md"])
         let (bar, store) = (harness.bar, harness.store)
@@ -157,12 +161,34 @@ struct TabBarTests {
         bar.reload()
 
         let labels = bar.items.map { $0.accessibilityLabel() ?? "" }
-        #expect(labels.contains("a.md, 3 open tasks"))
-        #expect(labels.contains("c.md"), "a document with no open tasks announces just its name")
+        #expect(labels.contains("a.md, 3 outstanding tasks"))
+        #expect(labels.contains("c.md"), "a document with nothing outstanding announces just its name")
 
         let descriptions = bar.items.map { $0.accessibilityValueDescription() ?? "" }
-        #expect(descriptions.contains("3 of 5 tasks open"))
-        #expect(descriptions.contains("0 of 2 tasks open"))
+        #expect(descriptions.contains("3 of 5 tasks outstanding"))
+        #expect(descriptions.contains("0 of 2 tasks outstanding"))
+    }
+
+    /// The tab badge over all five states: in-progress and blocked count as
+    /// outstanding, and the two dropped items leave both numbers
+    /// (`2026-08-27-five-task-states`).
+    @Test("a tab's badge counts in-progress and blocked, and drops cancelled")
+    func extendedStatesReachTheBadge() async throws {
+        let harness = try TabHarness()
+        let url = try harness.fixture.makeExtendedDocument()
+        let tab = harness.store.open(url)
+        harness.bar.reload()
+        #expect(await harness.waitForMetadata(of: [tab]), "metadata never arrived")
+        harness.bar.reload()
+
+        let counts = try #require(tab.metadata?.tasks)
+        #expect(counts == TaskCounts(
+            open: 1, inProgress: 1, done: 1, cancelled: 2, blocked: 1, total: 6))
+        #expect(tab.openTaskCount == 3, "open + in-progress + blocked")
+        let item = try #require(harness.bar.items.first { $0.tab === tab })
+        #expect(item.accessibilityLabel() == "extended.md, 3 outstanding tasks")
+        #expect(item.accessibilityValueDescription() == "3 of 4 tasks outstanding")
+        #expect(TabBarView.menuTitle(for: tab) == "extended.md — 3 outstanding")
     }
 
     @Test("exactly one tab reports itself as selected, and it is the store's")

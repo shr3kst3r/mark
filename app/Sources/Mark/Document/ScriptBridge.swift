@@ -12,21 +12,37 @@ public enum ShellMessage: Equatable, Sendable {
     /// this arrives.
     case ready
 
-    /// A `.mk-task` checkbox was clicked.
+    /// A `.mk-task` checkbox was clicked, or a state was picked for it.
     ///
     /// `start` and `end` are the marker's byte span in the file on disk, put
     /// there by the core (`data-mk-start` / `data-mk-end`). `index` is the
     /// other half of ADR-1's `(file, task-index)` identity.
     ///
-    /// Two states, not one. `checked` is what the user is asking for — the
-    /// `checked` **property**, which the browser has already flipped by the
-    /// time the click handler runs. `rendered` is what the *core* emitted, read
-    /// from the `checked` **content attribute**, which a click never touches.
-    /// Carrying both is what lets the write path tell "the user wants this on"
-    /// apart from "the page is showing bytes the file no longer has", instead
-    /// of inferring the second from the first and hoping the activation
-    /// behaviour never changes.
-    case toggle(index: Int, start: Int, end: Int, checked: Bool, rendered: Bool)
+    /// Two states, not one, and both by **name** since
+    /// `2026-08-27-five-task-states`: *"`shell.js` reports `state` and
+    /// `renderedState` as strings instead of `checked`/`rendered` booleans,
+    /// because with five states the browser can no longer compute the requested
+    /// state for us during pre-click activation."* `renderedState` is what the
+    /// core emitted, read from the `data-mk-state` content attribute, which a
+    /// click never touches; `state` is what the page derived the user is asking
+    /// for. Carrying both is what lets the write path tell "the user wants this
+    /// done" apart from "the page is showing bytes the file no longer has".
+    case toggle(index: Int, start: Int, end: Int, state: TaskState, renderedState: TaskState)
+
+    /// A `.mk-task` checkbox was right-clicked: show the state picker.
+    ///
+    /// `2026-08-27-five-task-states` makes reaching a state other than done
+    /// explicit — *"⌥-click or the context menu in the app"* — and the menu has
+    /// to be an `NSMenu` in the app rather than markup in the page, because
+    /// `2026-08-24-rust-side-math-and-diagrams` allows the page no JavaScript
+    /// of its own and a menu drawn in the document would be exactly that.
+    ///
+    /// `x` and `y` are in the page's client coordinates, which is what the web
+    /// view can convert; the same three positional fields ride along so the
+    /// menu's chosen item goes down the ordinary ``TaskToggle`` path with
+    /// nothing re-queried.
+    case taskMenu(
+        index: Int, start: Int, end: Int, renderedState: TaskState, x: Double, y: Double)
 
     /// A link was clicked. Handled in Swift so `mark` never navigates away
     /// from the shell page — ADR-2 rejects document teardown outright.
@@ -118,37 +134,29 @@ public final class ScriptBridge: NSObject, WKScriptMessageHandler {
             return .ready
 
         case "toggle":
-            guard let index = integer(payload["index"]),
-                let start = integer(payload["start"]),
-                let end = integer(payload["end"])
-            else {
-                throw ShellMessageError("toggle is missing index/start/end")
-            }
-            guard index >= 0 else {
-                // The core writes usize::MAX for a marker it could not place;
-                // that is a core bug, not something to write a byte for.
-                throw ShellMessageError("toggle carries an unplaced task index")
-            }
-            guard start < end else {
-                throw ShellMessageError("toggle span \(start)..\(end) is not a range")
-            }
-            guard start >= 0 else {
-                throw ShellMessageError("toggle span starts at \(start)")
-            }
-            guard let rendered = payload["rendered"] as? Bool else {
+            let (index, start, end, rendered) = try task(in: payload, kind: "toggle")
+            guard let name = payload["state"] as? String else {
                 // Absent means `shell.js` is older than this binary, which can
-                // only happen if the two have drifted. Guessing `!checked`
-                // would work today and silently stop working the day the
-                // activation behaviour changes.
-                throw ShellMessageError("toggle is missing the rendered state")
+                // only happen if the two have drifted. Inferring it from the
+                // rendered state would work for a plain click and quietly turn
+                // an ⌥-click into a tick.
+                throw ShellMessageError("toggle is missing the requested state")
+            }
+            guard let state = TaskState(rawValue: name) else {
+                throw ShellMessageError("toggle carries unknown state \(name)")
             }
             return .toggle(
-                index: index,
-                start: start,
-                end: end,
-                checked: (payload["checked"] as? Bool) ?? false,
-                rendered: rendered
-            )
+                index: index, start: start, end: end, state: state, renderedState: rendered)
+
+        case "taskMenu":
+            let (index, start, end, rendered) = try task(in: payload, kind: "taskMenu")
+            guard let x = (payload["x"] as? NSNumber)?.doubleValue, x.isFinite,
+                let y = (payload["y"] as? NSNumber)?.doubleValue, y.isFinite
+            else {
+                throw ShellMessageError("taskMenu is missing a finite x/y")
+            }
+            return .taskMenu(
+                index: index, start: start, end: end, renderedState: rendered, x: x, y: y)
 
         case "link":
             guard let href = payload["href"] as? String, !href.isEmpty else {
@@ -184,6 +192,42 @@ public final class ScriptBridge: NSObject, WKScriptMessageHandler {
         default:
             throw ShellMessageError("unknown kind \(kind)")
         }
+    }
+
+    /// The four fields a click and a right-click on a checkbox both carry:
+    /// ADR-1's `(index, span)` identity, and the state the page is showing.
+    ///
+    /// Shared so the two messages cannot disagree about what a valid marker
+    /// reference looks like — the second one arrived a milestone later, and the
+    /// checks here are the ones that stop a malformed message becoming a
+    /// guessed byte.
+    nonisolated private static func task(
+        in payload: [String: Any], kind: String
+    ) throws -> (index: Int, start: Int, end: Int, rendered: TaskState) {
+        guard let index = integer(payload["index"]),
+            let start = integer(payload["start"]),
+            let end = integer(payload["end"])
+        else {
+            throw ShellMessageError("\(kind) is missing index/start/end")
+        }
+        guard index >= 0 else {
+            // The core writes usize::MAX for a marker it could not place;
+            // that is a core bug, not something to write a byte for.
+            throw ShellMessageError("\(kind) carries an unplaced task index")
+        }
+        guard start < end else {
+            throw ShellMessageError("\(kind) span \(start)..\(end) is not a range")
+        }
+        guard start >= 0 else {
+            throw ShellMessageError("\(kind) span starts at \(start)")
+        }
+        guard let name = payload["renderedState"] as? String else {
+            throw ShellMessageError("\(kind) is missing the rendered state")
+        }
+        guard let rendered = TaskState(rawValue: name) else {
+            throw ShellMessageError("\(kind) carries unknown rendered state \(name)")
+        }
+        return (index, start, end, rendered)
     }
 
     /// JS has one number type, so an index can arrive as either an integer or a

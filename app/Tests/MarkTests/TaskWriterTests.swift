@@ -44,7 +44,7 @@ struct TaskWriterTests {
         let before = try Data(contentsOf: url)
 
         let result = try FileTaskWriter.shared.apply(
-            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: false, desired: true),
+            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: .open, desired: .done),
             to: url
         )
         #expect(result.checked)
@@ -58,7 +58,7 @@ struct TaskWriterTests {
 
         // ...and back again, byte for byte.
         _ = try FileTaskWriter.shared.apply(
-            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: true, desired: false),
+            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: .done, desired: .open),
             to: url
         )
         #expect(try Data(contentsOf: url) == before)
@@ -77,7 +77,7 @@ struct TaskWriterTests {
             _ = try FileTaskWriter.shared.apply(
                 TaskToggle(
                     index: index, span: try span(of: index, in: source),
-                    rendered: try MarkCore.tasks(source: source)[index].checked, desired: true),
+                    rendered: try MarkCore.tasks(source: source)[index].state, desired: .done),
                 to: url)
         }
         let after = try String(contentsOf: url, encoding: .utf8)
@@ -100,7 +100,7 @@ struct TaskWriterTests {
         let realInode = try inode(of: real)
 
         let result = try FileTaskWriter.shared.apply(
-            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: false, desired: true),
+            TaskToggle(index: 0, span: try span(of: 0, in: source), rendered: .open, desired: .done),
             to: link
         )
         #expect(result.checked)
@@ -133,7 +133,7 @@ struct TaskWriterTests {
         #expect(throws: TaskWriteRefusal.self) {
             // What a click would send from a page that has not been patched.
             try FileTaskWriter.shared.apply(
-                TaskToggle(index: 0, span: staleSpan, rendered: false, desired: true), to: url)
+                TaskToggle(index: 0, span: staleSpan, rendered: .open, desired: .done), to: url)
         }
         #expect(try Data(contentsOf: url) == before, "the file was written despite the refusal")
     }
@@ -166,7 +166,7 @@ struct TaskWriterTests {
             "the collision this test is about no longer happens; the test is stale, not the code")
 
         let result = try FileTaskWriter.shared.apply(
-            TaskToggle(index: 0, span: staleSpan, rendered: false, desired: true), to: url)
+            TaskToggle(index: 0, span: staleSpan, rendered: .open, desired: .done), to: url)
         #expect(result.index == 0)
         // The *wrong* task was written, from a stale index the write path had
         // no way to reject. Read this as the specification for the re-stamp.
@@ -180,7 +180,7 @@ struct TaskWriterTests {
         let before = try Data(contentsOf: url)
         #expect(throws: TaskWriteRefusal.self) {
             try FileTaskWriter.shared.apply(
-                TaskToggle(index: 99, span: 0..<3, rendered: false, desired: true), to: url)
+                TaskToggle(index: 99, span: 0..<3, rendered: .open, desired: .done), to: url)
         }
         #expect(try Data(contentsOf: url) == before)
     }
@@ -192,7 +192,7 @@ struct TaskWriterTests {
         var refusal: TaskWriteRefusal?
         do {
             _ = try FileTaskWriter.shared.apply(
-                TaskToggle(index: 0, span: 0..<3, rendered: false, desired: true), to: url)
+                TaskToggle(index: 0, span: 0..<3, rendered: .open, desired: .done), to: url)
         } catch let error as TaskWriteRefusal {
             refusal = error
         }
@@ -217,12 +217,94 @@ struct TaskWriterTests {
         let result = try FileTaskWriter.shared.apply(
             // The page thinks it is unchecked, so the click asks for checked.
             TaskToggle(
-                index: 0, span: try span(of: 0, in: source), rendered: false, desired: true),
+                index: 0, span: try span(of: 0, in: source), rendered: .open, desired: .done),
             to: url
         )
         #expect(result.checked)
         #expect(result.renderWasStale)
         #expect(try String(contentsOf: url, encoding: .utf8) == source)
+    }
+
+    // MARK: - Five states
+
+    /// Every state the click path can ask for, one byte each, through the
+    /// public write path — ⌥-click's `cancelled` and each item of the context
+    /// menu included. `2026-08-27-five-task-states` keeps the write primitive
+    /// unchanged precisely so this is true: *"every state anyone actually wants
+    /// is one byte"*.
+    @Test("every one of the five states is one byte, written through the same path")
+    func everyStateIsOneByte() throws {
+        let fixture = try PatchFixture()
+        let source = "# Tasks\n\n- [ ] only\n"
+        let url = try fixture.write(source)
+        let before = try Data(contentsOf: url)
+        let expected: [TaskState: Character] = [
+            .open: " ", .inProgress: "/", .done: "x", .cancelled: "-", .blocked: "?",
+        ]
+
+        for state in TaskState.allCases {
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            let result = try FileTaskWriter.shared.apply(
+                TaskToggle(
+                    index: 0, span: try span(of: 0, in: source), rendered: .open,
+                    desired: state),
+                to: url)
+            #expect(result.state == state)
+            #expect(result.checked == state.isTerminal, "\(state.rawValue)")
+
+            let after = try Data(contentsOf: url)
+            #expect(after.count == before.count, "\(state.rawValue) changed the document's length")
+            let differing = zip(before, after).enumerated().filter { $0.element.0 != $0.element.1 }
+            // Open is what the fixture already says, so writing it changes
+            // nothing at all — which is still exactly one byte's worth of
+            // difference from the file's point of view.
+            #expect(differing.count <= 1, "\(state.rawValue) changed more than one byte")
+            if let first = differing.first {
+                #expect(first.offset == result.byteOffset)
+                #expect(after[result.byteOffset] == expected[state]?.asciiValue)
+            }
+        }
+    }
+
+    /// Toggle is a one-way exit from the extended states, which is the
+    /// narrowing `2026-08-27-five-task-states` makes explicit: *"toggling a
+    /// marker that is in-progress, blocked or cancelled means 'tick this box',
+    /// so it becomes done"*. A click that silently did nothing would be worse.
+    @Test("a plain click on an extended marker ticks it")
+    func toggleFromAnExtendedStateLandsOnDone() throws {
+        for (marker, rendered) in [("/", TaskState.inProgress), ("-", .cancelled), ("?", .blocked)]
+        {
+            let fixture = try PatchFixture()
+            let source = "- [\(marker)] item\n"
+            let url = try fixture.write(source)
+            // What `shell.js` derives for a plain click on this box.
+            let result = try FileTaskWriter.shared.apply(
+                TaskToggle(
+                    index: 0, span: try span(of: 0, in: source), rendered: rendered,
+                    desired: rendered.toggled),
+                to: url)
+            #expect(result.state == .done, "\(marker)")
+            #expect(try String(contentsOf: url, encoding: .utf8) == "- [x] item\n")
+        }
+    }
+
+    /// Staleness is a *state* comparison now, not a boolean one, and this is
+    /// the case a boolean could not see: the page is showing in-progress where
+    /// the file says blocked. Both are "not checked", so the old comparison
+    /// found them equal and never re-rendered.
+    @Test("a page showing one extended state where the file has another is stale")
+    func stalenessBetweenTwoUncheckedStates() throws {
+        let fixture = try PatchFixture()
+        let source = "- [?] blocked on someone\n"
+        let url = try fixture.write(source)
+
+        let result = try FileTaskWriter.shared.apply(
+            TaskToggle(
+                index: 0, span: try span(of: 0, in: source), rendered: .inProgress,
+                desired: .done),
+            to: url)
+        #expect(result.state == .done)
+        #expect(result.renderWasStale, "two different unchecked states are not the same state")
     }
 
     /// The click sends the state it wants, not "flip whatever is there", so a
@@ -237,7 +319,7 @@ struct TaskWriterTests {
 
         for _ in 0..<3 {
             let result = try FileTaskWriter.shared.apply(
-                TaskToggle(index: 0, span: span, rendered: false, desired: true), to: url)
+                TaskToggle(index: 0, span: span, rendered: .open, desired: .done), to: url)
             #expect(result.checked)
         }
         #expect(try String(contentsOf: url, encoding: .utf8) == "- [x] a task\n")

@@ -8,7 +8,7 @@
 function __mark_no_subcommand
     for token in (commandline -opc)[2..-1]
         switch $token
-            case render toc tasks check ls grep stats doctor open tab theme goto reload sidebar nav
+            case render toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav
                 return 1
         end
     end
@@ -30,6 +30,7 @@ complete -c mark -n __mark_no_subcommand -a render -d 'Render a document to stdo
 complete -c mark -n __mark_no_subcommand -a toc -d 'Print the heading tree'
 complete -c mark -n __mark_no_subcommand -a tasks -d 'List every task in a file or directory'
 complete -c mark -n __mark_no_subcommand -a check -d 'Set, clear, or flip one checkbox in place'
+complete -c mark -n __mark_no_subcommand -a normalize -d 'Rewrite the extended task markers as plain GFM'
 complete -c mark -n __mark_no_subcommand -a ls -d 'List markdown files with titles and task counts'
 complete -c mark -n __mark_no_subcommand -a grep -d 'Search, reporting the heading each match sits under'
 complete -c mark -n __mark_no_subcommand -a stats -d 'Per-stage timings and counters'
@@ -43,7 +44,7 @@ complete -c mark -n __mark_no_subcommand -a sidebar -d 'Report the sidebar root,
 complete -c mark -n __mark_no_subcommand -a nav -d "Move the sidebar's root"
 
 # --- files and directories --------------------------------------------------
-complete -c mark -n '__fish_seen_subcommand_from render toc tasks check stats open grep' -F
+complete -c mark -n '__fish_seen_subcommand_from render toc tasks check normalize stats open grep' -F
 complete -c mark -n '__fish_seen_subcommand_from ls nav' -a '(__fish_complete_directories)'
 
 # --- per-subcommand flags ---------------------------------------------------
@@ -55,7 +56,20 @@ complete -c mark -n '__fish_seen_subcommand_from render' -l theme -r -a '(__mark
 
 complete -c mark -n '__fish_seen_subcommand_from toc tasks check ls grep stats doctor open theme goto reload sidebar nav tab' -l json -d 'Machine-readable output'
 
-complete -c mark -n '__fish_seen_subcommand_from tasks' -l open -d 'Only unchecked tasks'
+# The five task states (2026-08-27-five-task-states). Hard-coded: nothing lists
+# them, and an unknown name is a usage error rather than an empty filter.
+set -l __mark_states open in-progress done cancelled blocked
+
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l open -d 'Only tasks still outstanding'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l state -r -a "$__mark_states" -d 'Only this state (repeatable)'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l tag -r -d 'Only tasks carrying this @tag (repeatable)'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l priority -r -a '1 2 3' -d 'Only this priority or higher'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l due-before -r -a today -d 'Due strictly before a date, today, or +Nd'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l due-after -r -a today -d 'Due strictly after a date, today, or +Nd'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l overdue -d 'Only tasks due before today'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l no-due -d 'Only tasks with no @due(...)'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l sort -r -a 'due priority state index' -d 'Order the answer'
+complete -c mark -n '__fish_seen_subcommand_from tasks' -l today -r -d 'What today means, for --overdue and +Nd'
 complete -c mark -n '__fish_seen_subcommand_from tasks ls grep' -l depth -r -d 'Levels to descend'
 complete -c mark -n '__fish_seen_subcommand_from ls' -l all -d 'Include non-markdown files'
 complete -c mark -n '__fish_seen_subcommand_from grep' -s i -l ignore-case -d 'Case-insensitive matching'
@@ -64,6 +78,14 @@ complete -c mark -n '__fish_seen_subcommand_from check' -l item -r -d 'Task inde
 complete -c mark -n '__fish_seen_subcommand_from check' -l on -d 'Check the box'
 complete -c mark -n '__fish_seen_subcommand_from check' -l off -d 'Uncheck the box'
 complete -c mark -n '__fish_seen_subcommand_from check' -l toggle -d 'Flip it (the default)'
+complete -c mark -n '__fish_seen_subcommand_from check' -l state -r -a "$__mark_states" -d 'Set it to a named state'
+complete -c mark -n '__fish_seen_subcommand_from check' -l stamp -d 'Append @done(YYYY-MM-DD) when it becomes done'
+complete -c mark -n '__fish_seen_subcommand_from check' -l today -r -d 'The date --stamp writes'
+
+# `normalize` writes to stdout unless --in-place; --check writes nowhere.
+complete -c mark -n '__fish_seen_subcommand_from normalize' -l gfm -d 'Degrade to GFM (the default)'
+complete -c mark -n '__fish_seen_subcommand_from normalize' -l in-place -d 'Rewrite the file itself, atomically and under the lock'
+complete -c mark -n '__fish_seen_subcommand_from normalize' -l check -d 'Report what would change and write nothing'
 
 complete -c mark -n '__fish_seen_subcommand_from open' -l tab -d 'Add the tab without moving the reader'
 

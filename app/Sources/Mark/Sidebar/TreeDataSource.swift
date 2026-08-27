@@ -588,8 +588,13 @@ public final class TreeDataSource: NSObject, NSOutlineViewDataSource {
                 let right = badges?.badge(for: b.url)
                 switch (left, right) {
                 case (let left?, let right?):
-                    if left.open != right.open { return left.open > right.open }
-                    if left.total != right.total { return left.total > right.total }
+                    // Outstanding, then active: the badge's own two numbers, so
+                    // the order matches what the row draws
+                    // (`2026-08-27-five-task-states`).
+                    if left.outstanding != right.outstanding {
+                        return left.outstanding > right.outstanding
+                    }
+                    if left.active != right.active { return left.active > right.active }
                     return Self.byName(a, b)
                 case (nil, .some): return false
                 case (.some, nil): return true

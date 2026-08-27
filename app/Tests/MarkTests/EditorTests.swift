@@ -348,10 +348,12 @@ struct EditorTests {
 @MainActor
 struct BufferTaskWriterTests {
 
-    private func toggle(_ index: Int, in source: String, desired: Bool) throws -> TaskToggle {
+    private func toggle(
+        _ index: Int, in source: String, desired: TaskState
+    ) throws -> TaskToggle {
         let task = try MarkCore.tasks(source: source)[index]
         return TaskToggle(
-            index: index, span: task.start..<task.end, rendered: task.checked, desired: desired)
+            index: index, span: task.start..<task.end, rendered: task.state, desired: desired)
     }
 
     /// **Gate 4.** The click lands in the buffer, and the file is not touched
@@ -366,7 +368,7 @@ struct BufferTaskWriterTests {
         let onDisk = try fixture.contents()
 
         let result = try writer.apply(
-            try toggle(1, in: buffer.text, desired: true), to: fixture.url)
+            try toggle(1, in: buffer.text, desired: .done), to: fixture.url)
         #expect(result.checked)
         #expect(buffer.text == "- [ ] alpha\n- [x] bravo\n\nand a line I typed\n")
         #expect(try fixture.contents() == onDisk, "the click wrote the file behind autosave's back")
@@ -380,9 +382,36 @@ struct BufferTaskWriterTests {
         let writer = BufferTaskWriter(buffer: buffer)
 
         let result = try writer.apply(
-            try toggle(0, in: buffer.text, desired: true), to: fixture.url)
+            try toggle(0, in: buffer.text, desired: .done), to: fixture.url)
         #expect(result.checked)
         #expect(try fixture.contents() == "- [x] alpha\n- [ ] bravo\n")
+    }
+
+    /// The dirty-tab path takes the same five states as the clean one — an
+    /// ⌥-click while editing has to mean what it means the rest of the time —
+    /// and the state comes back off the core's receipt rather than being
+    /// assumed from what was asked for.
+    @Test("every state reaches the buffer, and the receipt names the one that landed")
+    func dirtyClickReachesEveryState() async throws {
+        let bytes: [TaskState: String] = [
+            .open: " ", .inProgress: "/", .done: "x", .cancelled: "-", .blocked: "?",
+        ]
+        for state in TaskState.allCases {
+            let fixture = try BufferFixture("- [ ] alpha\n")
+            let buffer = try fixture.buffer(autosave: 5.0)
+            let writer = BufferTaskWriter(buffer: buffer)
+            buffer.replaceContents("- [ ] alpha\n\nand a line I typed\n")
+            let onDisk = try fixture.contents()
+
+            let result = try writer.apply(
+                try toggle(0, in: buffer.text, desired: state), to: fixture.url)
+            #expect(result.state == state, "\(state.rawValue)")
+            #expect(result.checked == state.isTerminal, "\(state.rawValue)")
+            #expect(
+                buffer.text == "- [\(bytes[state] ?? "?")] alpha\n\nand a line I typed\n",
+                "\(state.rawValue)")
+            #expect(try fixture.contents() == onDisk, "the click wrote the file while dirty")
+        }
     }
 
     /// The buffer path keeps the span check `FileTaskWriter` makes. It is the
@@ -394,7 +423,7 @@ struct BufferTaskWriterTests {
         let fixture = try BufferFixture("- [ ] alpha\n")
         let buffer = try fixture.buffer(autosave: 5.0)
         let writer = BufferTaskWriter(buffer: buffer)
-        let stale = try toggle(0, in: buffer.text, desired: true)
+        let stale = try toggle(0, in: buffer.text, desired: .done)
 
         buffer.replaceContents("a paragraph inserted above\n\n- [ ] alpha\n")
         #expect(throws: TaskWriteRefusal.self) {
@@ -411,7 +440,7 @@ struct BufferTaskWriterTests {
         let writer = BufferTaskWriter(buffer: buffer)
         #expect(throws: TaskWriteRefusal.self) {
             try writer.apply(
-                TaskToggle(index: 4, span: 2..<5, rendered: false, desired: true),
+                TaskToggle(index: 4, span: 2..<5, rendered: .open, desired: .done),
                 to: fixture.url)
         }
     }

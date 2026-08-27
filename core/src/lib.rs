@@ -361,7 +361,19 @@ pub unsafe extern "C" fn mark_diff_json(
 pub const MARK_TASKS_BLOCKS: c_int = 1 << 0;
 
 /// Every task in the document as a JSON array of
-/// `{index, checked, start, end, line, text}`.
+/// `{index, state, checked, start, end, line, text, label, tags, due,
+/// start_date, done, priority}`.
+///
+/// `state` is `"open" | "in-progress" | "done" | "cancelled" | "blocked"`
+/// (`2026-08-27-five-task-states`). `checked` is **retained and means the state
+/// is terminal** — true for done *and* cancelled — so a script asking "is this
+/// still outstanding?" keeps getting the right answer; read `state` when the
+/// difference matters.
+///
+/// `text` is unchanged: the full flattened item text, metadata included.
+/// `label` is `text` with the recognised `@tag` / `!!!` tokens removed
+/// (`2026-08-27-inline-task-metadata`). The start *date* is `start_date`,
+/// because `start` is already this object's marker byte offset.
 ///
 /// With [`MARK_TASKS_BLOCKS`] the answer is instead
 /// `{"tasks":[…],"blocks":[{id, kind, start, end, hash, ordinal, …}]}` — the
@@ -422,29 +434,59 @@ pub unsafe extern "C" fn mark_toc_json(source: *const c_char) -> *mut c_char {
     })
 }
 
-/// `0 = off, 1 = on, 2 = toggle`, or `None` with the reason recorded.
+/// `0 = off, 1 = on, 2 = toggle, 3 = in progress, 4 = cancelled, 5 = blocked`,
+/// or `None` with the reason recorded.
 ///
 /// Shared by [`mark_toggle`] and [`mark_write_json`] so the file path and the
 /// buffer path cannot disagree about what an action means.
+///
+/// `2026-08-27-five-task-states` widens the domain rather than adding a
+/// thirteenth function: **the old encoding is a prefix of the new one**, so an
+/// existing caller passing 0, 1 or 2 is unaffected. The values are
+/// `tasks::Action`'s own discriminants, so there is no table here to drift.
 fn toggle_action(action: c_int) -> Option<tasks::Action> {
     match action {
         0 => Some(tasks::Action::Off),
         1 => Some(tasks::Action::On),
         2 => Some(tasks::Action::Toggle),
+        3 => Some(tasks::Action::InProgress),
+        4 => Some(tasks::Action::Cancel),
+        5 => Some(tasks::Action::Block),
         other => {
-            set_last_error(format!(
-                "unknown toggle action {other}; expected 0, 1, or 2"
-            ));
+            set_last_error(format!("unknown toggle action {other}; expected 0-5"));
             None
         }
     }
 }
 
+/// [`mark_toggle`]'s return encoding: `0` open, `1` done, `2` in progress,
+/// `3` cancelled, `4` blocked.
+///
+/// Done stays `1` deliberately (`2026-08-27-five-task-states`): an existing
+/// caller testing `result == 1` still correctly reads "done", and reads every
+/// other state as not-done. `-1` remains failure, so the code space stays
+/// unambiguous.
+///
+/// Note that this integer reads cancelled as **not done**, while the JSON
+/// `checked` field reads it as **terminal**. The two answer different
+/// questions; the ADR names the divergence rather than papering over it.
+fn state_code(state: tasks::State) -> c_int {
+    match state {
+        tasks::State::Open => 0,
+        tasks::State::Done => 1,
+        tasks::State::InProgress => 2,
+        tasks::State::Cancelled => 3,
+        tasks::State::Blocked => 4,
+    }
+}
+
 /// Toggle task `index` in the file at `path`, in place.
 ///
-/// `action` is 0 = off, 1 = on, 2 = toggle. Returns the new state (0 or 1), or
-/// `-1` on failure with the reason in [`mark_last_error`]. Exactly one byte of
-/// the file changes, and the write goes through a temp file and a rename.
+/// `action` is 0 = off, 1 = on, 2 = toggle, 3 = in progress, 4 = cancelled,
+/// 5 = blocked. Returns the resulting state — 0 open, 1 done, 2 in progress,
+/// 3 cancelled, 4 blocked — or `-1` on failure with the reason in
+/// [`mark_last_error`]. Exactly one byte of the file changes, and the write
+/// goes through a temp file and a rename.
 ///
 /// # Safety
 /// `path` must be a NUL-terminated UTF-8 string.
@@ -459,7 +501,7 @@ pub unsafe extern "C" fn mark_toggle(path: *const c_char, index: usize, action: 
         };
         clear_last_error();
         match tasks::toggle_file(Path::new(path), index, action) {
-            Ok(toggled) => c_int::from(toggled.checked),
+            Ok(toggled) => state_code(toggled.state),
             Err(error) => {
                 set_last_error(error.to_string());
                 -1
@@ -493,8 +535,10 @@ pub const MARK_NO_TASK: usize = usize::MAX;
 /// | non-null | a task index | both, in that order |
 ///
 /// The response is `{"written":bool,"bytes":n,"path":"…"}` for a save, and
-/// additionally `{"source":"…","index":n,"checked":bool,"offset":n,"text":"…"}`
-/// when a task was toggled. `path` in the response is the **canonicalized**
+/// additionally
+/// `{"source":"…","index":n,"state":"…","checked":bool,"offset":n,"text":"…"}`
+/// when a task was toggled. `state` is the new state's name and `checked` is
+/// "the state is terminal", exactly as in [`mark_tasks_json`]. `path` in the response is the **canonicalized**
 /// target, which is where the bytes actually landed: `write_atomically`
 /// resolves symlinks before renaming, because `rename(2)` replaces the name
 /// and not the file, and the M1 review found that destroying a symlinked note.
@@ -541,6 +585,7 @@ pub unsafe extern "C" fn mark_write_json(
             match tasks::toggle(source, index, action) {
                 Ok(toggled) => {
                     response.insert("index".into(), toggled.index.into());
+                    response.insert("state".into(), toggled.state.as_str().into());
                     response.insert("checked".into(), toggled.checked.into());
                     response.insert("offset".into(), toggled.offset.into());
                     response.insert("text".into(), toggled.text.clone().into());
@@ -1102,8 +1147,83 @@ mod tests {
         assert_eq!(unsafe { mark_toggle(path.as_ptr(), 0, 9) }, -1);
         assert_eq!(
             take(mark_last_error()).as_deref(),
-            Some("unknown toggle action 9; expected 0, 1, or 2")
+            Some("unknown toggle action 9; expected 0-5")
         );
+        // The domain's edges, either side.
+        assert_eq!(unsafe { mark_toggle(path.as_ptr(), 0, 6) }, -1);
+        assert_eq!(
+            take(mark_last_error()).as_deref(),
+            Some("unknown toggle action 6; expected 0-5")
+        );
+        assert_eq!(unsafe { mark_toggle(path.as_ptr(), 0, -1) }, -1);
+        assert_eq!(
+            take(mark_last_error()).as_deref(),
+            Some("unknown toggle action -1; expected 0-5")
+        );
+    }
+
+    /// The ABI's state encoding, over the real function. Done is 1 so that an
+    /// existing caller's `result == 1` keeps meaning "done", and every other
+    /// state reads as not-done.
+    #[test]
+    fn toggle_returns_the_resulting_state_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("states.md");
+        std::fs::write(&file, "- [ ] one\n").unwrap();
+        let path = c(file.to_str().unwrap());
+
+        // action -> (expected code, expected byte)
+        for (action, code, byte) in [
+            (1, 1, 'x'),
+            (0, 0, ' '),
+            (3, 2, '/'),
+            (4, 3, '-'),
+            (5, 4, '?'),
+            // Toggling a blocked marker ticks the box: it becomes done.
+            (2, 1, 'x'),
+        ] {
+            assert_eq!(
+                unsafe { mark_toggle(path.as_ptr(), 0, action) },
+                code,
+                "action {action}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                format!("- [{byte}] one\n"),
+                "action {action}"
+            );
+        }
+    }
+
+    /// A five-state marker reaches the JSON, and `checked` keeps answering the
+    /// question every existing consumer is asking.
+    #[test]
+    fn tasks_json_carries_state_metadata_and_the_retained_checked_flag() {
+        let source = c("- [-] dropped @due(2026-09-01) !!! @work\n");
+        let tasks = take(unsafe { mark_tasks_json(source.as_ptr(), 0) }).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&tasks).unwrap();
+        assert_eq!(parsed[0]["state"], "cancelled");
+        assert_eq!(parsed[0]["checked"], true, "cancelled is terminal");
+        assert_eq!(parsed[0]["text"], "dropped @due(2026-09-01) !!! @work");
+        assert_eq!(parsed[0]["label"], "dropped");
+        assert_eq!(parsed[0]["due"], "2026-09-01");
+        assert_eq!(parsed[0]["priority"], 3);
+        assert_eq!(parsed[0]["tags"][0]["name"], "work");
+        // The byte offset keeps the name it has always had.
+        assert_eq!(parsed[0]["start"], 2);
+        assert_eq!(parsed[0]["end"], 5);
+        assert!(parsed[0]["start_date"].is_null());
+    }
+
+    #[test]
+    fn write_json_receipt_names_the_new_state() {
+        let buffer = c("- [ ] one\n");
+        let response =
+            take(unsafe { mark_write_json(std::ptr::null(), buffer.as_ptr(), 0, 4) }).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["state"], "cancelled");
+        assert_eq!(parsed["checked"], true);
+        assert_eq!(parsed["source"], "- [-] one\n");
     }
 
     #[test]

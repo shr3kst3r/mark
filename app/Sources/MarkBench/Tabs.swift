@@ -500,10 +500,15 @@ func checkAccessibilityTree(_ harness: TabBenchHarness) async {
     require(
         harness.bar.items.allSatisfy { ($0.accessibilityChildren()?.first as? TabCloseButton) != nil },
         "every tab exposes its close button as a pressable child, hover or not")
-    let labelled = harness.bar.items.filter { ($0.accessibilityLabel() ?? "").contains("open task") }
+    // "outstanding", not "open": open is one of five states since
+    // `2026-08-27-five-task-states`, and the label counts in-progress and
+    // blocked items too.
+    let labelled = harness.bar.items.filter {
+        ($0.accessibilityLabel() ?? "").contains("outstanding task")
+    }
     require(
         !labelled.isEmpty,
-        "\(labelled.count) tab labels announce their open-task count as well as their name")
+        "\(labelled.count) tab labels announce their outstanding-task count as well as their name")
     print("  note  VoiceOver itself is NOT driven here — there is no API to script it.")
     print("        What is checked is the tree VoiceOver reads.")
 }
@@ -531,9 +536,12 @@ func checkDehydration(_ harness: TabBenchHarness) async {
     // The badge, while the DOM does not exist. ADR-4 calls this the constraint
     // most likely to be violated silently.
     guard let victim = dehydrated.first else { return }
+    // Outstanding, which is what the badge draws, and not `!checked`: a
+    // cancelled item is terminal without being ticked
+    // (`2026-08-27-five-task-states`), so the two disagree.
     let expected = (try? MarkCore.tasks(
-        source: (try? String(contentsOf: victim.url, encoding: .utf8)) ?? ""))?
-        .filter { !$0.checked }.count
+        source: (try? String(contentsOf: victim.url, encoding: .utf8)) ?? ""))
+        .map { TaskCounts($0).outstanding }
     line("dehydrated tab", victim.title)
     line("  its web view", victim.webView == nil ? "nil (as it must be)" : "STILL PRESENT")
     line("  badge shows", victim.openTaskCount.map(String.init) ?? "none")

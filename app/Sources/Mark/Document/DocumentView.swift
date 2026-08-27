@@ -922,10 +922,17 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             shellReadyWaiters = []
             for continuation in waiting { continuation.resume() }
 
-        case .toggle(let index, let start, let end, let checked, let rendered):
+        case .toggle(let index, let start, let end, let state, let renderedState):
             write(
                 TaskToggle(
-                    index: index, span: start..<end, rendered: rendered, desired: checked))
+                    index: index, span: start..<end, rendered: renderedState, desired: state))
+
+        case .taskMenu(let index, let start, let end, let renderedState, let x, let y):
+            presentStateMenu(
+                for: TaskToggle(
+                    index: index, span: start..<end, rendered: renderedState,
+                    desired: renderedState),
+                at: CGPoint(x: x, y: y))
 
         case .scroll(let y, let source):
             scrollOffset = y
@@ -980,7 +987,7 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         Log.core.info(
             """
             checkbox \(result.index) in \(url.lastPathComponent, privacy: .public) \
-            is now \(result.checked ? "checked" : "unchecked"); one byte at \(result.byteOffset)
+            is now \(result.state.rawValue, privacy: .public); one byte at \(result.byteOffset)
             """
         )
         if result.renderWasStale {
@@ -989,6 +996,102 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             )
             _Concurrency.Task { @MainActor in await self.reload() }
         }
+    }
+
+    // MARK: - The state picker
+
+    /// The five-state menu, from a right-click on a checkbox.
+    ///
+    /// `2026-08-27-five-task-states` makes every state but done explicit —
+    /// *"reaching any other state is explicit: ⌥-click or the context menu in
+    /// the app"* — and this is that menu. Picking an item goes down exactly the
+    /// same ``TaskToggle`` path a plain click takes, so nothing new writes: the
+    /// only thing that differs is which state the toggle asks for.
+    ///
+    /// The item for the state the marker is *already* in is checked and
+    /// disabled rather than hidden, because a menu whose items move depending
+    /// on the current state is a menu you cannot learn.
+    ///
+    /// Built here rather than in the page for the reason ADR-5 gives: the
+    /// emitted document gets no JavaScript, and a menu drawn in markup would
+    /// need some.
+    func presentStateMenu(for toggle: TaskToggle, at pagePoint: CGPoint) {
+        guard let webView else { return }
+        let menu = stateMenu(for: toggle)
+        // The page reports client coordinates, which grow downwards from the
+        // top of the viewport; `WKWebView` is an unflipped `NSView`, so y has
+        // to be turned over. Getting this wrong puts the menu at the other end
+        // of the window, which is the kind of bug a screenshot finds and a
+        // test does not.
+        let point = NSPoint(x: pagePoint.x, y: webView.bounds.height - pagePoint.y)
+        Log.shell.debug(
+            "state menu for task \(toggle.index) (\(toggle.rendered.rawValue, privacy: .public))")
+        guard let present = presentMenu else {
+            menu.popUp(positioning: nil, at: point, in: webView)
+            return
+        }
+        present(menu, point)
+    }
+
+    /// The menu itself, built and returned rather than shown.
+    ///
+    /// Separate from showing it because `NSMenu.popUp` is modal: a test that
+    /// exercised the click path with the real presenter in place would stop
+    /// the run dead on a menu nobody can dismiss. ``presentMenu`` is the seam
+    /// the tests substitute, and this is what they inspect.
+    func stateMenu(for toggle: TaskToggle) -> NSMenu {
+        let menu = NSMenu(title: "Task state")
+        menu.autoenablesItems = false
+        for state in TaskState.allCases {
+            let item = NSMenuItem(
+                title: Self.menuTitle(for: state),
+                action: #selector(pickState(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = StatePick(toggle: toggle, state: state)
+            item.state = state == toggle.rendered ? .on : .off
+            item.isEnabled = state != toggle.rendered
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// Show the state menu some other way. `nil` means `NSMenu.popUp`, which
+    /// is what the app does; the tests put a capture here instead.
+    public var presentMenu: ((NSMenu, NSPoint) -> Void)?
+
+    /// What one menu item carries: the click it came from, and the state it
+    /// would ask for. A box rather than two properties on the view, so two
+    /// menus racing cannot read each other's target.
+    private final class StatePick: NSObject {
+        let toggle: TaskToggle
+        let state: TaskState
+        init(toggle: TaskToggle, state: TaskState) {
+            self.toggle = toggle
+            self.state = state
+        }
+    }
+
+    /// The menu's titles. `⌥-click` is named on the cancelled item because a
+    /// modifier nobody documents is a modifier nobody finds.
+    static func menuTitle(for state: TaskState) -> String {
+        switch state {
+        case .open: return "Open"
+        case .inProgress: return "In Progress"
+        case .done: return "Done"
+        case .cancelled: return "Cancelled (⌥-click)"
+        case .blocked: return "Blocked"
+        }
+    }
+
+    @objc private func pickState(_ sender: NSMenuItem) {
+        guard let pick = sender.representedObject as? StatePick else { return }
+        write(
+            TaskToggle(
+                index: pick.toggle.index,
+                span: pick.toggle.span,
+                rendered: pick.toggle.rendered,
+                desired: pick.state))
     }
 
     /// Links never navigate the shell page. Local markdown opens in place;

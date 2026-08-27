@@ -167,7 +167,7 @@ Three things worth knowing:
   is the broken one.
 
 **Cask.** `brew upgrade --cask` will not do it. The cask's `version` is a literal
-(`"0.2.0"`) and its `sha256` is `:no_check`, so nothing Homebrew compares ever
+(`"0.3.0"`) and its `sha256` is `:no_check`, so nothing Homebrew compares ever
 changes and the cask is never outdated. Rebuild the zip and reinstall over it:
 
 ```sh

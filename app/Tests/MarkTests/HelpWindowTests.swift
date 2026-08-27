@@ -59,7 +59,7 @@ struct HelpWindowTests {
 
         #expect(throws: TaskWriteRefusal.self) {
             _ = try writer.apply(
-                TaskToggle(index: 0, span: 0..<3, rendered: false, desired: true), to: url)
+                TaskToggle(index: 0, span: 0..<3, rendered: .open, desired: .done), to: url)
         }
         let after = try Data(contentsOf: url)
         #expect(after == before, "the shipped reference was modified")

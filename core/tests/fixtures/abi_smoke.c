@@ -414,6 +414,60 @@ static void tasks_json_carries_blocks_on_request(void) {
     mark_free(both);
 }
 
+/*
+ * 2026-08-27-five-task-states and -inline-task-metadata, from C: the widened
+ * `action` domain, the state code mark_toggle returns, and the new JSON fields.
+ * This file is the only thing that compiles mark.h, so the header's promises
+ * are checked here or nowhere.
+ */
+static void tasks_json_carries_state_and_metadata(void) {
+    char *json = mark_tasks_json("- [-] dropped @due(2026-09-01) !!\n", 0);
+    ok(json != NULL, "mark_tasks_json returned NULL");
+    if (json == NULL) {
+        return;
+    }
+    ok(strstr(json, "\"state\":\"cancelled\"") != NULL, "no state field");
+    /* Retained, and "terminal": cancelled reads as checked. */
+    ok(strstr(json, "\"checked\":true") != NULL, "cancelled is not terminal");
+    ok(strstr(json, "\"text\":\"dropped @due(2026-09-01) !!\"") != NULL, "text changed meaning");
+    ok(strstr(json, "\"label\":\"dropped\"") != NULL, "no stripped label");
+    ok(strstr(json, "\"due\":\"2026-09-01\"") != NULL, "no typed due date");
+    ok(strstr(json, "\"priority\":2") != NULL, "no priority");
+    mark_free(json);
+}
+
+static void toggle_returns_a_state_code(void) {
+    char path[] = "/tmp/mark-abi-state-XXXXXX";
+    int fd = mkstemp(path);
+    ok(fd >= 0, "could not make a temp file");
+    if (fd < 0) {
+        return;
+    }
+    (void)write(fd, "- [ ] one\n", 10);
+    close(fd);
+
+    /* 1 = on -> 1 done: what an existing caller testing `== 1` reads. */
+    ok(mark_toggle(path, 0, 1) == 1, "action 1 did not return done");
+    /* 4 = cancelled -> 3, and 5 = blocked -> 4. */
+    ok(mark_toggle(path, 0, 4) == 3, "action 4 did not return cancelled");
+    ok(mark_toggle(path, 0, 5) == 4, "action 5 did not return blocked");
+    /* 3 = in progress -> 2. */
+    ok(mark_toggle(path, 0, 3) == 2, "action 3 did not return in progress");
+    /* Toggling an extended marker ticks it. */
+    ok(mark_toggle(path, 0, 2) == 1, "toggle did not tick the box");
+    /* And the domain still ends at 5. */
+    ok(mark_toggle(path, 0, 6) == -1, "action 6 was accepted");
+
+    char *receipt = mark_write_json(NULL, "- [ ] one\n", 0, 4);
+    ok(receipt != NULL, "mark_write_json returned NULL");
+    if (receipt != NULL) {
+        ok(strstr(receipt, "\"state\":\"cancelled\"") != NULL, "no state in the receipt");
+        ok(strstr(receipt, "- [-] one") != NULL, "the wrong byte was written");
+        mark_free(receipt);
+    }
+    remove(path);
+}
+
 static void write_json_saves_and_toggles(void) {
     char path[] = "/tmp/mark-abi-smoke-XXXXXX";
     int fd = mkstemp(path);
@@ -472,6 +526,8 @@ int main(void) {
     code_carries_slots_not_colours();
     tree_flags_reach_the_core();
     tasks_json_carries_blocks_on_request();
+    tasks_json_carries_state_and_metadata();
+    toggle_returns_a_state_code();
     write_json_saves_and_toggles();
 
     printf("  %d checks, %d failures\n", checks, failures);

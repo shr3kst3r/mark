@@ -1,20 +1,38 @@
 import Foundation
 
-/// `3/7` — open and total tasks for one markdown file.
+/// `3/7` — outstanding and active tasks for one markdown file.
+///
+/// The two numbers are `2026-08-27-five-task-states`' arithmetic, and it does
+/// not live here: ``TaskCounts`` owns it, so the sidebar, the tab bar and the
+/// dirty-buffer path cannot each answer "how many are left?" differently.
+/// Outstanding is open + in-progress + blocked; **cancelled is the only state
+/// that leaves the denominator**, so a dropped item stops sitting in it for
+/// ever. For a document containing only GFM markers this reduces to
+/// `open / total` and no existing badge changes.
 public struct TaskBadge: Equatable, Sendable {
-    public let open: Int
-    public let total: Int
+    public let counts: TaskCounts
 
-    public init(open: Int, total: Int) {
-        self.open = open
-        self.total = total
+    public init(counts: TaskCounts) {
+        self.counts = counts
     }
 
-    /// What the sidebar draws. `nil` for a document with no tasks at all —
-    /// a `0/0` on every prose file is noise, not information.
+    public init(_ tasks: [Task]) {
+        self.init(counts: TaskCounts(tasks))
+    }
+
+    /// Still to do. The badge's numerator, and what decides its colour.
+    public var outstanding: Int { counts.outstanding }
+
+    /// The badge's denominator: everything that is not cancelled.
+    public var active: Int { counts.active }
+
+    /// What the sidebar draws. `nil` for a document with no tasks at all — a
+    /// `0/0` on every prose file is noise, not information — and, on the same
+    /// grounds, `nil` for a document whose every task is cancelled, which is
+    /// the `0/0` the new denominator can produce.
     public var label: String? {
-        guard total > 0 else { return nil }
-        return "\(open)/\(total)"
+        guard active > 0 else { return nil }
+        return "\(outstanding)/\(active)"
     }
 }
 
@@ -172,7 +190,7 @@ public final class TaskBadgeService {
     /// main thread.
     private nonisolated static func compute(source: String) -> TaskBadge? {
         guard let tasks = try? MarkCore.tasks(source: source) else { return nil }
-        return TaskBadge(open: tasks.filter { !$0.checked }.count, total: tasks.count)
+        return TaskBadge(tasks)
     }
 
     private nonisolated static func compute(_ url: URL) -> TaskBadge? {
@@ -184,9 +202,9 @@ public final class TaskBadgeService {
             guard let guessed = try? String(contentsOf: url, usedEncoding: &encoding),
                 let tasks = try? MarkCore.tasks(source: guessed)
             else { return nil }
-            return TaskBadge(open: tasks.filter { !$0.checked }.count, total: tasks.count)
+            return TaskBadge(tasks)
         }
         guard let tasks = try? MarkCore.tasks(source: source) else { return nil }
-        return TaskBadge(open: tasks.filter { !$0.checked }.count, total: tasks.count)
+        return TaskBadge(tasks)
     }
 }

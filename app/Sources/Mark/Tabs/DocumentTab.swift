@@ -39,7 +39,7 @@ public enum HydrationState: String, Sendable, Equatable {
 /// `mark_tasks_json` over the bytes on disk and never from a DOM query.
 public struct DocumentMetadata: Sendable, Equatable {
 
-    /// Open and total task counts, straight from `mark_tasks_json`.
+    /// Per-state task counts, straight from `mark_tasks_json`.
     public let tasks: TaskCounts
 
     /// The document's own first heading, when it has one. Used for the tooltip
@@ -80,10 +80,10 @@ public struct DocumentMetadata: Sendable, Equatable {
         let headings = (try? MarkCore.toc(source: source)) ?? []
         let heading = headings.first(where: { $0.level == 1 })?.text ?? headings.first?.text
         return DocumentMetadata(
-            tasks: TaskCounts(
-                open: tasks.filter { !$0.checked }.count,
-                total: tasks.count
-            ),
+            // Counted in one place, by the same rule the core uses: outstanding
+            // is open + in-progress + blocked, and cancelled leaves the
+            // denominator (`2026-08-27-five-task-states`).
+            tasks: TaskCounts(tasks),
             documentTitle: heading?.isEmpty == true ? nil : heading,
             headings: headings
         )
@@ -111,10 +111,10 @@ public struct DocumentMetadata: Sendable, Equatable {
             headings.first(where: { $0.level == 1 })?.text
             ?? headings.first?.text
         return DocumentMetadata(
-            tasks: TaskCounts(
-                open: tasks.filter { !$0.checked }.count,
-                total: tasks.count
-            ),
+            // Counted in one place, by the same rule the core uses: outstanding
+            // is open + in-progress + blocked, and cancelled leaves the
+            // denominator (`2026-08-27-five-task-states`).
+            tasks: TaskCounts(tasks),
             documentTitle: heading?.isEmpty == true ? nil : heading,
             headings: headings
         )
@@ -162,10 +162,15 @@ public final class DocumentTab: Identifiable {
     /// the badge simply does not draw until then.
     public private(set) var metadata: DocumentMetadata?
 
-    /// Open task count for the badge, or `nil` when unknown or zero.
+    /// Outstanding task count for the badge, or `nil` when unknown or zero.
+    ///
+    /// Outstanding, not open: an in-progress or blocked item is still something
+    /// you have to do, and a cancelled one is not
+    /// (`2026-08-27-five-task-states`). For a document containing only GFM
+    /// markers this is the same number it always was.
     public var openTaskCount: Int? {
-        guard let open = metadata?.tasks.open, open > 0 else { return nil }
-        return open
+        guard let outstanding = metadata?.tasks.outstanding, outstanding > 0 else { return nil }
+        return outstanding
     }
 
     /// `window.pageYOffset` for this document.

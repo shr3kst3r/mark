@@ -10,7 +10,7 @@
 .\"
 .\" Preview it with:  man packaging/mark.1
 .\" Lint it with:     mandoc -T lint packaging/mark.1
-.TH MARK 1 "2026-08-25" "mark 0.2.0" "User Commands"
+.TH MARK 1 "2026-08-27" "mark 0.3.0" "User Commands"
 .SH NAME
 mark \- fast native markdown viewer for macOS, and its CLI
 .SH SYNOPSIS
@@ -28,7 +28,8 @@ Commands split into two kinds, and the distinction is the one that matters when
 scripting:
 .TP
 .B local
-.BR render ,\  toc ,\  tasks ,\  check ,\  ls ,\  grep ,\  stats ,\  doctor ,
+.BR render ,\  toc ,\  tasks ,\  check ,\  normalize ,\  ls ,\  grep ,\  stats ,
+.BR doctor ,
 and
 .B theme
 with
@@ -70,20 +71,102 @@ top-level blocks, which is the first-paint tunable the app itself uses.
 .BI "toc " file " [--json]"
 The heading tree: level, text, anchor, byte offsets, line, and block id.
 .TP
-.BI "tasks " [path] " [--open] [--json] [--depth " N ]
+.BI "tasks " [path] " [--open] [--state " name "] [--tag " tag "] [--priority " N "] \
+[--due-before " when "] [--due-after " when "] [--overdue] [--no-due] [--sort " key "] \
+[--today " YYYY-MM-DD "] [--json] [--depth " N ]
 Every task in a file or directory: path, index in document order, state, text,
 and byte span.
+.IP
+There are five states \(em
+.BR [\ ] " open, " [/] " in progress, " [x] " done, " [-] " cancelled, " [?] " blocked"
+\(em and one byte between the brackets is all that separates them.
 .B --open
-lists only unchecked ones.
+lists everything still
+.IR outstanding :
+open, in progress, or blocked. Cancelled and done are both finished with.
+.B --state
+is the precise form, takes one of
+.BR open ,\  in-progress ,\  done ,\  cancelled ,\  blocked ,
+and may be repeated, in which case any of them matches. An unknown name is a
+usage error rather than a filter that matches nothing.
+.IP
+The rest filter on the metadata a task carries in its own text \(em
+.BR @tag ,
+.BR @due( YYYY-MM-DD ),
+.BR @start( ... ),
+.BR @done( ... ),
+and
+.BR ! / !! / !!!
+for priority 1 to 3.
+.B --tag
+takes a tag with or without its
+.RB \(oq @ \(cq
+and may be repeated;
+.B --priority
+matches that level
+.IR "or higher" ;
+.B --no-due
+matches tasks with no date at all.
+.B --due-before
+and
+.B --due-after
+each take a date, the word
+.BR today ,
+or a
+.BI + N d
+offset, and compare strictly.
+.B --overdue
+is due before today.
+.B --sort
+orders the answer by
+.BR due ,\  priority ,\  state ,
+or
+.B index
+(document order, the default); every key is a stable sort over document order,
+so ties come out in the order they would have printed anyway.
+.IP
+.B --today
+is what \(oqtoday\(cq means, for
+.B --overdue
+and for
+.BI + N d
+offsets. It defaults to the local date, and it is the
+.I only
+place in
+.B mark
+where a date comparison reads a clock \(em rendering never does, so
+.B "render --html"
+output is reproducible. Naming it explicitly is what makes a filter testable
+without freezing the machine's clock.
 .TP
-.BI "check " file " --item " N " [--on|--off|--toggle] [--json]"
+.BI "check " file " --item " N " [--on|--off|--toggle|--state " name "] [--stamp] \
+[--today " YYYY-MM-DD "] [--json]"
 Flip one checkbox in place. Exactly one byte changes \(em the character between
 the brackets \(em and the write is temp-file-plus-rename through the real file
 behind any symlink. The document is re-parsed immediately before the write, and
 if the target span no longer holds a task marker the write is refused rather
 than guessed.
 .B --toggle
-is the default.
+is the default: open becomes done, done becomes open, and any other state
+becomes done, because ticking a box ticks it. That makes a toggle a one-way exit
+from in progress, cancelled and blocked \(em reaching those is what
+.B --state
+is for, and it takes any of the five names.
+.IP
+.B --stamp
+additionally appends
+.BI @done( YYYY-MM-DD )
+to the item when it
+.I becomes
+done, at an offset taken from the parser rather than from a text search. It is
+opt-in because it is the one write in the product that is not a single byte, and
+it happens in the
+.I same
+atomic write as the toggle \(em two writes would take the lock twice and leave a
+window where the file says done and does not say when. An item that already
+carries a date is not stamped twice.
+.B --today
+sets the date it writes.
 .IP
 The write takes an exclusive
 .BR flock (2)
@@ -92,8 +175,53 @@ first and refuses, with exit status 6, if another
 holds it \(em typically a window with unsaved edits to the same file. The lock
 is never waited on.
 .TP
+.BI "normalize " file " [--gfm] [--in-place] [--check]"
+Rewrite mark's three non-GFM markers as plain GitHub-flavoured markdown, so a
+document publishes cleanly, and do it
+.IR losslessly :
+.B [-]
+becomes
+.BR "[x] ~~struck~~" ,
+which is how a dropped item should read on GitHub, and
+.B [/]
+and
+.B [?]
+become
+.B [\ ]
+carrying a
+.B @doing
+or
+.B @blocked
+tag, so the state is still in the file and the degrade is reversible.
+.IP
+It writes to
+.B stdout
+by default.
+.B --in-place
+is required to touch the file, because a verb whose name does not obviously
+write should not rewrite a document as its default behaviour; that path goes
+through the same atomic write and the same
+.BR flock (2)
+as every other write, and so exits 6 rather than clobbering a document another
+.B mark
+holds.
+.B --check
+reports how many markers would be rewritten and writes nothing anywhere.
+.B --gfm
+names the only direction there is and is the default; it exists so that adding
+the reverse later cannot change what a bare
+.B normalize
+does. Running it twice is a no-op: an already-struck item is not struck again,
+and a tag it would have added is not added twice.
+.TP
 .BI "ls " [dir] " [--json] [--depth " N "] [--all]"
-Markdown files with titles and open/total task counts. Honours
+Markdown files with titles and outstanding/active task counts \(em where
+.I active
+excludes cancelled items, so a list you abandoned two of seven items in reads
+.BR 3/5 .
+With
+.B --json
+every state is counted separately. Honours
 .IR .gitignore .
 .B --all
 includes non-markdown files.
@@ -239,6 +367,19 @@ A file that is missing or cannot be read.
 .B 3
 A task index out of range, or a task marker that moved between the read and the
 write. Nothing was written.
+.IP
+Note that a task's index is its position in document order among the tasks
+.B mark
+recognises, and that set grew when
+.BR [/] ,
+.B [-]
+and
+.B [?]
+became markers. A document that gains one of those renumbers every task below
+it, so an index held across such an edit \(em in a script, or in an
+already-printed listing \(em is stale. Re-read
+.B tasks
+rather than reusing an index across a change to the file.
 .TP
 .B 4
 The app could not be reached: no socket, a launch that failed, a reply that

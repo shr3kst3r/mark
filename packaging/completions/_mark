@@ -20,6 +20,29 @@ _mark_themes() {
   (( ${#names} )) && _describe -t themes 'theme' names
 }
 
+# The five task states, from `2026-08-27-five-task-states`. Hard-coded rather
+# than asked for: the CLI has no verb that lists them, and an unknown name is a
+# usage error, so offering the wrong set would be offering a failure.
+_mark_states() {
+  local -a states
+  states=(
+    'open:not started'
+    'in-progress:started, not finished'
+    'done:finished'
+    'cancelled:dropped, and out of the count'
+    'blocked:waiting on something else'
+  )
+  _describe -t states 'state' states
+}
+
+# `--due-before`/`--due-after` take a date, `today`, or a `+Nd` offset. Only the
+# two words are completable; a date is typed.
+_mark_when() {
+  local -a when
+  when=('today:the local date, or --today' '+7d:seven days from today')
+  _describe -t when 'when' when
+}
+
 _mark_tabs() {
   # Only if the app is already listening: completion must never start a GUI.
   local -a tabs
@@ -37,6 +60,7 @@ _mark() {
     'toc:print the heading tree'
     'tasks:list every task in a file or directory'
     'check:set, clear, or flip one checkbox in place'
+    'normalize:rewrite the extended task markers as plain GFM'
     'ls:list markdown files with titles and task counts'
     'grep:search, reporting the heading each match sits under'
     'stats:per-stage timings and counters for one document'
@@ -73,7 +97,16 @@ _mark() {
           ;;
         tasks)
           _arguments \
-            '--open[only unchecked tasks]' \
+            '--open[only tasks still outstanding: open, in progress, or blocked]' \
+            '*--state=[only this state (repeatable)]:state:_mark_states' \
+            '*--tag=[only tasks carrying this @tag (repeatable)]:tag:' \
+            '--priority=[only this priority or higher: 1, 2, or 3]:priority:(1 2 3)' \
+            '--due-before=[only tasks due strictly before a date]:when:_mark_when' \
+            '--due-after=[only tasks due strictly after a date]:when:_mark_when' \
+            '--overdue[only tasks due before today]' \
+            '--no-due[only tasks with no @due(...) at all]' \
+            '--sort=[order the answer]:key:(due priority state index)' \
+            '--today=[what today means, for --overdue and +Nd]:date:' \
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
             '1:path:_files'
@@ -81,10 +114,22 @@ _mark() {
         check)
           _arguments \
             '--item=[task index in document order]:index:' \
-            '(--off --toggle)--on[check the box]' \
-            '(--on --toggle)--off[uncheck the box]' \
-            '(--on --off)--toggle[flip it (the default)]' \
+            '(--off --toggle --state)--on[check the box]' \
+            '(--on --toggle --state)--off[uncheck the box]' \
+            '(--on --off --state)--toggle[flip it (the default)]' \
+            '(--on --off --toggle)--state=[set it to a named state]:state:_mark_states' \
+            '--stamp[append @done(YYYY-MM-DD) when the task becomes done]' \
+            '--today=[the date --stamp writes]:date:' \
             '--json[machine-readable output]' \
+            '1:file:_files -g "*.md"'
+          ;;
+        normalize)
+          # Writes to stdout unless --in-place, so the two are opposites and
+          # --check is neither.
+          _arguments \
+            '--gfm[degrade to GFM (the default, and the only direction)]' \
+            '(--check)--in-place[rewrite the file itself, atomically and under the lock]' \
+            '(--in-place)--check[report what would change and write nothing]' \
             '1:file:_files -g "*.md"'
           ;;
         ls)

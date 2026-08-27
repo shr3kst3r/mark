@@ -232,11 +232,159 @@ struct ShellAssetsTests {
     @Test("the patch re-stamps task attributes, and the click reports both states")
     func restampIsPresent() throws {
         let js = try code("shell.js")
-        for attribute in ["data-mk-idx", "data-mk-start", "data-mk-end"] {
+        for attribute in ["data-mk-idx", "data-mk-start", "data-mk-end", "data-mk-state"] {
             #expect(
                 js.contains("input.setAttribute(\"\(attribute)\""),
                 "\(attribute) is read on a click but never re-stamped after a patch")
         }
-        #expect(js.contains("hasAttribute(\"checked\")"))
+        #expect(js.contains("getAttribute(\"data-mk-state\")"))
+    }
+
+    /// > `shell.js` reports `state` and `renderedState` as strings instead of
+    /// > `checked`/`rendered` booleans, because with five states the browser can
+    /// > no longer compute the requested state for us during pre-click
+    /// > activation.
+    ///
+    /// The click handler must therefore not read `target.checked` at all: for a
+    /// cancelled marker that property is false while the core's `checked` — "the
+    /// state is terminal" — is true, so a handler that reads it asks the wrong
+    /// question and gets a plausible answer.
+    @Test("the click handler derives the requested state instead of reading target.checked")
+    func clickDoesNotReadTheCheckedProperty() throws {
+        let js = try code("shell.js")
+        #expect(!js.contains("target.checked"))
+        #expect(js.contains("event.altKey"), "⌥-click is what reaches cancelled")
+        #expect(js.contains("\"cancelled\""))
+        // Both states, by name, on the message the write path reads.
+        #expect(js.contains("renderedState"))
+        #expect(js.contains("\"taskMenu\""))
+    }
+
+    /// The restamp's count-mismatch refusal, which
+    /// `2026-08-27-five-task-states` turns into a standing constraint: *"a task
+    /// marker stays an `input.mk-task` element […] so a marker rendered as
+    /// anything else breaks incremental patching silently."* Five states are a
+    /// `data-mk-state` attribute on that element, never a different element.
+    @Test("the restamp still refuses a checkbox count that does not line up")
+    func restampRefusesACountMismatch() throws {
+        let js = try code("shell.js")
+        #expect(js.contains("querySelectorAll(\"input.mk-task\")"))
+        #expect(js.contains("inputs.length !== tasks.length"))
+        #expect(js.contains("checkboxes, the source has "))
+    }
+
+    // MARK: - The two stylesheets
+
+    /// The shell's checkbox rules and the core's `document_css()` are the same
+    /// rules, and this is what says so.
+    ///
+    /// `2026-08-27-five-task-states` accepts owning checkbox rendering and
+    /// names the cost: *"two stylesheets […] must be edited in lockstep.
+    /// `core/src/render.rs` and `app/Resources/shell.css` are deliberately not
+    /// generated from one source."* Not generated, so pinned — otherwise a box
+    /// drawn one way in the window and another way in `mark render --html`
+    /// output is exactly the GUI/CLI capability split ADR-5 exists to prevent,
+    /// and nothing would fail.
+    @Test("the shell stylesheet's checkbox rules match the core's")
+    func checkboxRulesMatchTheCore() throws {
+        let core = try Self.coreDocumentCSS()
+        let shell = try text("shell.css")
+
+        var selectors = [
+            "input.mk-task", "input.mk-task:focus-visible", ".mk-tag",
+            "li:has(> input.mk-task[data-mk-state=\"cancelled\"])",
+        ]
+        // Open is the bare box — the base rule *is* its rule — so it is the one
+        // state with no selector of its own, in either file. Asserted rather
+        // than skipped, because a rule appearing for it in one file and not the
+        // other is exactly the drift this test is for.
+        for state in TaskState.allCases where state != .open {
+            selectors.append("input.mk-task[data-mk-state=\"\(state.rawValue)\"]")
+        }
+        for stylesheet in [core, shell] {
+            #expect(
+                Self.declarations(of: "input.mk-task[data-mk-state=\"open\"]", in: stylesheet)
+                    == nil,
+                "open gained a rule of its own; add it to both stylesheets and to this list")
+        }
+
+        for selector in selectors {
+            let inCore = try #require(
+                Self.declarations(of: selector, in: core),
+                "the core's stylesheet has no rule for \(selector)")
+            let inShell = try #require(
+                Self.declarations(of: selector, in: shell),
+                "shell.css has no rule for \(selector) — the two have drifted")
+            #expect(inCore == inShell, "\(selector) differs between the two stylesheets")
+        }
+    }
+
+    /// Overdue colouring is the *app's*, and only the app's: the core may not
+    /// read a clock (`2026-08-27-inline-task-metadata`), so the two stylesheets
+    /// are asymmetric here on purpose and the test says which way round.
+    @Test("due-date colouring exists in the shell and not in the core")
+    func overdueColouringIsTheAppsAlone() throws {
+        let core = try Self.coreDocumentCSS()
+            + (try MarkCore.renderHTML(source: "- [ ] a task @due(2026-09-01)\n"))
+        let shell = try text("shell.css")
+        #expect(shell.contains(".mk-tag.mk-overdue"))
+        #expect(shell.contains(".mk-tag.mk-due-today"))
+        #expect(!core.contains("mk-overdue"), "the renderer compared a date")
+        #expect(!core.contains("mk-due-today"), "the renderer compared a date")
+        // ...and the class is put on by the injected script, from the chip's
+        // own data, rather than by the renderer.
+        let js = try code("shell.js")
+        #expect(js.contains("data-mk-due"))
+        #expect(js.contains("mk-overdue"))
+    }
+
+    /// `document_css()`'s stylesheet, read from the Rust source it is written
+    /// in.
+    ///
+    /// Not from the core over the ABI: `mark_render_html` answers with a
+    /// document *fragment* — the shell page supplies the CSS — and the only
+    /// caller that gets the standalone document with a `<style>` in it is
+    /// `mark render --html`, which is a process this suite does not run. The
+    /// two files are what the ADR says must move in lockstep, so the two files
+    /// are what this compares.
+    private static func coreDocumentCSS() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // MarkTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // app
+            .deletingLastPathComponent()  // the repository root
+        let source = try String(
+            contentsOf: root.appendingPathComponent("core/src/render.rs"), encoding: .utf8)
+        let start = try #require(
+            source.range(of: "pub fn document_css()"), "render.rs has no document_css()")
+        let end = try #require(
+            source.range(of: "token_css()", range: start.upperBound..<source.endIndex),
+            "document_css() no longer ends by appending token_css()")
+        // A `\` at the end of a line in a Rust string literal swallows the
+        // newline *and* the next line's indentation, which is how the tick's
+        // data URI is written across four lines and arrives as one. Undo it
+        // here or the comparison fails on whitespace that does not exist in
+        // the string the core actually emits.
+        return source[start.upperBound..<end.lowerBound]
+            .replacingOccurrences(of: "\\\n", with: "")
+    }
+
+    /// One rule's declarations, normalised: quotes unified, whitespace
+    /// collapsed, and sorted, so the core's compact one-liner and the shell's
+    /// expanded block compare equal while a changed value does not.
+    private static func declarations(of selector: String, in css: String) -> [String]? {
+        let flat = css.replacingOccurrences(of: "'", with: "\"")
+            .split(separator: "\n").joined(separator: " ")
+        // A prefix match would let `input.mk-task` match
+        // `input.mk-task:focus-visible`, so the selector has to end at its
+        // brace.
+        guard let range = flat.range(of: selector + " {") ?? flat.range(of: selector + "{"),
+            let close = flat.range(of: "}", range: range.upperBound..<flat.endIndex)
+        else { return nil }
+        return flat[range.upperBound..<close.lowerBound]
+            .split(separator: ";")
+            .map { $0.split(separator: " ").filter { !$0.isEmpty }.joined(separator: " ") }
+            .filter { !$0.isEmpty }
+            .sorted()
     }
 }

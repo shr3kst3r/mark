@@ -710,7 +710,7 @@ public final class BufferTaskWriter: TaskWriteTarget, @unchecked Sendable {
             let receipt: WriteReceipt
             do {
                 receipt = try MarkCore.toggleInBuffer(
-                    source, index: toggle.index, action: toggle.desired ? .on : .off)
+                    source, index: toggle.index, action: toggle.desired.action)
             } catch let error as CoreError {
                 throw TaskWriteRefusal.core(
                     function: error.function, detail: error.detail ?? "no message", path: path)
@@ -730,19 +730,20 @@ public final class BufferTaskWriter: TaskWriteTarget, @unchecked Sendable {
             buffer.replaceContents(edited, origin: .checkbox)
             Log.core.info(
                 """
-                checkbox \(toggle.index) in \(url.lastPathComponent, privacy: .public) applied to \
-                the buffer, not the file — the tab is dirty and autosave will persist it
+                checkbox \(toggle.index) in \(url.lastPathComponent, privacy: .public) is now \
+                \(receipt.state?.rawValue ?? toggle.desired.rawValue, privacy: .public) in the \
+                buffer, not the file — the tab is dirty and autosave will persist it
                 """
             )
             return TaskWriteResult(
                 index: toggle.index,
-                checked: receipt.checked ?? toggle.desired,
+                state: receipt.state ?? toggle.desired,
                 byteOffset: receipt.offset ?? (task.start + 1),
                 // The preview is rendered from the buffer while dirty, so it
                 // cannot have been rendered from bytes the buffer does not
                 // have — unless the page is showing a state the buffer
                 // disagrees with, which is exactly what this flag means.
-                renderWasStale: task.checked != toggle.rendered
+                renderWasStale: task.state != toggle.rendered
             )
         }
     }

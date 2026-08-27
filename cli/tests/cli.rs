@@ -899,3 +899,426 @@ fn a_bad_theme_name_is_a_local_error_with_a_suggestion() {
     assert!(message.contains("no theme named"), "{message}");
     assert!(message.contains("dracula"), "{message}");
 }
+
+// ---------------------------------------------------------------------------
+// Five states, metadata, and `mark normalize`
+// ---------------------------------------------------------------------------
+
+/// A document with one of each state, plus metadata, plus the shapes that must
+/// stay out of the task list.
+fn five_states() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("states.md");
+    std::fs::write(
+        &path,
+        "# States\n\n\
+         - [ ] alpha @work @due(2026-09-10) !\n\
+         - [/] bravo @home @due(2026-08-01)\n\
+         - [x] charlie @work\n\
+         - [-] delta\n\
+         - [?] echo @work !!!\n\
+         - [!] not a task\n\
+         \nA literal [-] in prose.\n",
+    )
+    .expect("write fixture");
+    (dir, path)
+}
+
+#[test]
+fn tasks_json_carries_state_and_metadata_and_keeps_checked() {
+    let (_dir, path) = five_states();
+    let output = run(&["tasks", path.to_str().unwrap(), "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    let tasks = parsed.as_array().expect("an array");
+    assert_eq!(tasks.len(), 5, "the `[!]` item and the prose are not tasks");
+
+    let states: Vec<&str> = tasks.iter().map(|t| t["state"].as_str().unwrap()).collect();
+    assert_eq!(
+        states,
+        ["open", "in-progress", "done", "cancelled", "blocked"]
+    );
+    // `checked` means terminal: done AND cancelled.
+    let checked: Vec<bool> = tasks
+        .iter()
+        .map(|t| t["checked"].as_bool().unwrap())
+        .collect();
+    assert_eq!(checked, [false, false, true, true, false]);
+
+    // `text` is unchanged; `label` is the stripped one.
+    assert_eq!(tasks[0]["text"], "alpha @work @due(2026-09-10) !");
+    assert_eq!(tasks[0]["label"], "alpha");
+    assert_eq!(tasks[0]["due"], "2026-09-10");
+    assert_eq!(tasks[0]["priority"], 1);
+    assert_eq!(tasks[0]["tags"][0]["name"], "work");
+    // The byte offsets keep their names.
+    let start = tasks[0]["start"].as_u64().unwrap() as usize;
+    let source = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(&source[start..start + 3], "[ ]");
+}
+
+#[test]
+fn tasks_open_now_means_outstanding() {
+    let (_dir, path) = five_states();
+    let output = run(&["tasks", path.to_str().unwrap(), "--open", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    let states: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|t| t["state"].as_str().unwrap())
+        .collect();
+    // In progress and blocked are still outstanding; cancelled is not.
+    assert_eq!(states, ["open", "in-progress", "blocked"]);
+}
+
+#[test]
+fn tasks_filters_and_sorts_against_a_pinned_today() {
+    let (_dir, path) = five_states();
+    let file = path.to_str().unwrap();
+    let labels = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["tasks", file, "--json", "--today", "2026-08-27"];
+        all.extend_from_slice(args);
+        let output = run(&all);
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+        parsed
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|task| task["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    assert_eq!(labels(&["--state", "cancelled"]), ["delta"]);
+    assert_eq!(
+        labels(&["--state", "done", "--state", "blocked"]),
+        ["charlie", "echo"]
+    );
+    assert_eq!(labels(&["--tag", "@work"]), ["alpha", "charlie", "echo"]);
+    assert_eq!(labels(&["--tag", "home"]), ["bravo"]);
+    assert_eq!(labels(&["--priority", "2"]), ["echo"]);
+    assert_eq!(labels(&["--overdue"]), ["bravo"]);
+    assert_eq!(labels(&["--no-due"]), ["charlie", "delta", "echo"]);
+    assert_eq!(labels(&["--due-before", "today"]), ["bravo"]);
+    assert_eq!(labels(&["--due-after", "+7d"]), ["alpha"]);
+    assert_eq!(
+        labels(&["--sort", "due"]),
+        ["bravo", "alpha", "charlie", "delta", "echo"]
+    );
+    assert_eq!(
+        labels(&["--sort", "priority"]),
+        ["echo", "alpha", "bravo", "charlie", "delta"]
+    );
+}
+
+#[test]
+fn tasks_rejects_an_unknown_state_and_sort_key() {
+    let (_dir, path) = five_states();
+    let file = path.to_str().unwrap();
+
+    let output = run(&["tasks", file, "--state", "doing"]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("unknown task state"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(&["tasks", file, "--sort", "colour"]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("unknown sort key"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(&["tasks", file, "--today", "friday"]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("--today"), "{}", stderr(&output));
+}
+
+/// The human form shows the marker byte, the stripped label, and the metadata —
+/// and a document with no metadata prints exactly what it always printed.
+#[test]
+fn tasks_text_form_shows_the_marker_byte_and_the_label() {
+    let (_dir, path) = five_states();
+    let text = stdout(&run(&["tasks", path.to_str().unwrap()]));
+    assert!(text.contains(":3 [-] delta  ("), "{text}");
+    assert!(text.contains(":4 [?] echo @work !!!  ("), "{text}");
+
+    let plain = stdout(&run(&[
+        "tasks",
+        fixtures().join("tasks.md").to_str().unwrap(),
+    ]));
+    assert!(plain.contains("[x] already done  ("), "{plain}");
+    assert!(plain.contains("[ ] first open  ("), "{plain}");
+}
+
+#[test]
+fn check_sets_a_named_state_and_reports_it() {
+    let (_dir, path) = five_states();
+    let file = path.to_str().unwrap();
+
+    let output = run(&[
+        "check",
+        file,
+        "--item",
+        "0",
+        "--state",
+        "cancelled",
+        "--json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    assert_eq!(parsed["state"], "cancelled");
+    assert_eq!(parsed["checked"], true);
+    let offset = parsed["offset"].as_u64().unwrap() as usize;
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after.as_bytes()[offset], b'-');
+
+    // One byte, still.
+    let (_dir2, pristine) = five_states();
+    let before = std::fs::read_to_string(&pristine).unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(
+        before
+            .bytes()
+            .zip(after.bytes())
+            .filter(|(a, b)| a != b)
+            .count(),
+        1
+    );
+
+    // And toggling an extended marker ticks it rather than reverting it.
+    let output = run(&["check", file, "--item", "1", "--toggle", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    assert_eq!(parsed["state"], "done", "toggling in-progress must tick it");
+
+    let output = run(&["check", file, "--item", "0", "--state", "nope"]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("unknown task state"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn check_stamp_appends_a_done_date_once() {
+    let (_dir, path) = five_states();
+    let file = path.to_str().unwrap();
+
+    let output = run(&[
+        "check",
+        file,
+        "--item",
+        "0",
+        "--on",
+        "--stamp",
+        "--today",
+        "2026-08-27",
+        "--json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    assert_eq!(parsed["state"], "done");
+    assert_eq!(parsed["stamped"], "2026-08-27");
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains("- [x] alpha @work @due(2026-09-10) ! @done(2026-08-27)\n"),
+        "{after}"
+    );
+
+    // Again: already done, already stamped, so nothing is added.
+    let output = run(&[
+        "check",
+        file,
+        "--item",
+        "0",
+        "--on",
+        "--stamp",
+        "--today",
+        "2026-08-28",
+        "--json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    assert!(parsed.get("stamped").is_none(), "{parsed}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+
+    // The date is metadata the core reads back.
+    let tasks = stdout(&run(&["tasks", file, "--json"]));
+    let parsed: serde_json::Value = serde_json::from_str(&tasks).expect("valid json");
+    assert_eq!(parsed[0]["done"], "2026-08-27");
+    assert_eq!(parsed[0]["label"], "alpha");
+}
+
+#[test]
+fn normalize_writes_to_stdout_and_leaves_the_file_alone() {
+    let (_dir, path) = five_states();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let output = run(&["normalize", path.to_str().unwrap(), "--gfm"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains("- [ ] bravo @home @due(2026-08-01) @doing\n"),
+        "{out}"
+    );
+    assert!(out.contains("- [x] ~~delta~~\n"), "{out}");
+    assert!(out.contains("- [ ] echo @work !!! @blocked\n"), "{out}");
+    // Untouched markers stay untouched, and so does the prose bracket.
+    assert!(
+        out.contains("- [ ] alpha @work @due(2026-09-10) !\n"),
+        "{out}"
+    );
+    assert!(out.contains("- [!] not a task\n"), "{out}");
+    assert!(out.contains("A literal [-] in prose.\n"), "{out}");
+
+    // Nothing was written.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn normalize_check_reports_without_writing() {
+    let (_dir, path) = five_states();
+    let before = std::fs::read_to_string(&path).unwrap();
+    let output = run(&["normalize", path.to_str().unwrap(), "--check"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("3 extended marker(s) would be rewritten"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+    // A GFM document has nothing to say.
+    let output = run(&[
+        "normalize",
+        fixtures().join("tasks.md").to_str().unwrap(),
+        "--check",
+    ]);
+    assert!(
+        stdout(&output).contains("already GFM"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn normalize_in_place_rewrites_the_file_and_is_idempotent() {
+    let (_dir, path) = five_states();
+    let file = path.to_str().unwrap();
+
+    let output = run(&["normalize", file, "--in-place"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("3 marker(s) rewritten"),
+        "{}",
+        stdout(&output)
+    );
+
+    let once = std::fs::read_to_string(&path).unwrap();
+    assert!(once.contains("- [x] ~~delta~~"), "{once}");
+
+    // Pure GFM now: nothing left to rewrite, and the file does not change.
+    let output = run(&["normalize", file, "--in-place"]);
+    assert!(
+        stdout(&output).contains("0 marker(s) rewritten"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), once);
+
+    // And the state survived the degrade as a tag, which is what makes it
+    // lossless.
+    let tasks = stdout(&run(&["tasks", file, "--json"]));
+    let parsed: serde_json::Value = serde_json::from_str(&tasks).expect("valid json");
+    assert_eq!(parsed[1]["state"], "open");
+    assert_eq!(parsed[1]["tags"][1]["name"], "doing");
+    assert_eq!(parsed[4]["tags"][1]["name"], "blocked");
+}
+
+#[test]
+fn normalize_rejects_in_place_and_check_together() {
+    let (_dir, path) = five_states();
+    let output = run(&["normalize", path.to_str().unwrap(), "--in-place", "--check"]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("opposites"), "{}", stderr(&output));
+}
+
+#[test]
+fn ls_reports_per_state_counts_and_drops_cancelled_from_the_denominator() {
+    let (_dir, path) = five_states();
+    let dir = path.parent().unwrap();
+
+    let output = run(&["ls", dir.to_str().unwrap(), "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    let row = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "states.md")
+        .expect("states.md is listed");
+
+    assert_eq!(row["total"], 5);
+    assert_eq!(row["open"], 1);
+    assert_eq!(row["in_progress"], 1);
+    assert_eq!(row["done"], 1);
+    assert_eq!(row["cancelled"], 1);
+    assert_eq!(row["blocked"], 1);
+    // Outstanding is open + in progress + blocked; active drops the cancelled.
+    assert_eq!(row["outstanding"], 3);
+    assert_eq!(row["active"], 4);
+
+    let text = stdout(&run(&["ls", dir.to_str().unwrap()]));
+    assert!(text.contains("states.md  States  [3/4]"), "{text}");
+}
+
+#[test]
+fn stats_reports_the_five_states() {
+    let (_dir, path) = five_states();
+    let output = run(&["stats", path.to_str().unwrap(), "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid json");
+    assert_eq!(parsed["tasks"]["total"], 5);
+    assert_eq!(parsed["tasks"]["cancelled"], 1);
+    assert_eq!(parsed["tasks"]["in_progress"], 1);
+    assert_eq!(parsed["tasks"]["blocked"], 1);
+
+    let text = stdout(&run(&["stats", path.to_str().unwrap()]));
+    assert!(
+        text.contains("tasks             3 outstanding / 4 active / 5 total"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "task states       1 open / 1 in progress / 1 done / 1 cancelled / 1 blocked"
+        ),
+        "{text}"
+    );
+}
+
+/// `mark render --html` emits five states and no clock-dependent styling.
+#[test]
+fn render_html_carries_data_mk_state_and_neutral_chips() {
+    let (_dir, path) = five_states();
+    let html = stdout(&run(&["render", path.to_str().unwrap(), "--html"]));
+    for state in ["open", "in-progress", "done", "cancelled", "blocked"] {
+        assert!(
+            html.contains(&format!("data-mk-state=\"{state}\"")),
+            "{state}"
+        );
+    }
+    assert_eq!(html.matches("class=\"mk-task\"").count(), 5);
+    assert_eq!(html.matches(" checked>").count(), 1);
+    assert!(html.contains("data-mk-due=\"2026-09-10\""), "{html}");
+    assert!(
+        html.contains("<span class=\"mk-tag\" data-mk-priority=\"3\">!!!</span>"),
+        "{html}"
+    );
+    // No JavaScript, still.
+    assert!(!html.contains("<script"), "rendered HTML must ship no JS");
+}

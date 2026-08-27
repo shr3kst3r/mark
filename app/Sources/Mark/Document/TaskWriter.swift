@@ -20,12 +20,18 @@ public struct TaskToggle: Sendable, Equatable {
     /// page was rendered from.
     public let span: Range<Int>
     /// The state the *rendered* HTML said the box was in, read from the
-    /// `checked` content attribute — which a click does not change.
-    public let rendered: Bool
-    /// The state the user just asked for.
-    public let desired: Bool
+    /// `data-mk-state` content attribute — which a click does not change.
+    ///
+    /// A state rather than a boolean since `2026-08-27-five-task-states`: with
+    /// five states there is no `checked` property for the browser to have
+    /// flipped, so the page reports both states by name and this is the one it
+    /// was showing.
+    public let rendered: TaskState
+    /// The state the user just asked for. The page derives it — plain click
+    /// toggles, ⌥-click cancels — and the context menu names it outright.
+    public let desired: TaskState
 
-    public init(index: Int, span: Range<Int>, rendered: Bool, desired: Bool) {
+    public init(index: Int, span: Range<Int>, rendered: TaskState, desired: TaskState) {
         self.index = index
         self.span = span
         self.rendered = rendered
@@ -37,7 +43,11 @@ public struct TaskToggle: Sendable, Equatable {
 public struct TaskWriteResult: Sendable, Equatable {
     public let index: Int
     /// The state on disk after the write.
-    public let checked: Bool
+    public let state: TaskState
+    /// "The state is terminal" — done *or* cancelled. Derived from ``state``
+    /// rather than carried separately, because two fields that can disagree
+    /// about the same byte is how a badge starts lying.
+    public var checked: Bool { state.isTerminal }
     /// The single byte the write changed — the character between the brackets.
     public let byteOffset: Int
     /// True when the write happened but the page had been rendered from
@@ -181,17 +191,22 @@ public final class FileTaskWriter: TaskWriteTarget {
         // just verified — but the display has to be resynced afterwards, since
         // an already-correct file changes no byte and so produces no watcher
         // event.
-        let renderWasStale = task.checked != toggle.rendered
+        //
+        // A state comparison rather than a boolean one since
+        // `2026-08-27-five-task-states`: a page showing `[/]` where the file
+        // now says `[?]` is stale, and both of those are "not checked".
+        let renderWasStale = task.state != toggle.rendered
 
-        // Explicit on/off rather than "flip whatever is there": the user asked
-        // for a state, and this makes a click idempotent if it is somehow
-        // delivered twice.
-        let checked: Bool
+        // The named state rather than "flip whatever is there": the user asked
+        // for one, and this makes a click idempotent if it is somehow delivered
+        // twice. It is also what makes ⌥-click and the context menu ordinary —
+        // they name a different state and nothing else about the path changes.
+        let state: TaskState
         do {
-            checked = try MarkCore.toggle(
+            state = try MarkCore.toggle(
                 path: path,
                 index: toggle.index,
-                action: toggle.desired ? .on : .off
+                action: toggle.desired.action
             )
         } catch let error as CoreError {
             throw TaskWriteRefusal.core(
@@ -200,9 +215,9 @@ public final class FileTaskWriter: TaskWriteTarget {
 
         return TaskWriteResult(
             index: toggle.index,
-            checked: checked,
-            // The marker is `[ ]`, `[x]` or `[X]`; the byte that moves is the
-            // one between the brackets.
+            state: state,
+            // The marker is `[ ]`, `[x]`, `[X]`, `[/]`, `[-]` or `[?]`; the byte
+            // that moves is the one between the brackets.
             byteOffset: task.start + 1,
             renderWasStale: renderWasStale
         )

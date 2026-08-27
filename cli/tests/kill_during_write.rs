@@ -37,8 +37,7 @@ fn temp_files(directory: &std::path::Path) -> Vec<String> {
 
 /// A document big enough that its write is not instantaneous — the whole point
 /// is to be killed *during* one.
-fn document(checked: bool) -> String {
-    let marker = if checked { "x" } else { " " };
+fn document(marker: char) -> String {
     let mut text = format!("# Kill test\n\n- [{marker}] the only task\n\n");
     for index in 0..14_000 {
         text.push_str(&format!(
@@ -48,17 +47,29 @@ fn document(checked: bool) -> String {
     text
 }
 
+/// Every byte a write can land in the marker, and therefore every whole
+/// document that may legitimately be on disk when a writer is killed.
+///
+/// `2026-08-27-five-task-states` turns this from two variants into five: the
+/// point of the assertion is "whatever is there is a *whole* document", so the
+/// set has to have one arm per writable byte or a correct write looks like a
+/// truncation. The states come from the core rather than a literal list, so a
+/// sixth would fail to compile here rather than fail mysteriously at 1 MB.
+fn variants() -> Vec<String> {
+    mark_core::tasks::State::ALL
+        .iter()
+        .map(|state| document(char::from(state.byte())))
+        .collect()
+}
+
 #[test]
 fn a_killed_write_never_truncates_the_document() {
     let directory = TempDir::new().expect("temp dir");
     let path = directory.path().join("notes.md");
-    let unchecked = document(false);
-    let checked = document(true);
-    std::fs::write(&path, &unchecked).expect("write the fixture");
-    assert!(
-        unchecked.len() > 1_000_000,
-        "the fixture is too small to race"
-    );
+    let variants = variants();
+    let open = document(' ');
+    std::fs::write(&path, &open).expect("write the fixture");
+    assert!(open.len() > 1_000_000, "the fixture is too small to race");
 
     // Kill by *observation*, not by clock. Timing the kill against a
     // wall-clock fraction of a full run sounds reasonable and does not work:
@@ -74,14 +85,22 @@ fn a_killed_write_never_truncates_the_document() {
     let mut caught = 0;
     let mut missed = 0;
     for attempt in 0..attempts {
+        // Alternate the verb so a third and fourth byte really do get written
+        // mid-kill, rather than the assertion below being widened for states
+        // this test never produces.
+        let action: &[&str] = match attempt % 3 {
+            0 => &["--toggle"],
+            1 => &["--state", "cancelled"],
+            _ => &["--state", "in-progress"],
+        };
         let mut child = Command::new(binary())
-            .args([
-                "check",
-                path.to_str().expect("utf-8 path"),
-                "--item",
-                "0",
-                "--toggle",
-            ])
+            .args(
+                [
+                    &["check", path.to_str().expect("utf-8 path"), "--item", "0"][..],
+                    action,
+                ]
+                .concat(),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -112,15 +131,15 @@ fn a_killed_write_never_truncates_the_document() {
         }
 
         // The only thing that matters: whatever is on disk is a *whole*
-        // document, one of the two legitimate versions. A truncated or
-        // half-written file would be neither.
+        // document, one of the five legitimate versions. A truncated or
+        // half-written file would be none of them.
         let after = std::fs::read_to_string(&path).expect("the document is still readable");
         assert!(
-            after == unchecked || after == checked,
-            "attempt {attempt}: the document is neither version — {} bytes, expected {} \
+            variants.contains(&after),
+            "attempt {attempt}: the document is no version of itself — {} bytes, expected {} \
              (a truncated write)",
             after.len(),
-            unchecked.len()
+            open.len()
         );
 
         // Clear the debris so the next attempt's poll cannot see a previous

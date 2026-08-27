@@ -4,13 +4,15 @@
 
 # ADR index
 
-10 active · 4 superseded
+12 active · 4 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
 | [2026-08-27-sidebar-polls-listed-directories](2026-08-27-sidebar-polls-listed-directories.md) | Refresh the sidebar by polling the directories it has already listed, gated on each one's own mtime | Accepted | app, sidebar | — | 2026-08-27 |
+| [2026-08-27-inline-task-metadata](2026-08-27-inline-task-metadata.md) | Carry task metadata as TaskPaper-style `@tag` and `@key(value)` tokens in the item's own text, parsed in the core and never compared against a clock at render time | Accepted | core, render, cli, app | — | 2026-08-27 |
+| [2026-08-27-five-task-states](2026-08-27-five-task-states.md) | Recognise five one-byte task states, and draw every checkbox ourselves so the fifth one is possible | Accepted | core, render, cli, app | — | 2026-08-27 |
 | [2026-08-26-opened-file-history](2026-08-26-opened-file-history.md) | Remember which files were deliberately opened, application-wide, and show them in a window that holds no web view | Accepted | app, tabs, sidebar, ipc | — | 2026-08-26 |
 | [2026-08-26-new-documents-are-files-on-disk](2026-08-26-new-documents-are-files-on-disk.md) | Name a new document before it exists, so mark never holds a document that has no file | Accepted | app, editor, tabs, sidebar | — | 2026-08-26 |
 | [2026-08-26-markdown-reference-window](2026-08-26-markdown-reference-window.md) | Ship the markdown reference as a document mark renders, in a window of its own that is budgeted like a tab | Proposed | app, render, cli | — | 2026-08-26 |

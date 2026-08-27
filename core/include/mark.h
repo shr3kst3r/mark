@@ -99,7 +99,26 @@ char *mark_diff_json(const char *old_source, const char *new_source,
                      const char *theme);
 
 /*
- * JSON array of {index, checked, start, end, line, text}. NULL on failure.
+ * JSON array of {index, state, checked, start, end, line, text, label, tags,
+ * due, start_date, done, priority}. NULL on failure.
+ *
+ * "state" is one of "open", "in-progress", "done", "cancelled", "blocked" --
+ * the five one-byte markers of 2026-08-27-five-task-states ([ ], [/], [x],
+ * [-], [?]).
+ *
+ * "checked" IS RETAINED AND MEANS "THE STATE IS TERMINAL": true for done AND
+ * for cancelled. Every existing consumer is asking "is this still
+ * outstanding?", and this keeps answering that correctly; read "state" when the
+ * difference matters. It is never removed from this object.
+ *
+ * "text" is unchanged -- the full flattened item text, metadata included.
+ * "label" is the same text with the recognised @tag / @key(value) / !!! tokens
+ * removed (2026-08-27-inline-task-metadata), which is what a human-facing list
+ * should show. "tags" is [{"name":"work"},{"name":"owner","value":"ana"}];
+ * "due", "start_date" and "done" are ISO YYYY-MM-DD or null; "priority" is
+ * 0..3. The start DATE is "start_date" because "start" is already this
+ * object's marker byte offset, and shadowing it would silently change what
+ * every existing caller reads.
  *
  * With MARK_TASKS_BLOCKS the answer is an object instead:
  *
@@ -133,8 +152,23 @@ char *mark_toc_json(const char *source);
  * before this returns; a caller that needs to *hold* one across several writes
  * takes its own -- see mark_write_json below.
  *
- * action: 0 = off, 1 = on, 2 = toggle.
- * Returns the new state (0 or 1), or -1 on failure.
+ * action: 0 = off, 1 = on, 2 = toggle, 3 = in progress, 4 = cancelled,
+ * 5 = blocked.
+ *
+ * Returns the RESULTING STATE: 0 open, 1 done, 2 in progress, 3 cancelled,
+ * 4 blocked -- or -1 on failure.
+ *
+ * 2026-08-27-five-task-states widens this signature rather than adding a
+ * thirteenth function, and the old encoding is a prefix of the new one: an
+ * existing caller passing 0/1/2 is unaffected, and one testing `result == 1`
+ * still correctly reads "done" and reads every other state as not-done.
+ *
+ * Note the deliberate asymmetry with the JSON above: this integer reads
+ * cancelled as NOT done, while mark_tasks_json's "checked" reads it as
+ * terminal. The two answer different questions.
+ *
+ * Toggle (2) is open->done, done->open, and every other state -> done: ticking
+ * a box ticks it, so toggle is a one-way exit from the extended states.
  */
 int mark_toggle(const char *path, size_t index, int action);
 
@@ -150,13 +184,14 @@ int mark_toggle(const char *path, size_t index, int action);
  *   non-NULL  a task index   both, in that order
  *
  * Response: {"written":bool,"bytes":N,"path":"..."} for a save, plus
- * {"source":"...","index":N,"checked":bool,"offset":N,"text":"..."} when a
- * task was toggled. "path" is the CANONICALIZED target -- write_atomically
+ * {"source":"...","index":N,"state":"...","checked":bool,"offset":N,
+ * "text":"..."} when a task was toggled -- "state" and "checked" as
+ * mark_tasks_json defines them. "path" is the CANONICALIZED target -- write_atomically
  * resolves symlinks before renaming, because rename(2) replaces the name and
  * not the file. 2026-08-24-editing-pane-and-autosave runs this every 800 ms.
  *
- * action is as mark_toggle's: 0 = off, 1 = on, 2 = toggle. Ignored when
- * index is MARK_NO_TASK.
+ * action is as mark_toggle's: 0 = off, 1 = on, 2 = toggle, 3 = in progress,
+ * 4 = cancelled, 5 = blocked. Ignored when index is MARK_NO_TASK.
  *
  * This is deliberately not a mode of mark_toggle, which re-reads the file for
  * itself -- exactly the wrong thing when an unsaved buffer is the source of

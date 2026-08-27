@@ -3,12 +3,20 @@
 //! The fixture is the shape research 2.4 verified against: a `[x]`, two `[ ]`,
 //! an ordered-list task, and a literal `[ ]` in prose. Expected counts are
 //! `open = 3, total = 4`.
+//!
+//! **The fixture is deliberately still GFM-only**, and after
+//! `2026-08-27-five-task-states` that makes it the compatibility anchor: every
+//! number below is unchanged from before five states existed, which is the
+//! ADR's central claim ("for a document containing only GFM markers every
+//! extended count is zero"). Extended markers are exercised in
+//! `core/src/tasks.rs`'s recognition table instead, where they can be stated as
+//! inputs rather than as offsets into a shared file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use mark_core::render::{RenderOptions, render};
-use mark_core::tasks::{self, Action};
+use mark_core::tasks::{self, Action, State};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -20,31 +28,36 @@ fn tasks_md() -> String {
     fs::read_to_string(fixture("tasks.md")).expect("fixture is committed")
 }
 
-/// Snapshot of every task's `(index, start, end, checked)`. These are literal
-/// numbers on purpose: an accidental change to how spans are computed shows up
-/// here as a diff rather than as a mis-toggled file six months from now.
+/// Snapshot of every task's `(index, start, end, state, checked)`. These are
+/// literal numbers on purpose: an accidental change to how spans are computed
+/// shows up here as a diff rather than as a mis-toggled file six months from
+/// now.
+///
+/// The offsets are the same four they have always been — recognising three new
+/// marker bytes does not move a GFM marker — and `checked` still agrees with
+/// `state` here because this document has no cancelled item to separate them.
 #[test]
 fn task_byte_ranges_are_golden() {
     let source = tasks_md();
     let tasks = tasks::enumerate_source(&source);
 
-    let actual: Vec<(usize, usize, usize, bool)> = tasks
+    let actual: Vec<(usize, usize, usize, State, bool)> = tasks
         .iter()
-        .map(|t| (t.index, t.start, t.end, t.checked))
+        .map(|t| (t.index, t.start, t.end, t.state, t.checked))
         .collect();
 
     assert_eq!(
         actual,
         vec![
-            (0, 160, 163, true),
-            (1, 179, 182, false),
-            (2, 196, 199, false),
-            (3, 291, 294, false),
+            (0, 160, 163, State::Done, true),
+            (1, 179, 182, State::Open, false),
+            (2, 196, 199, State::Open, false),
+            (3, 291, 294, State::Open, false),
         ]
     );
 
     // Each recorded span really is a marker, not an offset that happens to
-    // land nearby.
+    // land nearby — and it holds the byte the state says it does.
     for task in &tasks {
         let marker = &source[task.start..task.end];
         assert!(
@@ -52,7 +65,35 @@ fn task_byte_ranges_are_golden() {
             "task {} span holds {marker:?}",
             task.index
         );
+        assert_eq!(
+            State::from_byte(marker.as_bytes()[1]),
+            Some(task.state),
+            "task {} span and state disagree",
+            task.index
+        );
     }
+}
+
+/// The whole `Counts` for the fixture, which is the compatibility claim in
+/// full: three open of four, and every extended count zero, so
+/// `outstanding/active` is `open/total`.
+#[test]
+fn a_gfm_only_fixtures_counts_are_bit_identical() {
+    let counts = tasks::counts(&tasks_md());
+    assert_eq!(
+        counts,
+        tasks::Counts {
+            open: 3,
+            in_progress: 0,
+            done: 1,
+            cancelled: 0,
+            blocked: 0,
+            total: 4,
+        }
+    );
+    assert_eq!(counts.outstanding(), counts.open);
+    assert_eq!(counts.active(), counts.total);
+    assert_eq!((counts.outstanding(), counts.active()), (3, 4));
 }
 
 /// The regression from research 2.4: a literal `[ ]` in a paragraph is neither
@@ -131,11 +172,18 @@ fn rendered_indices_match_enumerated_indices() {
     for task in tasks::enumerate_source(&source) {
         let expected = format!(
             "<input type=\"checkbox\" class=\"mk-task\" data-mk-idx=\"{}\" \
-             data-mk-start=\"{}\" data-mk-end=\"{}\"{}>",
+             data-mk-start=\"{}\" data-mk-end=\"{}\" data-mk-state=\"{}\" \
+             aria-label=\"{}\"{}>",
             task.index,
             task.start,
             task.end,
-            if task.checked { " checked" } else { "" }
+            task.state.as_str(),
+            task.state.spoken(),
+            if task.state == State::Done {
+                " checked"
+            } else {
+                ""
+            }
         );
         assert!(html.contains(&expected), "missing {expected} in\n{html}");
     }
@@ -151,6 +199,7 @@ fn toggle_file_writes_in_place_and_cleans_up() {
     fs::write(&path, &original).expect("write fixture");
 
     let toggled = tasks::toggle_file(&path, 1, Action::On).expect("task 1 exists");
+    assert_eq!(toggled.state, State::Done);
     assert!(toggled.checked);
 
     let after = fs::read_to_string(&path).expect("read back");

@@ -131,9 +131,43 @@ enum Command {
     Tasks {
         /// File or directory. Defaults to the current directory.
         path: Option<PathBuf>,
-        /// Only unchecked tasks.
+        /// Only tasks that are still outstanding: open, in progress, or
+        /// blocked. Cancelled and done are both finished with.
         #[arg(long)]
         open: bool,
+        /// Only this state. Repeatable, and any of them matches:
+        /// open, in-progress, done, cancelled, blocked.
+        #[arg(long = "state", value_name = "NAME")]
+        states: Vec<String>,
+        /// Only tasks carrying this `@tag`. Repeatable; the `@` is optional.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Only tasks at this priority or higher (1 = `!`, 3 = `!!!`).
+        #[arg(long, value_name = "N")]
+        priority: Option<u8>,
+        /// Only tasks due strictly before a date, `today`, or `+Nd`.
+        #[arg(long = "due-before", value_name = "WHEN")]
+        due_before: Option<String>,
+        /// Only tasks due strictly after a date, `today`, or `+Nd`.
+        #[arg(long = "due-after", value_name = "WHEN")]
+        due_after: Option<String>,
+        /// Only tasks whose `@due(…)` is before today. Implies a clock; see
+        /// `--today`.
+        #[arg(long)]
+        overdue: bool,
+        /// Only tasks with no `@due(…)` at all.
+        #[arg(long = "no-due")]
+        no_due: bool,
+        /// Order the answer: due, priority, state, or index (the default,
+        /// document order).
+        #[arg(long, value_name = "KEY")]
+        sort: Option<String>,
+        /// What "today" means, for `--overdue` and for `+Nd` offsets. Defaults
+        /// to the local date. This is the only place a date comparison reads a
+        /// clock, and it is overridable so the behaviour is testable
+        /// (2026-08-27-inline-task-metadata).
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        today: Option<String>,
         #[arg(long)]
         json: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
@@ -147,8 +181,35 @@ enum Command {
         item: usize,
         #[command(flatten)]
         action: CheckAction,
+        /// Append `@done(YYYY-MM-DD)` to the item when it becomes done.
+        /// Opt-in, because it is the only write in the product that is not one
+        /// byte (2026-08-27-inline-task-metadata).
+        #[arg(long)]
+        stamp: bool,
+        /// The date `--stamp` writes. Defaults to the local date.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        today: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Rewrite mark's extended task markers as plain GFM, losslessly.
+    ///
+    /// `[-]` becomes `[x] ~~text~~`, `[/]` and `[?]` become `[ ]` carrying an
+    /// `@doing` / `@blocked` tag. Writes to **stdout** unless `--in-place`.
+    Normalize {
+        file: PathBuf,
+        /// Degrade to GFM. The only mode there is, and the default; naming it
+        /// leaves room for the reverse without changing what a bare
+        /// `mark normalize` does.
+        #[arg(long)]
+        gfm: bool,
+        /// Rewrite the file itself, through the same atomic write and the same
+        /// `flock` every other write takes (2026-08-25-flock-write-locking).
+        #[arg(long = "in-place")]
+        in_place: bool,
+        /// Report what would change and write nothing, anywhere.
+        #[arg(long)]
+        check: bool,
     },
     /// List markdown files, with titles and task counts.
     Ls {
@@ -403,19 +464,39 @@ struct CheckAction {
     /// Uncheck the box.
     #[arg(long)]
     off: bool,
-    /// Flip it. The default.
+    /// Flip it. The default. Open becomes done, done becomes open, and any
+    /// other state becomes done — ticking a box ticks it.
     #[arg(long)]
     toggle: bool,
+    /// Set it to a named state: open, in-progress, done, cancelled, blocked.
+    #[arg(long, value_name = "NAME")]
+    state: Option<String>,
 }
 
 impl CheckAction {
-    fn action(&self) -> Action {
-        match (self.on, self.off) {
+    /// The action, or a usage error naming what was accepted.
+    fn action(&self) -> Result<Action, CliError> {
+        if let Some(name) = &self.state {
+            return match tasks::State::from_name(name) {
+                Some(state) => Ok(Action::for_state(state)),
+                None => Err(CliError::Usage(unknown_state(name))),
+            };
+        }
+        Ok(match (self.on, self.off) {
             (true, _) => Action::On,
             (_, true) => Action::Off,
             _ => Action::Toggle,
-        }
+        })
     }
+}
+
+/// One message for every `--state` in the CLI, listing what is accepted.
+fn unknown_state(name: &str) -> String {
+    let names: Vec<&str> = tasks::State::ALL.iter().map(|s| s.as_str()).collect();
+    format!(
+        "unknown task state {name:?}; expected one of {}",
+        names.join(", ")
+    )
 }
 
 fn main() -> ExitCode {
@@ -615,15 +696,55 @@ fn run(command: &Command) -> Result<(), CliError> {
         Command::Tasks {
             path,
             open,
+            states,
+            tags,
+            priority,
+            due_before,
+            due_after,
+            overdue,
+            no_due,
+            sort,
+            today,
             json,
             depth,
-        } => cmd_tasks(path.as_deref(), *open, *json, *depth),
+        } => cmd_tasks(
+            path.as_deref(),
+            &TaskQuery::new(
+                *open,
+                states,
+                tags,
+                *priority,
+                due_before.as_deref(),
+                due_after.as_deref(),
+                *overdue,
+                *no_due,
+                sort.as_deref(),
+                today.as_deref(),
+            )?,
+            *json,
+            *depth,
+        ),
         Command::Check {
             file,
             item,
             action,
+            stamp,
+            today,
             json,
-        } => cmd_check(file, *item, action.action(), *json),
+        } => cmd_check(
+            file,
+            *item,
+            action.action()?,
+            *stamp,
+            today.as_deref(),
+            *json,
+        ),
+        Command::Normalize {
+            file,
+            gfm,
+            in_place,
+            check,
+        } => cmd_normalize(file, *gfm, *in_place, *check),
         Command::Ls {
             dir,
             json,
@@ -1345,20 +1466,321 @@ fn cmd_toc(path: &Path, json: bool) -> Result<(), CliError> {
     out.finish()
 }
 
+// ---------------------------------------------------------------------------
+// Dates: the one place in the product where a clock is read
+// ---------------------------------------------------------------------------
+//
+// `2026-08-27-inline-task-metadata` puts date comparison in the query path and
+// nowhere else: no renderer may read a clock, so `mark render --html` stays a
+// pure function of its source. "Today" therefore arrives here as an argument —
+// defaulted from the system clock, overridable with `--today` so the behaviour
+// is testable without freezing one.
+//
+// Rolled by hand rather than pulled in: the whole requirement is ISO dates,
+// day arithmetic and "what is today", and the core deliberately carries no
+// clock dependency (its merman features disable `system-clock` for the same
+// reason).
+
+/// Days since 1970-01-01, proleptic Gregorian. Hinnant's `days_from_civil`.
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The inverse, as `YYYY-MM-DD`.
+fn civil_from_days(days: i64) -> String {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Today, in the local timezone, as `YYYY-MM-DD`.
+///
+/// Local rather than UTC because "is this overdue?" is a question about the
+/// user's day, and a note due today reading as overdue for the first eight
+/// hours of it would be wrong in the direction that matters.
+fn today_local() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `localtime_r` writes into `parts` and reads `seconds`; both are
+    // live for the call, and this is the reentrant form.
+    unsafe { libc::localtime_r(&seconds, &mut parts) };
+    format!(
+        "{:04}-{:02}-{:02}",
+        parts.tm_year + 1900,
+        parts.tm_mon + 1,
+        parts.tm_mday
+    )
+}
+
+/// A `--due-before` / `--due-after` argument: a date, `today`, or `±Nd`.
+fn resolve_when(argument: &str, today: &str) -> Result<String, CliError> {
+    if argument == "today" {
+        return Ok(today.to_owned());
+    }
+    if tasks::parse_iso_date(argument).is_some() {
+        return Ok(argument.to_owned());
+    }
+    if let Some(rest) = argument.strip_suffix('d')
+        && let Ok(offset) = rest.parse::<i64>()
+        && let Some((year, month, day)) = tasks::parse_iso_date(today)
+    {
+        return Ok(civil_from_days(days_from_civil(year, month, day) + offset));
+    }
+    Err(CliError::Usage(format!(
+        "cannot read {argument:?} as a date: expected YYYY-MM-DD, `today`, or an \
+         offset like +7d"
+    )))
+}
+
+/// How a task list should be ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Index,
+    Due,
+    Priority,
+    State,
+}
+
+impl Sort {
+    fn parse(name: &str) -> Result<Sort, CliError> {
+        match name {
+            "index" => Ok(Sort::Index),
+            "due" => Ok(Sort::Due),
+            "priority" => Ok(Sort::Priority),
+            "state" => Ok(Sort::State),
+            other => Err(CliError::Usage(format!(
+                "unknown sort key {other:?}; expected due, priority, state, or index"
+            ))),
+        }
+    }
+}
+
+/// Everything `mark tasks` was asked to filter and order by, resolved once.
+///
+/// Resolved here rather than per file so that `--today` is read once, `+7d` has
+/// one answer for the whole run, and a bad argument fails before any file is
+/// opened.
+struct TaskQuery {
+    outstanding_only: bool,
+    states: Vec<tasks::State>,
+    tags: Vec<String>,
+    priority: Option<u8>,
+    due_before: Option<String>,
+    due_after: Option<String>,
+    overdue: bool,
+    no_due: bool,
+    sort: Sort,
+    today: String,
+}
+
+impl TaskQuery {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        outstanding_only: bool,
+        states: &[String],
+        tags: &[String],
+        priority: Option<u8>,
+        due_before: Option<&str>,
+        due_after: Option<&str>,
+        overdue: bool,
+        no_due: bool,
+        sort: Option<&str>,
+        today: Option<&str>,
+    ) -> Result<TaskQuery, CliError> {
+        let today = match today {
+            Some(given) => {
+                if tasks::parse_iso_date(given).is_none() {
+                    return Err(CliError::Usage(format!(
+                        "cannot read {given:?} as a date: --today takes YYYY-MM-DD"
+                    )));
+                }
+                given.to_owned()
+            }
+            None => today_local(),
+        };
+        Ok(TaskQuery {
+            outstanding_only,
+            states: states
+                .iter()
+                .map(|name| {
+                    tasks::State::from_name(name)
+                        .ok_or_else(|| CliError::Usage(unknown_state(name)))
+                })
+                .collect::<Result<_, _>>()?,
+            // `@work` and `work` name the same tag: `@` needs no shell quoting,
+            // which is half of why the sigil was chosen, but nobody should have
+            // to remember which side of the flag it belongs on.
+            tags: tags
+                .iter()
+                .map(|tag| tag.trim_start_matches('@').to_owned())
+                .collect(),
+            priority,
+            due_before: due_before
+                .map(|when| resolve_when(when, &today))
+                .transpose()?,
+            due_after: due_after
+                .map(|when| resolve_when(when, &today))
+                .transpose()?,
+            overdue,
+            no_due,
+            sort: sort.map_or(Ok(Sort::Index), Sort::parse)?,
+            today,
+        })
+    }
+
+    /// Whether one task survives every filter. ISO dates compare
+    /// lexicographically, which is the whole reason the format is fixed.
+    fn matches(&self, task: &tasks::Task) -> bool {
+        if self.outstanding_only && !task.state.is_outstanding() {
+            return false;
+        }
+        if !self.states.is_empty() && !self.states.contains(&task.state) {
+            return false;
+        }
+        if !self.tags.is_empty() && !task.tags.iter().any(|tag| self.tags.contains(&tag.name)) {
+            return false;
+        }
+        if self.priority.is_some_and(|least| task.priority < least) {
+            return false;
+        }
+        if self.no_due && task.due.is_some() {
+            return false;
+        }
+        if self.overdue
+            && task
+                .due
+                .as_deref()
+                .is_none_or(|due| due >= self.today.as_str())
+        {
+            return false;
+        }
+        if let Some(before) = &self.due_before
+            && task.due.as_deref().is_none_or(|due| due >= before.as_str())
+        {
+            return false;
+        }
+        if let Some(after) = &self.due_after
+            && task.due.as_deref().is_none_or(|due| due <= after.as_str())
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Order the collected rows. Every key is a stable sort over document
+    /// order, so ties keep the order `mark tasks` would have printed anyway.
+    fn order(&self, rows: &mut [TaskRow]) {
+        match self.sort {
+            Sort::Index => {}
+            // Soonest first, and the undated last rather than first: an agenda
+            // is a list of deadlines, and "no deadline" is not the nearest one.
+            Sort::Due => rows.sort_by(|a, b| match (&a.due, &b.due) {
+                (Some(a), Some(b)) => a.cmp(b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }),
+            // Highest first: `!!!` is the thing you wanted to see.
+            Sort::Priority => rows.sort_by_key(|row| std::cmp::Reverse(row.priority)),
+            Sort::State => rows.sort_by_key(|row| row.state),
+        }
+    }
+}
+
+/// One row of `mark tasks --json`.
+///
+/// `checked` is retained and means "the state is terminal" — see
+/// `mark_tasks_json` in the header. `text` is unchanged; `label` is the
+/// stripped one.
 #[derive(Serialize)]
 struct TaskRow {
     path: PathBuf,
     index: usize,
+    state: tasks::State,
     checked: bool,
     start: usize,
     end: usize,
     line: usize,
     text: String,
+    label: String,
+    tags: Vec<tasks::Tag>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    due: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done: Option<String>,
+    priority: u8,
+}
+
+impl TaskRow {
+    fn new(path: PathBuf, task: tasks::Task) -> TaskRow {
+        TaskRow {
+            path,
+            index: task.index,
+            state: task.state,
+            checked: task.checked,
+            start: task.start,
+            end: task.end,
+            line: task.line,
+            text: task.text,
+            label: task.label,
+            tags: task.tags,
+            due: task.due,
+            start_date: task.start_date,
+            done: task.done,
+            priority: task.priority,
+        }
+    }
+
+    /// The metadata, back in the spelling it was written in, for the human
+    /// form. Empty for a document that uses none — which is what keeps that
+    /// output byte-identical to what it printed before.
+    fn chips(&self) -> String {
+        let mut out = String::new();
+        for (key, value) in [
+            ("due", &self.due),
+            ("start", &self.start_date),
+            ("done", &self.done),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!(" @{key}({value})"));
+            }
+        }
+        for tag in &self.tags {
+            match &tag.value {
+                Some(value) => out.push_str(&format!(" @{}({value})", tag.name)),
+                None => out.push_str(&format!(" @{}", tag.name)),
+            }
+        }
+        if self.priority > 0 {
+            out.push(' ');
+            out.push_str(&"!".repeat(usize::from(self.priority)));
+        }
+        out
+    }
 }
 
 fn cmd_tasks(
     path: Option<&Path>,
-    open_only: bool,
+    query: &TaskQuery,
     json: bool,
     depth: usize,
 ) -> Result<(), CliError> {
@@ -1373,24 +1795,38 @@ fn cmd_tasks(
     );
 
     let started = Instant::now();
+    let mut seen = 0usize;
     for file in &targets {
         let source = read_walked(root, file)?;
         for task in tasks::enumerate_source(&source) {
-            if open_only && task.checked {
-                continue;
+            seen += 1;
+            if query.matches(&task) {
+                rows.push(TaskRow::new(file.clone(), task));
             }
-            rows.push(TaskRow {
-                path: file.clone(),
-                index: task.index,
-                checked: task.checked,
-                start: task.start,
-                end: task.end,
-                line: task.line,
-                text: task.text,
-            });
         }
     }
-    trace(|| format!("enumerate {} tasks", rows.len()), started);
+    // Plan §4: the metadata parse rides along inside the enumeration — one pass
+    // over the events builds the label and reads the tokens — so it is reported
+    // here rather than timed separately, and what it found is named. "Why is
+    // this list empty?" is then answerable from telemetry alone.
+    trace(
+        || {
+            let tagged = rows.iter().filter(|row| !row.tags.is_empty()).count();
+            let dated = rows.iter().filter(|row| row.due.is_some()).count();
+            format!(
+                "enumerate {seen} tasks -> {} matched, metadata {tagged} tagged, {dated} due",
+                rows.len()
+            )
+        },
+        started,
+    );
+
+    let started = Instant::now();
+    query.order(&mut rows);
+    trace(
+        || format!("sort {:?}, today {}", query.sort, query.today),
+        started,
+    );
 
     if json {
         return print_json(&rows);
@@ -1400,11 +1836,12 @@ fn cmd_tasks(
     for row in &rows {
         emitln!(
             out,
-            "{}:{} [{}] {}  ({})",
+            "{}:{} [{}] {}{}  ({})",
             row.path.display(),
             row.index,
-            if row.checked { 'x' } else { ' ' },
-            row.text,
+            char::from(row.state.byte()),
+            row.label,
+            row.chips(),
             row.line
         )?;
     }
@@ -1418,18 +1855,45 @@ fn cmd_tasks(
 struct CheckedTask<'a> {
     path: &'a Path,
     index: usize,
+    state: tasks::State,
+    /// Retained, and "the state is terminal" — true for done *and* cancelled.
     checked: bool,
     text: &'a str,
     /// The single byte the write changed — ADR-1's *"a byte-range in-place edit
     /// of the character between the brackets"*, reported rather than described.
     offset: usize,
+    /// The date `--stamp` appended, when it did. Absent otherwise, including
+    /// when the item was already stamped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stamped: Option<String>,
 }
 
-fn cmd_check(path: &Path, index: usize, action: Action, json: bool) -> Result<(), CliError> {
+fn cmd_check(
+    path: &Path,
+    index: usize,
+    action: Action,
+    stamp: bool,
+    today: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
     let started = Instant::now();
-    let toggled = tasks::toggle_file(path, index, action)?;
+    let (toggled, stamped) = if stamp {
+        stamped_toggle(path, index, action, today)?
+    } else {
+        // The plain path is untouched: one read, one byte, one atomic write.
+        (tasks::toggle_file(path, index, action)?, None)
+    };
     trace(
-        || format!("toggle {} item {index}", path.display()),
+        || {
+            format!(
+                "toggle {} item {index} -> {}{}",
+                path.display(),
+                toggled.state.as_str(),
+                stamped
+                    .as_ref()
+                    .map_or_else(String::new, |date| format!(" stamped {date}"))
+            )
+        },
         started,
     );
 
@@ -1437,9 +1901,11 @@ fn cmd_check(path: &Path, index: usize, action: Action, json: bool) -> Result<()
         return print_json(&CheckedTask {
             path,
             index: toggled.index,
+            state: toggled.state,
             checked: toggled.checked,
             text: &toggled.text,
             offset: toggled.offset,
+            stamped,
         });
     }
 
@@ -1447,7 +1913,7 @@ fn cmd_check(path: &Path, index: usize, action: Action, json: bool) -> Result<()
     emitln!(
         out,
         "[{}] {}:{}  {}",
-        if toggled.checked { 'x' } else { ' ' },
+        char::from(toggled.state.byte()),
         path.display(),
         toggled.index,
         toggled.text
@@ -1455,6 +1921,173 @@ fn cmd_check(path: &Path, index: usize, action: Action, json: bool) -> Result<()
     out.finish()
 }
 
+/// `mark check --stamp`: the toggle, plus `@done(YYYY-MM-DD)` at the end of the
+/// item, in **one** atomic write.
+///
+/// One write rather than two because two would take the `flock` twice and leave
+/// a window where the file says done and does not say when.
+/// `2026-08-27-inline-task-metadata` requires the insertion offset to come from
+/// the label's own event span, which is what `Task::label_end` carries, and the
+/// write to go through `write_atomically` — so this inherits
+/// `2026-08-25-flock-write-locking` like every other writer.
+fn stamped_toggle(
+    path: &Path,
+    index: usize,
+    action: Action,
+    today: Option<&str>,
+) -> Result<(tasks::Toggled, Option<String>), CliError> {
+    let date = match today {
+        Some(given) => {
+            if tasks::parse_iso_date(given).is_none() {
+                return Err(CliError::Usage(format!(
+                    "cannot read {given:?} as a date: --today takes YYYY-MM-DD"
+                )));
+            }
+            given.to_owned()
+        }
+        None => today_local(),
+    };
+
+    let source = read(path)?;
+    let mut toggled = tasks::toggle(&source, index, action)?;
+
+    // Only a task that has *become* done gets a date, and only once: stamping
+    // an already-stamped item twice is the failure mode this checks for.
+    let task = tasks::enumerate_source(&toggled.source)
+        .into_iter()
+        .nth(index);
+    let stamped = match task {
+        Some(task) if task.state == tasks::State::Done && task.done.is_none() => {
+            let mut out = String::with_capacity(toggled.source.len() + 20);
+            out.push_str(&toggled.source[..task.label_end]);
+            out.push_str(&format!(" @done({date})"));
+            out.push_str(&toggled.source[task.label_end..]);
+            toggled.source = out;
+            toggled.text = format!("{} @done({date})", task.text);
+            Some(date)
+        }
+        _ => None,
+    };
+
+    tasks::write_atomically(path, &toggled.source).map_err(tasks::TaskError::from)?;
+    Ok((toggled, stamped))
+}
+
+/// `mark normalize`: the GFM escape hatch.
+///
+/// `2026-08-27-five-task-states` defines the degrade — `[-] text` becomes
+/// `[x] ~~text~~`, and `[/]` / `[?]` become `[ ]` carrying an `@doing` /
+/// `@blocked` tag, which is what makes it **lossless**: the state is still in
+/// the file, in a spelling GitHub renders as prose.
+///
+/// Writes to **stdout by default**. `--in-place` is required to touch the file,
+/// because a verb whose name does not obviously write should not rewrite a
+/// user's document as its default behaviour.
+fn cmd_normalize(path: &Path, gfm: bool, in_place: bool, check: bool) -> Result<(), CliError> {
+    // `--gfm` is the only mode, and naming it is optional; the flag exists so
+    // that a future `--extended` does not change what a bare invocation does.
+    let _ = gfm;
+    if in_place && check {
+        return Err(CliError::Usage(
+            "--in-place and --check are opposites; pick one".to_owned(),
+        ));
+    }
+
+    let source = read(path)?;
+    let started = Instant::now();
+    let normalized = normalize_to_gfm(&source);
+    let changed = normalized.edits;
+    trace(
+        || format!("normalize {} -> {changed} markers", path.display()),
+        started,
+    );
+
+    if check {
+        let mut out = Output::new();
+        match changed {
+            0 => emitln!(out, "{}: already GFM", path.display())?,
+            _ => emitln!(
+                out,
+                "{}: {changed} extended marker(s) would be rewritten",
+                path.display()
+            )?,
+        }
+        return out.finish();
+    }
+
+    if in_place {
+        if changed > 0 {
+            tasks::write_atomically(path, &normalized.source).map_err(tasks::TaskError::from)?;
+        }
+        let mut out = Output::new();
+        emitln!(out, "{}: {changed} marker(s) rewritten", path.display())?;
+        return out.finish();
+    }
+
+    let mut out = Output::new();
+    emit!(out, "{}", normalized.source)?;
+    out.finish()
+}
+
+struct Normalized {
+    source: String,
+    edits: usize,
+}
+
+/// Every extended marker rewritten as GFM, applied back to front so earlier
+/// offsets stay valid.
+fn normalize_to_gfm(source: &str) -> Normalized {
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+
+    for task in tasks::enumerate_source(source) {
+        let tag = match task.state {
+            tasks::State::InProgress => "doing",
+            tasks::State::Blocked => "blocked",
+            tasks::State::Cancelled => {
+                edits.push((task.start..task.end, "[x]".to_owned()));
+                // Struck *and* ticked, which is how a dropped item should read
+                // on GitHub — but only if it is not struck already. Two checks,
+                // because there are two ways it can be: `- [-] ~~gone~~` puts
+                // the item's first *visible* byte inside the strikethrough, so
+                // the raw source either side is what says so, and
+                // `- [-] a ~~b~~` is partly struck, where wrapping again would
+                // produce `~~a ~~b~~~~` and mangle the markup. Both make
+                // normalizing twice a no-op, which `--in-place` depends on.
+                let struck_already = source[..task.text_start].ends_with("~~");
+                let struck_within = source[task.text_start..task.label_end].contains("~~");
+                if task.text_start < task.label_end && !struck_already && !struck_within {
+                    edits.push((task.text_start..task.text_start, "~~".to_owned()));
+                    edits.push((task.label_end..task.label_end, "~~".to_owned()));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        edits.push((task.start..task.end, "[ ]".to_owned()));
+        if !task.tags.iter().any(|carried| carried.name == tag) {
+            edits.push((task.label_end..task.label_end, format!(" @{tag}")));
+        }
+    }
+
+    let markers = edits.iter().filter(|(range, _)| !range.is_empty()).count();
+    edits.sort_by(|a, b| b.0.start.cmp(&a.0.start).then(b.0.end.cmp(&a.0.end)));
+
+    let mut out = source.to_owned();
+    for (range, replacement) in edits {
+        out.replace_range(range, &replacement);
+    }
+    Normalized {
+        source: out,
+        edits: markers,
+    }
+}
+
+/// One row of `mark ls --json`.
+///
+/// `open` and `total` are kept, and keep meaning exactly what they meant: open
+/// is the `[ ]` count. `outstanding` and `active` are the badge's numerator and
+/// denominator — outstanding over total-minus-cancelled — and the per-state
+/// counts are there so a script does not have to infer them.
 #[derive(Serialize)]
 struct LsRow {
     path: PathBuf,
@@ -1467,6 +2100,18 @@ struct LsRow {
     open: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outstanding: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_progress: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancelled: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked: Option<usize>,
 }
 
 fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(), CliError> {
@@ -1489,6 +2134,12 @@ fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(),
             title: entry.title,
             open: entry.tasks.map(|t| t.open),
             total: entry.tasks.map(|t| t.total),
+            outstanding: entry.tasks.map(|t| t.outstanding()),
+            active: entry.tasks.map(|t| t.active()),
+            in_progress: entry.tasks.map(|t| t.in_progress),
+            done: entry.tasks.map(|t| t.done),
+            cancelled: entry.tasks.map(|t| t.cancelled),
+            blocked: entry.tasks.map(|t| t.blocked),
         })
         .collect();
 
@@ -1504,9 +2155,17 @@ fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(),
             continue;
         }
         let title = row.title.as_deref().unwrap_or("");
-        match (row.open, row.total) {
-            (Some(open), Some(total)) if total > 0 => {
-                emitln!(out, "{indent}{}  {title}  [{open}/{total}]", row.name)?;
+        // Outstanding over active, which for a document with no extended
+        // markers *is* open over total — so no existing listing changes. A file
+        // whose every task is cancelled shows no count, on the same grounds the
+        // sidebar badge suppresses `0/0`.
+        match (row.outstanding, row.active) {
+            (Some(outstanding), Some(active)) if active > 0 => {
+                emitln!(
+                    out,
+                    "{indent}{}  {title}  [{outstanding}/{active}]",
+                    row.name
+                )?;
             }
             _ => emitln!(out, "{indent}{}  {title}", row.name)?,
         }
@@ -1757,9 +2416,19 @@ fn cmd_stats(path: &Path, json: bool) -> Result<(), CliError> {
     emitln!(out, "headings          {}", stats.headings)?;
     emitln!(
         out,
-        "tasks             {} open / {} total",
-        stats.tasks.open,
+        "tasks             {} outstanding / {} active / {} total",
+        stats.tasks.outstanding(),
+        stats.tasks.active(),
         stats.tasks.total
+    )?;
+    emitln!(
+        out,
+        "task states       {} open / {} in progress / {} done / {} cancelled / {} blocked",
+        stats.tasks.open,
+        stats.tasks.in_progress,
+        stats.tasks.done,
+        stats.tasks.cancelled,
+        stats.tasks.blocked
     )?;
     emitln!(out, "parse             {:.3} ms", stats.parse_ms)?;
     emitln!(out, "render            {:.3} ms", stats.render_ms)?;
@@ -2204,8 +2873,9 @@ mod tests {
             on: false,
             off: false,
             toggle: false,
+            state: None,
         };
-        assert_eq!(action.action(), Action::Toggle);
+        assert_eq!(action.action().unwrap(), Action::Toggle);
     }
 
     #[test]
@@ -2214,14 +2884,202 @@ mod tests {
             on: true,
             off: false,
             toggle: false,
+            state: None,
         };
-        assert_eq!(on.action(), Action::On);
+        assert_eq!(on.action().unwrap(), Action::On);
         let off = CheckAction {
             on: false,
             off: true,
             toggle: false,
+            state: None,
         };
-        assert_eq!(off.action(), Action::Off);
+        assert_eq!(off.action().unwrap(), Action::Off);
+    }
+
+    /// `--state` reaches the same enum, for all five states, and an unknown
+    /// name is a usage error rather than a default.
+    #[test]
+    fn check_state_names_map_to_the_core_enum() {
+        for (name, expected) in [
+            ("open", Action::Off),
+            ("in-progress", Action::InProgress),
+            ("done", Action::On),
+            ("cancelled", Action::Cancel),
+            ("blocked", Action::Block),
+        ] {
+            let action = CheckAction {
+                on: false,
+                off: false,
+                toggle: false,
+                state: Some(name.to_owned()),
+            };
+            assert_eq!(action.action().unwrap(), expected, "--state {name}");
+        }
+
+        let bad = CheckAction {
+            on: false,
+            off: false,
+            toggle: false,
+            state: Some("doing".to_owned()),
+        };
+        let error = bad.action().expect_err("unknown state is a usage error");
+        assert_eq!(error.code(), EXIT_USAGE);
+        assert!(error.to_string().contains("in-progress"), "{error}");
+    }
+
+    #[test]
+    fn dates_round_trip_through_the_day_number() {
+        for date in ["1970-01-01", "2000-02-29", "2026-08-27", "2100-03-01"] {
+            let (year, month, day) = tasks::parse_iso_date(date).expect("a date");
+            assert_eq!(civil_from_days(days_from_civil(year, month, day)), date);
+        }
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(1), "1970-01-02");
+    }
+
+    #[test]
+    fn when_arguments_accept_a_date_today_and_an_offset() {
+        assert_eq!(
+            resolve_when("2026-09-01", "2026-08-27").unwrap(),
+            "2026-09-01"
+        );
+        assert_eq!(resolve_when("today", "2026-08-27").unwrap(), "2026-08-27");
+        assert_eq!(resolve_when("+7d", "2026-08-27").unwrap(), "2026-09-03");
+        assert_eq!(resolve_when("-1d", "2026-08-27").unwrap(), "2026-08-26");
+        let error = resolve_when("friday", "2026-08-27").expect_err("not a date");
+        assert_eq!(error.code(), EXIT_USAGE);
+    }
+
+    /// `mark normalize`'s degrade, and its idempotence — running it twice must
+    /// change nothing the second time, or `--in-place` would grow `~~` markers
+    /// on every run.
+    #[test]
+    fn normalize_degrades_every_extended_marker_losslessly() {
+        let source = "- [/] doing\n- [-] dropped\n- [?] stuck\n- [ ] plain\n- [x] done\n";
+        let once = normalize_to_gfm(source);
+        assert_eq!(once.edits, 3);
+        assert_eq!(
+            once.source,
+            "- [ ] doing @doing\n- [x] ~~dropped~~\n- [ ] stuck @blocked\n- [ ] plain\n- [x] done\n"
+        );
+
+        // Lossless: the state is still readable from the file.
+        let tasks = tasks::enumerate_source(&once.source);
+        assert!(tasks[0].tags.iter().any(|tag| tag.name == "doing"));
+        assert!(tasks[2].tags.iter().any(|tag| tag.name == "blocked"));
+        // And the cancelled item is now done *and* struck, not merely done.
+        assert_eq!(tasks[1].state, tasks::State::Done);
+        assert_eq!(tasks[1].text, "dropped");
+
+        // Pure GFM afterwards: no extended marker survives.
+        let counts = tasks::counts(&once.source);
+        assert_eq!(
+            (counts.in_progress, counts.cancelled, counts.blocked),
+            (0, 0, 0)
+        );
+
+        let twice = normalize_to_gfm(&once.source);
+        assert_eq!(twice.edits, 0);
+        assert_eq!(twice.source, once.source);
+    }
+
+    #[test]
+    fn normalize_leaves_a_gfm_document_byte_identical() {
+        let source = "# T\n\n- [ ] one\n- [x] two\n\nA literal [ ] in prose.\n";
+        let out = normalize_to_gfm(source);
+        assert_eq!(out.edits, 0);
+        assert_eq!(out.source, source);
+    }
+
+    #[test]
+    fn normalize_does_not_double_strike_an_already_struck_item() {
+        let out = normalize_to_gfm("- [-] ~~gone~~\n");
+        assert_eq!(out.source, "- [x] ~~gone~~\n");
+    }
+
+    #[test]
+    fn normalize_leaves_a_partly_struck_item_alone() {
+        // Wrapping this again would write `~~a ~~b~~~~`, which is worse than
+        // not wrapping it.
+        let out = normalize_to_gfm("- [-] a ~~b~~\n");
+        assert_eq!(out.source, "- [x] a ~~b~~\n");
+    }
+
+    #[test]
+    fn normalize_keeps_a_tag_it_would_have_added() {
+        let out = normalize_to_gfm("- [/] a @doing\n");
+        assert_eq!(out.source, "- [ ] a @doing\n");
+    }
+
+    #[test]
+    fn a_query_filters_on_state_tag_priority_and_date() {
+        let source = "- [ ] a @work @due(2026-09-10) !\n- [/] b @home @due(2026-08-01)\n\
+                      - [x] c @work\n- [-] d\n- [?] e @work !!!\n";
+        let tasks = tasks::enumerate_source(source);
+        let labels = |query: &TaskQuery| -> Vec<String> {
+            tasks
+                .iter()
+                .filter(|task| query.matches(task))
+                .map(|task| task.label.clone())
+                .collect()
+        };
+        let query = |args: &[(&str, &str)]| -> TaskQuery {
+            let get = |name: &str| {
+                args.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| *value)
+            };
+            let states: Vec<String> = args
+                .iter()
+                .filter(|(key, _)| *key == "state")
+                .map(|(_, value)| (*value).to_owned())
+                .collect();
+            let tags: Vec<String> = args
+                .iter()
+                .filter(|(key, _)| *key == "tag")
+                .map(|(_, value)| (*value).to_owned())
+                .collect();
+            TaskQuery::new(
+                get("open").is_some(),
+                &states,
+                &tags,
+                get("priority").map(|v| v.parse().unwrap()),
+                get("due-before"),
+                get("due-after"),
+                get("overdue").is_some(),
+                get("no-due").is_some(),
+                get("sort"),
+                Some("2026-08-27"),
+            )
+            .expect("a valid query")
+        };
+
+        assert_eq!(labels(&query(&[("open", "")])), ["a", "b", "e"]);
+        assert_eq!(
+            labels(&query(&[("state", "done"), ("state", "cancelled")])),
+            ["c", "d"]
+        );
+        assert_eq!(labels(&query(&[("tag", "@work")])), ["a", "c", "e"]);
+        assert_eq!(labels(&query(&[("priority", "2")])), ["e"]);
+        assert_eq!(labels(&query(&[("overdue", "")])), ["b"]);
+        assert_eq!(labels(&query(&[("no-due", "")])), ["c", "d", "e"]);
+        assert_eq!(labels(&query(&[("due-before", "+14d")])), ["b"]);
+        assert_eq!(labels(&query(&[("due-after", "today")])), ["a"]);
+
+        // Ordering, over the same document.
+        let ordered = |key: &str| -> Vec<String> {
+            let mut rows: Vec<TaskRow> = tasks
+                .iter()
+                .cloned()
+                .map(|task| TaskRow::new(PathBuf::from("q.md"), task))
+                .collect();
+            query(&[("sort", key)]).order(&mut rows);
+            rows.into_iter().map(|row| row.label).collect()
+        };
+        assert_eq!(ordered("index"), ["a", "b", "c", "d", "e"]);
+        assert_eq!(ordered("due"), ["b", "a", "c", "d", "e"]);
+        assert_eq!(ordered("priority"), ["e", "a", "b", "c", "d"]);
+        assert_eq!(ordered("state"), ["a", "b", "c", "d", "e"]);
     }
 
     #[test]

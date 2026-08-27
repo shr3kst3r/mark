@@ -66,6 +66,60 @@
     };
   };
 
+  /* --------------------------------------------------- due-date colouring */
+
+  /*
+   * Mark the `@due(...)` chips that are overdue or due today.
+   *
+   * This is the app's half of `2026-08-27-inline-task-metadata`, and the reason
+   * it is here rather than in the renderer is the whole point of that ADR's
+   * "the renderer never reads a clock": `mark render --html` has to be a pure
+   * function of its source so its output can be memoized and so the same
+   * document does not render differently tomorrow. The core therefore emits a
+   * neutral chip carrying its own date — `<span class="mk-tag"
+   * data-mk-due="2026-09-01">` — and the comparison happens once, here, in a
+   * script that is injected into the shell and is *not* JavaScript in the
+   * emitted document.
+   *
+   * `root` is whatever has just arrived: the injected prefix, the detached tail
+   * before the pump moves it, or a patch's parsed blocks. Never the whole
+   * document — ADR-2 forbids assuming it is all in the DOM, and a walk per
+   * chunk is bounded by the chunk.
+   */
+  function today() {
+    var now = new Date();
+    var month = now.getMonth() + 1;
+    var day = now.getDate();
+    return (
+      now.getFullYear() + "-" + (month < 10 ? "0" : "") + month + "-" + (day < 10 ? "0" : "") + day
+    );
+  }
+
+  function paintDue(root) {
+    if (!root || !root.querySelectorAll) return 0;
+    var chips = root.querySelectorAll(".mk-tag[data-mk-due]");
+    if (chips.length === 0) return 0;
+    /* Read once per chunk, not once per chip: a document can carry thousands,
+     * and the answer cannot change inside one pass. */
+    var now = today();
+    for (var i = 0; i < chips.length; i++) {
+      var due = chips[i].getAttribute("data-mk-due");
+      /* ISO dates compare lexicographically, which is the whole reason the
+       * core validates the format and refuses to type anything else as a
+       * date. */
+      if (due < now) {
+        chips[i].classList.add("mk-overdue");
+      } else if (due === now) {
+        chips[i].classList.add("mk-due-today");
+      }
+    }
+    return chips.length;
+  }
+
+  mark.paintDue = function () {
+    return paintDue(container);
+  };
+
   /* -------------------------------------------------------------- painting */
 
   /*
@@ -90,6 +144,9 @@
     container.innerHTML = html;
     var t1 = performance.now();
     stats.documents += 1;
+    /* After the injection is timed, because it is the app's own decoration
+     * rather than part of what ADR-2's first-paint budget is measuring. */
+    paintDue(container);
 
     var first = container.firstElementChild;
     var firstHeight = first ? first.getBoundingClientRect().height : 0;
@@ -142,6 +199,10 @@
     template.innerHTML = html;
     pending = template.content;
     pendingRemaining = pending.childElementCount;
+    /* While still detached: adding a class here costs a tree walk and no
+     * layout, where doing it after the pump has moved a slice in would
+     * invalidate style on nodes the reader is already looking at. */
+    paintDue(pending);
     var parseMs = performance.now() - t0;
 
     fillStartedAt = performance.now();
@@ -523,6 +584,7 @@
     if (typeof html !== "string") return null;
     var template = document.createElement("template");
     template.innerHTML = html;
+    paintDue(template.content);
     return template.content;
   }
 
@@ -566,11 +628,16 @@
       input.setAttribute("data-mk-idx", String(task.index));
       input.setAttribute("data-mk-start", String(task.start));
       input.setAttribute("data-mk-end", String(task.end));
-      /* Content attribute *and* property. The attribute is what a fresh render
-       * emits and what `rendered` is read from on a click; the property is what
-       * the box draws. A kept block cannot have drifted — its bytes are
-       * identical — so this is belt and braces, and it costs one comparison. */
-      if (task.checked) {
+      /* `data-mk-state` is the authority: it is what the stylesheet paints from
+       * and what a click reports as the rendered state. Five states, one per
+       * marker byte (2026-08-27-five-task-states). */
+      input.setAttribute("data-mk-state", task.state);
+      input.setAttribute("aria-label", task.state === "in-progress" ? "in progress" : task.state);
+      /* Content attribute *and* property, for `done` only — which is exactly
+       * what a fresh render emits. `checked` is the *terminal* question in the
+       * core's JSON and cancelled answers it yes, so the box would draw ticked
+       * from `task.checked`; it must come from the state instead. */
+      if (task.state === "done") {
         input.setAttribute("checked", "");
         input.checked = true;
       } else {
@@ -1167,28 +1234,45 @@
    * rather than an optimistic flip that has to be undone when the write is
    * refused.
    *
-   * Two states are reported, and the difference matters. `checked` is the
-   * checkbox **property**, which the browser flipped during the pre-click
-   * activation steps and which `preventDefault` is about to put back: it is
-   * what the user is asking for. `rendered` is the **content attribute**, which
-   * a click never touches: it is what the core emitted, and therefore what the
-   * page believes the file says. Swift compares the second against the file to
-   * tell a stale page from a fresh one.
+   * Two states are reported, both by name, and the difference matters.
+   * `renderedState` is the `data-mk-state` **content attribute**, which a click
+   * never touches: it is what the core emitted, and therefore what the page
+   * believes the file says. Swift compares it against the file to tell a stale
+   * page from a fresh one. `state` is what the user is asking for.
+   *
+   * The requested state is derived **here** rather than read off the element.
+   * With five states (2026-08-27-five-task-states) there is no longer a
+   * property the browser can have flipped for us during the pre-click
+   * activation steps: `target.checked` cannot express in-progress, blocked or
+   * cancelled, and for a cancelled box it is false where the core's own
+   * `checked` — "the state is terminal" — is true. So the rule lives in one
+   * place in each language: a plain click toggles open<->done and ticks
+   * anything else, and Alt-click cancels.
    */
+  function desiredStateFor(rendered, event) {
+    if (event.altKey) return "cancelled";
+    return rendered === "done" ? "open" : "done";
+  }
+
+  function taskPayload(target) {
+    return {
+      index: Number(target.getAttribute("data-mk-idx")),
+      start: Number(target.getAttribute("data-mk-start")),
+      end: Number(target.getAttribute("data-mk-end")),
+      renderedState: target.getAttribute("data-mk-state") || "open"
+    };
+  }
+
   document.addEventListener(
     "click",
     function (event) {
       var target = event.target;
       if (target && target.classList && target.classList.contains("mk-task")) {
         event.preventDefault();
-        post({
-          kind: "toggle",
-          index: Number(target.getAttribute("data-mk-idx")),
-          start: Number(target.getAttribute("data-mk-start")),
-          end: Number(target.getAttribute("data-mk-end")),
-          checked: !!target.checked,
-          rendered: target.hasAttribute("checked")
-        });
+        var message = taskPayload(target);
+        message.kind = "toggle";
+        message.state = desiredStateFor(message.renderedState, event);
+        post(message);
         return;
       }
       var link = target && target.closest ? target.closest("a[href]") : null;
@@ -1196,6 +1280,34 @@
         event.preventDefault();
         post({ kind: "link", href: link.getAttribute("href") });
       }
+    },
+    true
+  );
+
+  /*
+   * Right-click on a checkbox: the state picker.
+   *
+   * The menu itself is an `NSMenu` in Swift. It cannot be markup in the page —
+   * ADR-5 allows the emitted document no JavaScript of its own, and a menu
+   * drawn in the document would need some — and it should not be, because a
+   * five-item AppKit menu is what a right-click on macOS is supposed to
+   * produce. So this reports the position and lets Swift put it there.
+   *
+   * `preventDefault` suppresses WebKit's own menu for this one element only;
+   * a right-click anywhere else in the document keeps Copy, Look Up, and
+   * Services.
+   */
+  document.addEventListener(
+    "contextmenu",
+    function (event) {
+      var target = event.target;
+      if (!target || !target.classList || !target.classList.contains("mk-task")) return;
+      event.preventDefault();
+      var message = taskPayload(target);
+      message.kind = "taskMenu";
+      message.x = event.clientX;
+      message.y = event.clientY;
+      post(message);
     },
     true
   );

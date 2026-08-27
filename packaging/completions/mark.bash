@@ -11,7 +11,12 @@ _mark_complete() {
     previous="${COMP_WORDS[COMP_CWORD-1]}"
     command="${COMP_WORDS[1]}"
 
-    local commands="render toc tasks check ls grep stats doctor open tab theme goto reload sidebar nav"
+    local commands="render toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav"
+
+    # The five task states (2026-08-27-five-task-states). Hard-coded: no verb
+    # lists them, and an unknown name is a usage error rather than a filter that
+    # matches nothing.
+    local states="open in-progress done cancelled blocked"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         mapfile -t COMPREPLY < <(compgen -W "${commands} --help --version" -- "${current}")
@@ -27,7 +32,26 @@ _mark_complete() {
             mapfile -t COMPREPLY < <(compgen -W "${themes}" -- "${current}")
             return
             ;;
-        --prefix|--depth|--item)
+        --state)
+            mapfile -t COMPREPLY < <(compgen -W "${states}" -- "${current}")
+            return
+            ;;
+        --sort)
+            mapfile -t COMPREPLY < <(compgen -W "due priority state index" -- "${current}")
+            return
+            ;;
+        --priority)
+            mapfile -t COMPREPLY < <(compgen -W "1 2 3" -- "${current}")
+            return
+            ;;
+        --due-before|--due-after)
+            # A date, `today`, or a `+Nd` offset. Only the word is completable.
+            mapfile -t COMPREPLY < <(compgen -W "today" -- "${current}")
+            return
+            ;;
+        # A tag, a date, and the numeric arguments are all typed: offering a
+        # filename for them, as the fallback below would, is worse than nothing.
+        --prefix|--depth|--item|--tag|--today)
             return
             ;;
         --import)
@@ -40,8 +64,13 @@ _mark_complete() {
     case "${command}" in
         render) options="--html --ansi --plain --prefix --theme" ;;
         toc|stats) options="--json" ;;
-        tasks) options="--open --json --depth" ;;
-        check) options="--item --on --off --toggle --json" ;;
+        tasks)
+            options="--open --state --tag --priority --due-before --due-after"
+            options="${options} --overdue --no-due --sort --today --json --depth"
+            ;;
+        check) options="--item --on --off --toggle --state --stamp --today --json" ;;
+        # `normalize` writes to stdout unless --in-place; --check writes nowhere.
+        normalize) options="--gfm --in-place --check" ;;
         ls) options="--json --depth --all" ;;
         grep) options="--json --ignore-case --depth" ;;
         doctor|reload|sidebar) options="--json" ;;

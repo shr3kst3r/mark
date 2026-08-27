@@ -113,22 +113,27 @@ final class PatchHarness {
         try await view.call(body, arguments: arguments)
     }
 
-    /// Every checkbox in the DOM, as `(idx, start, end, checked)`.
-    func domTasks() async throws -> [[Int]] {
+    /// Every checkbox in the DOM, as `idx:start:end:state`.
+    ///
+    /// `data-mk-state` rather than the `checked` attribute: the core's
+    /// `checked` means "the state is terminal", so it is true for a cancelled
+    /// marker the page draws unticked (`2026-08-27-five-task-states`), and a
+    /// comparison built on it would both report false disagreements and hide
+    /// real ones.
+    func domTasks() async throws -> [String] {
         let value = try await view.call(
             """
             var out = [];
             var boxes = document.querySelectorAll('#mk-doc input.mk-task');
             for (var i = 0; i < boxes.length; i++) {
-              out.push([Number(boxes[i].getAttribute('data-mk-idx')),
-                        Number(boxes[i].getAttribute('data-mk-start')),
-                        Number(boxes[i].getAttribute('data-mk-end')),
-                        boxes[i].hasAttribute('checked') ? 1 : 0]);
+              out.push([boxes[i].getAttribute('data-mk-idx'),
+                        boxes[i].getAttribute('data-mk-start'),
+                        boxes[i].getAttribute('data-mk-end'),
+                        boxes[i].getAttribute('data-mk-state')].join(':'));
             }
             return out;
             """)
-        return (value as? [[Any]])?.map { row in row.map { ($0 as? NSNumber)?.intValue ?? -1 } }
-            ?? []
+        return (value as? [String]) ?? []
     }
 
     /// Every `<div class="mk-blk">`'s `data-mk-start`, in document order.
@@ -146,9 +151,9 @@ final class PatchHarness {
     }
 
     /// The same, from the core — the authority.
-    func coreTasks(of source: String) throws -> [[Int]] {
+    func coreTasks(of source: String) throws -> [String] {
         try MarkCore.tasks(source: source).map {
-            [$0.index, $0.start, $0.end, $0.checked ? 1 : 0]
+            "\($0.index):\($0.start):\($0.end):\($0.state.rawValue)"
         }
     }
 }
@@ -183,7 +188,7 @@ struct DocumentPatchTests {
 
         let harness = try await PatchHarness(old)
         let before = try await harness.domTasks()
-        #expect(before == [[0, 2, 5, 0]], "the starting render: one task, index 0")
+        #expect(before == ["0:2:5:open"], "the starting render: one task, index 0")
 
         // Mark the block that must survive, with a JS property rather than an
         // attribute so the tagging cannot itself change the serialized HTML.
@@ -211,8 +216,8 @@ struct DocumentPatchTests {
         let authority = try harness.coreTasks(of: new)
         #expect(after == authority, "the DOM's task attributes disagree with mark_tasks_json")
         #expect(after.count == 2)
-        #expect(after[1][0] == 1, "the kept task is index 1 now, not 0")
-        #expect(after[1][1] != before[0][1], "its byte span moved")
+        #expect(after[1].hasPrefix("1:"), "the kept task is index 1 now, not 0")
+        #expect(after[1] != before[0], "its byte span moved")
     }
 
     /// The quiet variant, and the reason a no-op edit script is still applied.
@@ -239,6 +244,78 @@ struct DocumentPatchTests {
 
         #expect(after != before, "the offsets moved and the DOM did not follow")
         #expect(after == (try harness.coreTasks(of: new)))
+    }
+
+    // MARK: - Due dates, coloured in the app and nowhere else
+
+    /// `2026-08-27-inline-task-metadata` splits this deliberately: the core
+    /// emits a neutral chip carrying its own date, because a renderer that read
+    /// a clock would stop being a pure function of its source, and the *app*
+    /// compares that date against today in the shell script. So the class is
+    /// absent from the core's HTML and present in the DOM.
+    ///
+    /// Asserted through a real page rather than by reading `shell.js`, because
+    /// what matters is that the comparison happens on injection — including for
+    /// blocks that arrive later, which is where a whole-document walk would
+    /// have broken ADR-2's "nothing may assume the document is all in the DOM".
+    @Test("an overdue chip is classed in the page, and never by the renderer")
+    func overdueChipsAreClassedInThePage() async throws {
+        // The *local* date, which is what the page compares against: a UTC
+        // formatter would put this test's "today" on the wrong side of
+        // midnight for anyone west of Greenwich.
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = formatter.string(from: Date())
+        let source = """
+            - [ ] long overdue @due(2020-01-01)
+
+            ***
+
+            - [ ] due today @due(\(today))
+
+            ***
+
+            - [ ] miles off @due(2999-12-31)
+
+            ***
+
+            - [ ] no date at all @work
+            """
+        // The renderer's own output carries the dates and no verdict about them.
+        let html = try MarkCore.renderHTML(source: source)
+        #expect(html.contains("data-mk-due=\"2020-01-01\""))
+        #expect(!html.contains("mk-overdue"))
+        #expect(!html.contains("mk-due-today"))
+
+        let harness = try await PatchHarness(source)
+        let classes = try await harness.js(
+            """
+            var out = [];
+            var chips = document.querySelectorAll('#mk-doc .mk-tag[data-mk-due]');
+            for (var i = 0; i < chips.length; i++) out.push(chips[i].className);
+            return out;
+            """) as? [String] ?? []
+        #expect(classes.count == 3, "three dated chips, got \(classes)")
+        #expect(classes.first?.contains("mk-overdue") == true)
+        #expect(classes.dropFirst().first?.contains("mk-due-today") == true)
+        #expect(classes.last == "mk-tag", "a future date is neither overdue nor due today")
+
+        // And a chip that arrives in a *patch* is painted too — a document is
+        // injected in two halves and patched afterwards, so painting only the
+        // first injection would leave later blocks uncoloured.
+        try await harness.patch(to: source + "\n\n***\n\n- [ ] also late @due(2019-05-05)\n")
+        let afterPatch = try await harness.js(
+            "return document.querySelectorAll('#mk-doc .mk-tag.mk-overdue').length;")
+        #expect((afterPatch as? NSNumber)?.intValue == 2, "the patched-in chip was not painted")
+
+        // Re-running it over the whole document changes nothing: the class is
+        // added, never toggled, so a second pass is idempotent. This is also
+        // the hook a diagnostic reaches for when a chip looks wrong.
+        let repainted = try await harness.js("return window.mark.paintDue();")
+        #expect((repainted as? NSNumber)?.intValue == 4, "four dated chips after the patch")
+        let stillTwo = try await harness.js(
+            "return document.querySelectorAll('#mk-doc .mk-tag.mk-overdue').length;")
+        #expect((stillTwo as? NSNumber)?.intValue == 2)
     }
 
     // MARK: - Patched equals fresh

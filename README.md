@@ -269,8 +269,24 @@ the path bar for **New Document Here…**, which starts the panel in that folder
 The write goes through the same locked, atomic path autosave uses, so aiming it
 at a file another mark has unsaved changes to is refused rather than clobbered.
 
-**Checkboxes.** Clicking one in the preview writes one byte to the file — the
-character between the brackets — via temp-file-plus-rename. The document is
+**Checkboxes, in five states.** `[ ]` open, `[/]` in progress, `[x]` done, `[-]`
+cancelled, `[?]` blocked — one byte between the brackets, and mark draws every
+box itself so a half-filled one is possible at all. A cancelled item is struck
+through and **leaves the denominator**: a list you abandoned two of seven items
+in reads `3/5`, not `3/7`, which is what stops the counts lying about work you
+dropped. Only `[ ]` and `[x]` are GitHub-flavoured markdown; `mark normalize`
+degrades the other three losslessly for publishing.
+
+A task can also carry metadata in its own text — `@work`, `@due(2026-09-01)`,
+`@waiting-on-legal`, and `!`/`!!`/`!!!` for priority — as plain prose that every
+other markdown tool passes through untouched. No tag ever changes a count; the
+marker byte owns the arithmetic and a tag is something to filter on. Overdue
+dates are coloured in the window and deliberately not in `mark render --html`,
+which stays a pure function of your file.
+
+Clicking a box in the preview writes one byte to the file — the character
+between the brackets — via temp-file-plus-rename. A plain click ticks it,
+⌥-click cancels it, and right-click offers all five states. The document is
 re-parsed immediately before the write, and if the target span no longer holds a
 task marker the write is refused rather than guessed. While a tab is dirty the
 click applies to the buffer instead, so the preview and the file can never
@@ -289,9 +305,11 @@ script or an agent is usually in:
 |---|---|
 | `mark render <f> [--html\|--ansi\|--plain] [--prefix N] [--theme NAME]` | A styled document on stdout. `--html` is self-contained: both palettes, inline MathML and SVG, no JavaScript. |
 | `mark toc <f> [--json]` | The heading tree, with anchors, byte offsets, and block ids. |
-| `mark tasks [path] [--open] [--json]` | Every task: path, index, state, text, byte span. |
-| `mark check <f> --item N [--on\|--off\|--toggle] [--json]` | Flips one checkbox by changing exactly one byte. Refuses, with exit 6, if another `mark` holds the file — see below. |
-| `mark ls [dir] [--json] [--depth N] [--all]` | Markdown files with titles and open/total task counts. |
+| `mark tasks [path] [--open] [--state <s>] [--json]` | Every task: path, index, state, text, byte span. `--open` is everything still outstanding — open, in progress, or blocked. |
+| `mark tasks [path] [--tag @t] [--priority N] [--due-before\|--due-after <when>] [--overdue] [--no-due] [--sort due\|priority\|state\|index] [--today YYYY-MM-DD]` | The metadata filters. `<when>` is a date, `today`, or `+Nd`. `--today` is the only place a date comparison reads a clock, and naming it makes the answer testable. |
+| `mark check <f> --item N [--on\|--off\|--toggle\|--state <s>] [--stamp] [--json]` | Flips one checkbox by changing exactly one byte. `--state` reaches the other three; `--stamp` also appends `@done(YYYY-MM-DD)`, in the same atomic write. Refuses, with exit 6, if another `mark` holds the file — see below. |
+| `mark normalize <f> [--gfm] [--in-place] [--check]` | Rewrites `[-]`, `[/]` and `[?]` as GFM, losslessly: struck-and-ticked, or `[ ]` with a `@doing`/`@blocked` tag. **Writes to stdout** unless `--in-place`. |
+| `mark ls [dir] [--json] [--depth N] [--all]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. |
 | `mark grep <pat> [path] [--json] [-i]` | Regex search, reporting the heading each match sits under. |
 | `mark stats <f> [--json]` | Per-stage timings and counters. |
 | `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, theme dir, asset load time. |
@@ -316,6 +334,14 @@ index out of range, `4` the app could not be reached, `5` the app refused the
 command, `6` another `mark` holds the document's write lock. 4 and 5 are the
 useful split for a caller: 4 is worth retrying, 5 is not. `MARK_TRACE=1` writes
 per-stage timings to stderr, never to stdout, so it cannot corrupt `--json`.
+
+**A task's index is its position among the tasks mark recognises**, and that set
+grew when `[/]`, `[-]` and `[?]` became markers. A document that gains one of
+those renumbers every task below it, so an index held across such an edit — in a
+script, or in a listing you printed a minute ago — is stale. Re-read
+`mark tasks` rather than carrying an index across a change to the file. Measured
+blast radius on documents that exist today: zero, since none of them use those
+markers yet.
 
 **Writes take an `flock(2)`.** A window with unsaved edits holds an exclusive
 lock on that document for exactly as long as it is dirty, and a CLI write to it

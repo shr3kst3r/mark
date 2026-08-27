@@ -390,9 +390,15 @@ func measureBadges(files: Int = 400) async {
         guard let source = try? String(contentsOf: url, encoding: .utf8),
             let tasks = try? MarkCore.tasks(source: source)
         else { continue }
-        let open = tasks.filter { !$0.checked }.count
-        if badge.open != open || badge.total != tasks.count {
-            wrong.append("\(url.lastPathComponent): \(badge.open)/\(badge.total) != \(open)/\(tasks.count)")
+        // Outstanding over active, not unchecked over total: cancelled items
+        // are terminal but not ticked, so `!checked` and "still to do" are
+        // different questions since `2026-08-27-five-task-states`, and the
+        // badge answers the second one.
+        let expected = TaskCounts(tasks)
+        if badge.outstanding != expected.outstanding || badge.active != expected.active {
+            wrong.append(
+                "\(url.lastPathComponent): \(badge.outstanding)/\(badge.active) != \(expected.outstanding)/\(expected.active)"
+            )
         }
         checked += 1
     }

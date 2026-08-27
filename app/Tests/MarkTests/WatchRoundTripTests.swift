@@ -123,13 +123,141 @@ struct WatchRoundTripTests {
         #expect(try harness.contents(of: "tasks.md") == "# Tasks\n\n- [ ] first\n\nnote\n\n- [x] second\n")
 
         // The watcher, not the click, is what moved the DOM.
+        //
+        // Selected on `data-mk-state`, not on `[checked]`: the two agree for
+        // done, but `checked` in the core's JSON means "terminal" and so is
+        // true for a cancelled marker that draws unticked
+        // (`2026-08-27-five-task-states`). Asserting on the attribute the
+        // stylesheet actually paints from is the assertion that stays true.
         #expect(
             await harness.waitUntil("the DOM to catch up") {
-                let checked = try? await tab.documentView?.call(
-                    "return document.querySelectorAll('#mk-doc input.mk-task[checked]').length;")
-                return ((checked as? NSNumber)?.intValue ?? 0) == 1
+                let done = try? await tab.documentView?.call(
+                    "return document.querySelectorAll('#mk-doc input.mk-task[data-mk-state=\"done\"]').length;"
+                )
+                return ((done as? NSNumber)?.intValue ?? 0) == 1
             })
         #expect(tab.documentView?.renderedSource == (try harness.contents(of: "tasks.md")))
+    }
+
+    /// A plain click on a marker that is not open or done ticks it, derived in
+    /// the page rather than read off a property the browser can no longer
+    /// compute. All three extended markers, through one page.
+    @Test("a plain click on an extended marker ticks it")
+    func plainClickTicksAnExtendedMarker() async throws {
+        let harness = try RoundTripHarness()
+        let tab = try await harness.open("- [/] one\n\n***\n\n- [?] two\n\n***\n\n- [-] three\n", named: "x.md")
+
+        for position in 0..<3 {
+            try await harness.clickCheckbox(at: position, in: tab)
+            #expect(
+                await harness.waitUntil("task \(position) to be ticked") {
+                    let tasks = try? MarkCore.tasks(source: harness.contents(of: "x.md"))
+                    return tasks?[position].state == .done
+                },
+                "clicking \(position) left \((try? harness.contents(of: "x.md")) ?? "?")")
+        }
+    }
+
+    /// The right-click state picker, end to end: the page reports the marker
+    /// and where it was clicked, the app builds a five-item menu, and picking
+    /// an item goes down the same write path a plain click takes — one byte,
+    /// no second writer.
+    ///
+    /// `2026-08-27-five-task-states`: *"reaching any other state is explicit:
+    /// ⌥-click or the context menu in the app."*
+    @Test("right-clicking a checkbox offers five states, and picking one writes it")
+    func rightClickPicksAState() async throws {
+        let harness = try RoundTripHarness()
+        let source = "# Tasks\n\n- [/] started\n"
+        let tab = try await harness.open(source, named: "tasks.md")
+        let view = try #require(tab.documentView)
+
+        // `NSMenu.popUp` is modal, so the menu is captured rather than shown.
+        var captured: (menu: NSMenu, point: NSPoint)?
+        view.presentMenu = { menu, point in captured = (menu, point) }
+
+        let dispatched = try await view.call(
+            """
+            var box = document.querySelector('#mk-doc input.mk-task');
+            if (!box) return false;
+            box.dispatchEvent(new MouseEvent("contextmenu", {
+              bubbles: true, cancelable: true, clientX: 40, clientY: 120
+            }));
+            return true;
+            """)
+        #expect((dispatched as? Bool) == true)
+
+        #expect(await harness.waitUntil("the menu to be built") { captured != nil })
+        let menu = try #require(captured?.menu)
+        #expect(menu.items.count == 5, "one item per state")
+        #expect(
+            menu.items.map(\.title) == TaskState.allCases.map(DocumentView.menuTitle(for:)))
+        // The state the marker is already in is ticked and not re-pickable.
+        let current = try #require(menu.items.first { $0.state == .on })
+        #expect(current.title == DocumentView.menuTitle(for: .inProgress))
+        #expect(!current.isEnabled)
+        #expect(menu.items.filter(\.isEnabled).count == 4)
+        // Page coordinates grow downwards, the view's upwards.
+        #expect(captured?.point.y == view.webView.bounds.height - 120)
+
+        // Picking "Cancelled" writes the one byte, from the state the page
+        // reported rather than from anything re-queried.
+        let cancelled = try #require(
+            menu.items.first { $0.title == DocumentView.menuTitle(for: .cancelled) })
+        NSApp.sendAction(cancelled.action!, to: cancelled.target, from: cancelled)
+        #expect(
+            await harness.waitUntil("the file to take the picked state") {
+                (try? harness.contents(of: "tasks.md")) == "# Tasks\n\n- [-] started\n"
+            })
+    }
+
+    /// ⌥-click, the shortcut `2026-08-27-five-task-states` gives cancelled, all
+    /// the way through: the page derives the state, one byte reaches the file,
+    /// and the patch that comes back paints the box cancelled rather than
+    /// ticked — even though the core's `checked` says the item is terminal.
+    @Test("⌥-clicking a checkbox cancels it, in one byte")
+    func altClickCancels() async throws {
+        let harness = try RoundTripHarness()
+        let source = "# Tasks\n\n- [ ] first\n\nnote\n\n- [ ] second\n"
+        let tab = try await harness.open(source, named: "tasks.md")
+        let before = try Data(contentsOf: tab.url)
+        let view = try #require(tab.documentView)
+
+        // A real click, with the modifier the reader would hold. `.click()`
+        // cannot carry one, so the event is constructed — this is the only
+        // place in the suite that needs to.
+        let clicked = try await view.call(
+            """
+            var boxes = document.querySelectorAll('#mk-doc input.mk-task');
+            if (!boxes[1]) return false;
+            boxes[1].dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true }));
+            return true;
+            """)
+        #expect((clicked as? Bool) == true)
+
+        #expect(
+            await harness.waitUntil("the file to change") {
+                (try? Data(contentsOf: tab.url)) != before
+            })
+        let after = try Data(contentsOf: tab.url)
+        #expect(after.count == before.count)
+        #expect(zip(before, after).filter { $0 != $1 }.count == 1, "more than one byte changed")
+        #expect(
+            try harness.contents(of: "tasks.md")
+                == "# Tasks\n\n- [ ] first\n\nnote\n\n- [-] second\n")
+
+        #expect(
+            await harness.waitUntil("the DOM to catch up") {
+                let cancelled = try? await view.call(
+                    "return document.querySelectorAll('#mk-doc input.mk-task[data-mk-state=\"cancelled\"]').length;"
+                )
+                return ((cancelled as? NSNumber)?.intValue ?? 0) == 1
+            })
+        let ticked = try await view.call(
+            "return document.querySelectorAll('#mk-doc input.mk-task[checked]').length;")
+        #expect(
+            (ticked as? NSNumber)?.intValue == 0,
+            "a cancelled box must not draw ticked, whatever `checked` says in the JSON")
     }
 
     /// **Gate 4.** One visible change, not two.
@@ -254,12 +382,19 @@ struct WatchRoundTripTests {
             await harness.waitUntil("the initial badge") { background.metadata != nil })
         #expect(background.metadata?.tasks == TaskCounts(open: 1, total: 1))
 
-        try harness.saveAtomically("# A\n\n- [ ] one\n- [ ] two\n- [x] three\n", to: "a.md")
+        // The rewrite drops one item and starts another, so the badge has to
+        // move for two reasons at once: `[-]` leaves the denominator and `[/]`
+        // stays in the numerator (`2026-08-27-five-task-states`).
+        try harness.saveAtomically(
+            "# A\n\n- [ ] one\n- [/] two\n- [x] three\n- [-] four\n", to: "a.md")
         #expect(
             await harness.waitUntil("the badge to follow the file") {
-                background.metadata?.tasks == TaskCounts(open: 2, total: 3)
+                background.metadata?.tasks
+                    == TaskCounts(
+                        open: 1, inProgress: 1, done: 1, cancelled: 1, blocked: 0, total: 4)
             })
-        #expect(background.openTaskCount == 2)
+        #expect(background.openTaskCount == 2, "open + in-progress")
+        #expect(background.metadata?.tasks.active == 3, "the dropped item left the denominator")
         #expect(background.state == .dehydrated, "the watcher hydrated a tab nobody is looking at")
         #expect(background.documentView == nil)
     }

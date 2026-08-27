@@ -196,10 +196,18 @@ public enum MarkCore {
     // MARK: - Writes
 
     /// What a toggle should do to a task marker.
+    ///
+    /// The raw values **are** the ABI's `action` domain, and
+    /// `2026-08-27-five-task-states` widened it rather than adding a thirteenth
+    /// entry point: *"the old encoding is a prefix of the new one"*, so `off`,
+    /// `on` and `toggle` keep the numbers they always had.
     public enum ToggleAction: Int32 {
         case off = 0
         case on = 1
         case toggle = 2
+        case inProgress = 3
+        case cancel = 4
+        case block = 5
     }
 
     /// Flip one checkbox in a file on disk, changing exactly one byte.
@@ -210,12 +218,21 @@ public enum MarkCore {
     ///
     /// - Returns: the task's new state.
     @discardableResult
-    public static func toggle(path: String, index: Int, action: ToggleAction) throws -> Bool {
+    public static func toggle(path: String, index: Int, action: ToggleAction) throws -> TaskState {
         let result = path.withCString { mark_toggle($0, size_t(index), action.rawValue) }
         guard result >= 0 else {
             throw CoreError(function: "mark_toggle", detail: lastError())
         }
-        return result == 1
+        guard let state = TaskState(code: result) else {
+            // In range for the ABI's "not a failure" half, but not a state
+            // this binary knows: the core is newer than the app. Reported
+            // rather than rounded to `.done`, because a byte has been written
+            // and the caller is about to log what it was.
+            throw CoreError(
+                function: "mark_toggle",
+                detail: "the core returned state code \(result), which this app does not know")
+        }
+        return state
     }
 
     /// Save `source` to `path`, atomically, through the core.
@@ -418,14 +435,127 @@ public struct EditScript: Sendable, Equatable {
     }
 }
 
-/// One task marker: `{index, checked, start, end, line, text}`.
+/// The state of one task marker — the single byte between its brackets.
+///
+/// The Swift half of `core::tasks::State`
+/// (`2026-08-27-five-task-states`). The raw values are the JSON and
+/// `data-mk-state` spellings, so this decodes straight out of
+/// `mark_tasks_json` and compares straight against what the page reports.
+public enum TaskState: String, Codable, Equatable, Sendable, CaseIterable {
+    case open
+    case inProgress = "in-progress"
+    case done
+    case cancelled
+    case blocked
+
+    /// Still to do: open, in progress, or blocked. The badge's numerator.
+    public var isOutstanding: Bool {
+        self == .open || self == .inProgress || self == .blocked
+    }
+
+    /// Finished with, one way or the other — done **or** cancelled. This is
+    /// what ``Task/checked`` reports, and it is deliberately not the same
+    /// question as "is it ticked".
+    public var isTerminal: Bool { self == .done || self == .cancelled }
+
+    /// The spelling for VoiceOver and for a log line, where a hyphen would be
+    /// read out.
+    public var spoken: String { self == .inProgress ? "in progress" : rawValue }
+
+    /// The action that puts a marker into this state.
+    ///
+    /// Every state is reachable, which is what lets the context menu and
+    /// ⌥-click go down the same ``TaskToggle`` path a plain click takes rather
+    /// than inventing a second write.
+    public var action: MarkCore.ToggleAction {
+        switch self {
+        case .open: return .off
+        case .inProgress: return .inProgress
+        case .done: return .on
+        case .cancelled: return .cancel
+        case .blocked: return .block
+        }
+    }
+
+    /// What a plain left-click asks for, from the state the page is showing.
+    ///
+    /// `2026-08-27-five-task-states`: *"a click still toggles open↔done […]
+    /// toggling a marker that is in-progress, blocked or cancelled means 'tick
+    /// this box', so it becomes done."* The page derives the same thing for
+    /// itself — with five states the browser can no longer compute it during
+    /// pre-click activation — and this is the Swift copy of that rule, which
+    /// `ScriptBridgeTests` pins to the JavaScript one.
+    public var toggled: TaskState { self == .done ? .open : .done }
+
+    /// `mark_toggle`'s integer return: `0` open, `1` done, `2` in progress,
+    /// `3` cancelled, `4` blocked.
+    ///
+    /// Done is `1` and not `2` deliberately — the ADR keeps it where it was so
+    /// that an existing caller testing `result == 1` still reads "done" — so
+    /// this is a table rather than `TaskState.allCases[Int(code)]`.
+    public init?(code: Int32) {
+        switch code {
+        case 0: self = .open
+        case 1: self = .done
+        case 2: self = .inProgress
+        case 3: self = .cancelled
+        case 4: self = .blocked
+        default: return nil
+        }
+    }
+}
+
+/// One `@tag` or `@key(value)` carried in a task's own text.
+///
+/// `name` excludes the `@`, matching the core, so a tag reads the same in a
+/// filter as in a log line. `2026-08-27-inline-task-metadata`: **no tag ever
+/// affects a count.**
+public struct TaskTag: Decodable, Equatable, Sendable {
+    public let name: String
+    public let value: String?
+
+    public init(name: String, value: String? = nil) {
+        self.name = name
+        self.value = value
+    }
+}
+
+/// One task marker: `{index, state, checked, start, end, line, text, label,
+/// tags, due, start_date, done, priority}`.
 public struct Task: Decodable, Equatable, Sendable {
     public let index: Int
+    /// The state the marker byte carries.
+    public let state: TaskState
+    /// **"The state is terminal"** — true for done *and* cancelled. Retained
+    /// under that definition by `2026-08-27-five-task-states` so that every
+    /// existing consumer asking "is this still outstanding?" keeps getting the
+    /// right answer. Read ``state`` when the difference matters.
     public let checked: Bool
     public let start: Int
     public let end: Int
     public let line: Int
+    /// The full flattened item text, metadata tokens included. Unchanged in
+    /// meaning; ``label`` is the stripped one.
     public let text: String
+    /// ``text`` with the recognised `@tag` / `!!!` tokens removed and
+    /// whitespace collapsed — what a human-facing list shows.
+    public let label: String
+    public let tags: [TaskTag]
+    /// `@due(YYYY-MM-DD)`, validated as a date by the core. A `@due(friday)`
+    /// is a ``tags`` entry instead: not a date, not an error.
+    public let due: String?
+    /// `@start(YYYY-MM-DD)`. Named `start_date` on the wire because `start` is
+    /// already this object's marker byte offset.
+    public let startDate: String?
+    /// `@done(YYYY-MM-DD)` as written in the text — independent of ``state``.
+    public let done: String?
+    /// `!` = 1, `!!` = 2, `!!!` = 3, absent = 0.
+    public let priority: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case index, state, checked, start, end, line, text, label, tags, due, done, priority
+        case startDate = "start_date"
+    }
 }
 
 /// One top-level block: its identity, its kind, and its byte range.
@@ -468,6 +598,10 @@ public struct WriteReceipt: Decodable, Equatable, Sendable {
     /// The document after a toggle. `nil` when this was a plain save.
     public let source: String?
     public let index: Int?
+    /// The state the marker is in after the write.
+    public let state: TaskState?
+    /// "The state is terminal" — true for done *and* cancelled, exactly as on
+    /// ``Task/checked``.
     public let checked: Bool?
     /// The single byte the toggle changed.
     public let offset: Int?
@@ -500,14 +634,70 @@ public struct TreeEntry: Decodable, Equatable, Sendable {
     }
 }
 
-/// Open and total task counts for a markdown file.
+/// Per-state task counts for a markdown file — `core::tasks::Counts`.
+///
+/// ``outstanding`` and ``active`` are computed here rather than at the call
+/// sites for the reason the core gives for making them methods: the five
+/// places in the app that ask "how many are left?" must not each invent their
+/// own arithmetic. `2026-08-27-five-task-states` fixes that arithmetic —
+/// outstanding is open + in-progress + blocked, and **cancelled is the only
+/// state that leaves the denominator.**
 public struct TaskCounts: Decodable, Equatable, Sendable {
     public let open: Int
+    public let inProgress: Int
+    public let done: Int
+    public let cancelled: Int
+    public let blocked: Int
     public let total: Int
 
-    public init(open: Int, total: Int) {
+    /// Still to do: open + in progress + blocked. The badge's numerator.
+    public var outstanding: Int { open + inProgress + blocked }
+
+    /// The badge's denominator. A dropped item stops sitting in it for ever,
+    /// which is what stopped the counts lying.
+    public var active: Int { total - cancelled }
+
+    public init(
+        open: Int = 0, inProgress: Int = 0, done: Int = 0, cancelled: Int = 0,
+        blocked: Int = 0, total: Int
+    ) {
         self.open = open
+        self.inProgress = inProgress
+        self.done = done
+        self.cancelled = cancelled
+        self.blocked = blocked
         self.total = total
+    }
+
+    /// Count a document's tasks. **The one place in the app that does.**
+    ///
+    /// `mark_tree_json` hands these counts over already computed, but
+    /// `mark_tasks_json` answers with the tasks themselves — so the tab badge,
+    /// the sidebar badge, and the dirty-buffer paths all arrive here, and all
+    /// get the same answer as the core would have given.
+    public init(_ tasks: [Task]) {
+        var open = 0
+        var inProgress = 0
+        var done = 0
+        var cancelled = 0
+        var blocked = 0
+        for task in tasks {
+            switch task.state {
+            case .open: open += 1
+            case .inProgress: inProgress += 1
+            case .done: done += 1
+            case .cancelled: cancelled += 1
+            case .blocked: blocked += 1
+            }
+        }
+        self.init(
+            open: open, inProgress: inProgress, done: done, cancelled: cancelled,
+            blocked: blocked, total: tasks.count)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case open, done, cancelled, blocked, total
+        case inProgress = "in_progress"
     }
 }
 

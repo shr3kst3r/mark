@@ -181,6 +181,94 @@ fn a_second_process_is_refused_and_told_who_holds_the_document() {
     let _ = holder.wait();
 }
 
+/// `mark normalize --in-place` is a new write path, so it inherits the lock in
+/// full — which it does structurally, by going through `write_atomically`, but
+/// "structurally" is what this asserts rather than assumes.
+///
+/// `2026-08-27-five-task-states` states it as a consequence: *"inherits
+/// `2026-08-25-flock-write-locking` in full: `write_atomically`, `LOCK_NB`,
+/// refuse rather than block."*
+#[test]
+fn normalize_in_place_is_refused_on_a_locked_document() {
+    let (_directory, path) = fixture();
+    // A document with something to normalize, so a refusal cannot be confused
+    // with "there was nothing to do".
+    let extended = "# Notes\n\n- [-] dropped\n- [/] doing\n";
+    std::fs::write(&path, extended).expect("write the fixture");
+    let (mut holder, pid) = spawn_holder(&path);
+
+    let output = Command::new(cli())
+        .args([
+            "normalize",
+            path.to_str().expect("utf-8 path"),
+            "--in-place",
+        ])
+        .output()
+        .expect("spawn mark-cli");
+    let code = output.status.code().expect("exited normally");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        code, 6,
+        "a locked document must exit 6, not {code} — stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains(&pid.to_string()) && stderr.contains("locked for writing"),
+        "the refusal does not name the holder: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        extended,
+        "the refused process wrote anyway"
+    );
+
+    // Reading it is never blocked, and stdout is not a write.
+    let output = Command::new(cli())
+        .args(["normalize", path.to_str().expect("utf-8 path")])
+        .output()
+        .expect("spawn mark-cli");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("- [x] ~~dropped~~"));
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+}
+
+/// `mark check --stamp` is a second write path — one that is not one byte — and
+/// it takes the same lock, for the same reason.
+#[test]
+fn stamping_is_refused_on_a_locked_document() {
+    let (_directory, path) = fixture();
+    let (mut holder, pid) = spawn_holder(&path);
+
+    let output = Command::new(cli())
+        .args([
+            "check",
+            path.to_str().expect("utf-8 path"),
+            "--item",
+            "0",
+            "--on",
+            "--stamp",
+            "--today",
+            "2026-08-27",
+        ])
+        .output()
+        .expect("spawn mark-cli");
+    let code = output.status.code().expect("exited normally");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(code, 6, "stamping a locked document must exit 6: {stderr}");
+    assert!(stderr.contains(&pid.to_string()), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        DOCUMENT,
+        "the refused process wrote anyway"
+    );
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+}
+
 /// The property that justified `flock` over a lock file, proved rather than
 /// asserted: *"A crashed or `kill -9`'d app releases every lock it held,
 /// instantly, without our involvement."*

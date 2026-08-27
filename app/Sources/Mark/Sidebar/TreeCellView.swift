@@ -82,7 +82,10 @@ public final class TreeCellView: NSTableCellView {
         if let label = badge?.label {
             badgeLabel.stringValue = label
             badgeLabel.isHidden = false
-            badgeLabel.textColor = (badge?.open ?? 0) > 0 ? .secondaryLabelColor : .tertiaryLabelColor
+            // Dimmed once nothing is outstanding — which now includes a file
+            // whose remaining items were all cancelled rather than done.
+            badgeLabel.textColor =
+                (badge?.outstanding ?? 0) > 0 ? .secondaryLabelColor : .tertiaryLabelColor
         } else {
             badgeLabel.stringValue = ""
             badgeLabel.isHidden = true
@@ -108,8 +111,16 @@ public final class TreeCellView: NSTableCellView {
         } else if !node.isMarkdown {
             parts.append("not a markdown file")
         }
-        if let badge, badge.total > 0 {
-            parts.append("\(badge.open) of \(badge.total) tasks open")
+        // "outstanding", not "open", because open is now one of five states and
+        // in-progress and blocked are also still to do
+        // (`2026-08-27-five-task-states`). Cancelled items are not counted at
+        // all, in either number, which is what the badge shows.
+        if let badge, badge.active > 0 {
+            parts.append("\(badge.outstanding) of \(badge.active) tasks outstanding")
+        }
+        if let badge, badge.counts.cancelled > 0 {
+            parts.append(
+                "\(badge.counts.cancelled) cancelled")
         }
         return parts.joined(separator: ", ")
     }

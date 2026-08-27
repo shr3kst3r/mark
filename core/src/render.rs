@@ -181,8 +181,12 @@ fn with_context(doc: &Document<'_>, ctx: &Context, blocks: Range<usize>) -> Rend
 
 /// Per-document lookups shared by every block, built once.
 struct Context {
-    /// Task marker start offset → (document-order index, checked).
-    tasks: HashMap<usize, (usize, bool)>,
+    /// Task marker start offset → (document-order index, state).
+    tasks: HashMap<usize, (usize, tasks::State)>,
+    /// Every metadata token in the document, by source range, in document
+    /// order. Read by offset for the same reason task indices are: a block
+    /// rendered on its own must reach the same answer as the whole document.
+    chips: Vec<tasks::Chip>,
     /// Heading block start offset → deduplicated anchor.
     anchors: HashMap<usize, String>,
     highlighter: &'static Highlighter,
@@ -193,12 +197,27 @@ struct Context {
 }
 
 impl Context {
+    /// The chips inside a source range, which for a `Text` event is "the
+    /// metadata tokens in this run of prose".
+    fn chips_in(&self, span: &Range<usize>) -> &[tasks::Chip] {
+        let first = self
+            .chips
+            .partition_point(|chip| chip.source.start < span.start);
+        let last = self
+            .chips
+            .partition_point(|chip| chip.source.end <= span.end);
+        self.chips.get(first..last.max(first)).unwrap_or(&[])
+    }
+
     fn new(doc: &Document<'_>, theme: &Arc<ThemePair>) -> Context {
+        let tasks = tasks::enumerate(doc);
+        let chips: Vec<tasks::Chip> = tasks.iter().flat_map(|t| t.chips.clone()).collect();
         Context {
-            tasks: tasks::enumerate(doc)
+            tasks: tasks
                 .into_iter()
-                .map(|t| (t.start, (t.index, t.checked)))
+                .map(|t| (t.start, (t.index, t.state)))
                 .collect(),
+            chips,
             anchors: doc
                 .headings()
                 .into_iter()
@@ -225,15 +244,49 @@ fn render_block(doc: &Document<'_>, block: &Block, ctx: &Context, out: &mut Rend
     let mut run = 0usize;
 
     while index < events.len() {
+        // An extended marker (`[/]`, `[-]`, `[?]`) is three `Text` events the
+        // parser has no opinion about, so it is recognised here with the same
+        // structural rule `tasks::enumerate` uses — never by looking at the
+        // document's bytes — and the three events are replaced by one element.
+        // Without this they would flush as the literal prose `[-]`.
+        if let Some((state, span)) = tasks::extended_marker(events, index, doc.source()) {
+            flush(events, run..index, &mut out.html);
+            let idx = ctx
+                .tasks
+                .get(&span.start)
+                .map_or_else(|| usize::MAX, |(i, _)| *i);
+            write_task(&mut out.html, idx, &span, state);
+            index += 3;
+            run = index;
+            continue;
+        }
+        // Metadata chips. A `Text` event carrying recognised tokens is written
+        // here instead of being handed to `pulldown-cmark`'s writer, so the
+        // token becomes a `<span class="mk-tag">` and the prose around it does
+        // not change. Every other `Text` event takes the untouched fast path.
+        if let (Event::Text(text), span) = (&events[index].0, &events[index].1) {
+            let chips = ctx.chips_in(span);
+            if !chips.is_empty() && span.len() == text.len() {
+                flush(events, run..index, &mut out.html);
+                write_chipped_text(&mut out.html, text, span, chips);
+                index += 1;
+                run = index;
+                continue;
+            }
+        }
         match &events[index].0 {
             Event::TaskListMarker(checked) => {
                 flush(events, run..index, &mut out.html);
                 let span = &events[index].1;
-                let idx = ctx
-                    .tasks
-                    .get(&span.start)
-                    .map_or_else(|| usize::MAX, |(i, _)| *i);
-                write_task(&mut out.html, idx, span, *checked);
+                let (idx, state) = ctx.tasks.get(&span.start).copied().unwrap_or((
+                    usize::MAX,
+                    if *checked {
+                        tasks::State::Done
+                    } else {
+                        tasks::State::Open
+                    },
+                ));
+                write_task(&mut out.html, idx, span, state);
                 index += 1;
                 run = index;
             }
@@ -308,15 +361,87 @@ fn flush(events: &[(Event<'_>, Range<usize>)], range: Range<usize>, out: &mut St
     html::push_html(out, events[range].iter().map(|(event, _)| event.clone()));
 }
 
-fn write_task(out: &mut String, index: usize, span: &Range<usize>, checked: bool) {
+/// One task marker, as the element ADR-1's checkbox contract fixes.
+///
+/// `2026-08-27-five-task-states` widens it rather than replacing it: the
+/// element stays `<input type="checkbox" class="mk-task">`, because
+/// `shell.js`'s restamp refuses when the DOM's checkbox count differs from the
+/// source's task count and a marker rendered as anything else would break
+/// incremental patching silently.
+///
+/// `data-mk-state` is what the app and the stylesheet read; `checked` is
+/// emitted for `done` **only**, and stays last so ` checked>` remains the
+/// spelling every existing test and selector matches. `aria-label` is emitted
+/// because a five-state control announced as a two-state checkbox would lie to
+/// VoiceOver.
+fn write_task(out: &mut String, index: usize, span: &Range<usize>, state: tasks::State) {
     let _ = write!(
         out,
         "<input type=\"checkbox\" class=\"mk-task\" data-mk-idx=\"{index}\" \
-         data-mk-start=\"{}\" data-mk-end=\"{}\"{}>",
+         data-mk-start=\"{}\" data-mk-end=\"{}\" data-mk-state=\"{}\" \
+         aria-label=\"{}\"{}>",
         span.start,
         span.end,
-        if checked { " checked" } else { "" }
+        state.as_str(),
+        state.spoken(),
+        if state == tasks::State::Done {
+            " checked"
+        } else {
+            ""
+        }
     );
+}
+
+/// One run of prose, with its recognised metadata tokens drawn as chips.
+///
+/// The chip carries its own data — `data-mk-due` and friends — and no colour
+/// that depends on the date: `2026-08-27-inline-task-metadata` puts overdue
+/// styling in the app's `shell.js`, precisely so `mark render --html` stays a
+/// pure function of its source and stays reproducible.
+fn write_chipped_text(out: &mut String, text: &str, span: &Range<usize>, chips: &[tasks::Chip]) {
+    let mut cursor = span.start;
+    for chip in chips {
+        if chip.source.start < cursor {
+            continue;
+        }
+        out.push_str(&escape_html(
+            &text[cursor - span.start..chip.source.start - span.start],
+        ));
+        let token = &text[chip.source.start - span.start..chip.source.end - span.start];
+        let _ = match &chip.kind {
+            tasks::ChipKind::Priority(level) => write!(
+                out,
+                "<span class=\"mk-tag\" data-mk-priority=\"{level}\">{}</span>",
+                escape_html(token)
+            ),
+            tasks::ChipKind::Tag { name, value } => write!(
+                out,
+                "<span class=\"mk-tag\" data-mk-tag=\"{}\"{}>{}</span>",
+                escape_attr(name),
+                chip_data(name, value.as_deref()),
+                escape_html(token)
+            ),
+        };
+        cursor = chip.source.end;
+    }
+    out.push_str(&escape_html(&text[cursor - span.start..]));
+}
+
+/// The typed attribute a known key adds to its chip, if any.
+///
+/// `@start(…)` becomes `data-mk-start-date` rather than `data-mk-start`,
+/// because `data-mk-start` is already ADR-1's byte offset on task and block
+/// elements and reusing the name on a chip would make the two impossible to
+/// tell apart in a selector.
+fn chip_data(name: &str, value: Option<&str>) -> String {
+    match (name, value) {
+        ("due" | "start" | "done", Some(value)) if tasks::parse_iso_date(value).is_some() => {
+            let attribute = if name == "start" { "start-date" } else { name };
+            format!(" data-mk-{attribute}=\"{}\"", escape_attr(value))
+        }
+        (_, Some(value)) => format!(" data-mk-value=\"{}\"", escape_attr(value)),
+        (_, None) => String::new(),
+    }
 }
 
 /// Append one math expression, rendered to inline MathML by [`crate::rich`].
@@ -472,7 +597,46 @@ table { border-collapse: collapse; }
 th, td { border: 1px solid var(--mk-rule); padding: 0.35rem 0.7rem; }
 th { background: var(--mk-surface); }
 hr { border: none; border-top: 1px solid var(--mk-rule); }
-input.mk-task { margin-right: 0.4rem; accent-color: var(--mk-accent); }
+/* Task lists. `2026-08-27-five-task-states`: every checkbox is drawn here
+   rather than by the platform, because a half-filled box is impossible from a
+   native control without JavaScript (`indeterminate` is a JS-only IDL
+   property) and ADR-5 forbids JavaScript in the emitted document. The cost is
+   named in that ADR: every existing document's checkboxes change appearance.
+   The done tick is a background image rather than a `::before`, because
+   pseudo-elements do not render on a replaced element. */
+input.mk-task {
+  appearance: none; -webkit-appearance: none;
+  width: 0.95em; height: 0.95em; margin-right: 0.4rem;
+  border: 1px solid var(--mk-rule); border-radius: 3px;
+  background-color: transparent; background-repeat: no-repeat;
+  background-position: center; background-size: 0.8em 0.8em;
+  vertical-align: -0.1em; cursor: pointer; }
+input.mk-task:focus-visible { outline: 2px solid var(--mk-accent); outline-offset: 1px; }
+input.mk-task[data-mk-state='done'] {
+  background-color: var(--mk-accent); border-color: var(--mk-accent);
+  background-image: url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 \
+viewBox=%220 0 16 16%22%3E%3Cpath d=%22M3.5 8.5 6.5 11.5 12.5 4.5%22 fill=%22none%22 \
+stroke=%22%23fff%22 stroke-width=%222.2%22 stroke-linecap=%22round%22 \
+stroke-linejoin=%22round%22/%3E%3C/svg%3E'); }
+input.mk-task[data-mk-state='in-progress'] {
+  border-color: var(--mk-accent);
+  background-image: linear-gradient(90deg, var(--mk-accent) 50%, transparent 50%); }
+input.mk-task[data-mk-state='blocked'] {
+  border-color: var(--mk-warning); background-color: var(--mk-warning); }
+input.mk-task[data-mk-state='cancelled'] { border-color: var(--mk-muted); }
+/* Deliberate, and named in the ADR: a cancelled parent strikes its whole
+   subtree, because `line-through` propagates and a child cannot cancel it. */
+li:has(> input.mk-task[data-mk-state='cancelled']) {
+  text-decoration: line-through; color: var(--mk-muted); }
+/* Metadata chips (2026-08-27-inline-task-metadata). Neutral: the renderer
+   never reads a clock, so nothing here can depend on today's date. Overdue
+   colouring is the app's job, from `data-mk-due`, in its injected shell
+   script -- which is not JavaScript in *this* document. (Spelling that file's
+   name here would trip the rendered-page test that forbids a script
+   reference, which is the check doing its job.) */
+.mk-tag { color: var(--mk-subtle); background: var(--mk-surface);
+  border-radius: 4px; padding: 0.05em 0.35em; margin-left: 0.25em;
+  font-size: 0.85em; white-space: nowrap; }
 ::selection { background: var(--mk-selection); }
 /* ADR-5. No font or stylesheet is fetched for either: MathML resolves to the
    system `math` font and inherits `currentColor`, and merman's SVG carries its
@@ -579,6 +743,109 @@ mod tests {
             "data-mk-start=\"{first}\" data-mk-end=\"{}\"",
             first + 3
         )));
+    }
+
+    /// The five-state element. `data-mk-state` is the new contract; `checked`
+    /// is still emitted for done, and only for done.
+    #[test]
+    fn every_state_renders_one_checkbox_carrying_its_state() {
+        let src = "- [ ] a\n- [/] b\n- [x] c\n- [-] d\n- [?] e\n";
+        let html = html_of(src);
+        assert_eq!(html.matches("class=\"mk-task\"").count(), 5, "{html}");
+        for (index, state) in ["open", "in-progress", "done", "cancelled", "blocked"]
+            .into_iter()
+            .enumerate()
+        {
+            let start = src.find(&format!("[{}]", "  /x-?".chars().nth(index + 1).unwrap()));
+            assert!(
+                html.contains(&format!(
+                    "data-mk-idx=\"{index}\" data-mk-start=\"{}\" data-mk-end=\"{}\" \
+                     data-mk-state=\"{state}\"",
+                    start.unwrap(),
+                    start.unwrap() + 3
+                )),
+                "missing the {state} element in\n{html}"
+            );
+        }
+        // ADR-1's shape survives: exactly the done one carries `checked`, and
+        // it is still spelled ` checked>` so every existing selector matches.
+        assert_eq!(html.matches(" checked>").count(), 1, "{html}");
+        assert!(html.contains("aria-label=\"in progress\""), "{html}");
+        // The extended markers are elements, not the literal prose they used
+        // to render as.
+        assert!(!html.contains("[-]"), "{html}");
+        assert!(!html.contains("[?]"), "{html}");
+    }
+
+    #[test]
+    fn an_unrecognised_bracket_in_an_item_is_still_prose() {
+        let html = html_of("- [>] deferred\n- [ab] two\n");
+        assert!(!html.contains("mk-task"), "{html}");
+        assert!(html.contains("[&gt;] deferred"), "{html}");
+    }
+
+    /// Metadata renders as chips carrying their own data — and **no** date
+    /// comparison, so the output cannot vary by the day it was rendered.
+    #[test]
+    fn metadata_renders_as_neutral_chips() {
+        let html = html_of("- [ ] ship it @due(2026-09-01) @work !! @start(2026-08-01)\n");
+        assert!(
+            html.contains(
+                "<span class=\"mk-tag\" data-mk-tag=\"due\" data-mk-due=\"2026-09-01\">\
+                 @due(2026-09-01)</span>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"mk-tag\" data-mk-tag=\"work\">@work</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"mk-tag\" data-mk-priority=\"2\">!!</span>"),
+            "{html}"
+        );
+        // `data-mk-start` is ADR-1's byte offset; the start *date* gets its own
+        // attribute rather than shadowing it.
+        assert!(html.contains("data-mk-start-date=\"2026-08-01\""), "{html}");
+        // The prose either side is untouched and still escaped.
+        assert!(html.contains("ship it "), "{html}");
+    }
+
+    /// The prose either side of a chip is escaped exactly as
+    /// `pulldown-cmark`'s own writer escapes it, since half of the item goes
+    /// through each path and a reader must not be able to tell where the seam
+    /// is.
+    #[test]
+    fn prose_around_a_chip_is_escaped_like_every_other_run() {
+        let html = html_of("- [ ] don't a < b & c @work\n");
+        assert!(html.contains("don't a &lt; b &amp; c "), "{html}");
+        assert!(html.contains(">@work</span>"), "{html}");
+        // ...and the same text without metadata, which never enters this path,
+        // is escaped identically.
+        let plain = html_of("- [ ] don't a < b & c now\n");
+        assert!(plain.contains("don't a &lt; b &amp; c now"), "{plain}");
+    }
+
+    #[test]
+    fn a_chip_is_never_drawn_inside_a_code_span() {
+        let html = html_of("- [ ] see `@due(2026-09-01)` for the syntax\n");
+        assert!(!html.contains("mk-tag"), "{html}");
+        assert!(html.contains("<code>@due(2026-09-01)</code>"), "{html}");
+    }
+
+    #[test]
+    fn the_stylesheet_paints_five_states_and_reads_no_clock() {
+        let css = document_css();
+        for state in ["done", "in-progress", "blocked", "cancelled"] {
+            assert!(
+                css.contains(&format!("input.mk-task[data-mk-state='{state}']")),
+                "no rule for {state}"
+            );
+        }
+        assert!(css.contains("appearance: none"), "{css}");
+        assert!(css.contains(".mk-tag"), "no chip styling");
+        // Nothing here can be date-dependent: there is no such selector.
+        assert!(!css.contains("overdue"), "{css}");
     }
 
     #[test]

@@ -271,8 +271,40 @@ codesign --force --sign - --timestamp=none "${bundle}" >/dev/null 2>&1 ||
 # `mark://` resolve here. Without it, the CLI's cold-start path (ADR-3) can
 # launch a different copy of mark.app — or nothing at all on a machine that has
 # never seen one.
+#
+# **Only from the primary checkout, and only outside a package build.** The
+# bundle id, the `mark://` scheme, and the markdown UTIs above are *machine
+# wide* and there is exactly one winner, so every build that registers is a
+# build competing with the one the reader actually installed. That was fine
+# when there was one checkout. It is not fine now:
+#
+# * A `git worktree` per task is the normal way to work on this repo, and
+#   several can be building at once. Each `just build` would claim `dev.mark.app`
+#   away from the installed app, so `open notes.md` and `mark open` would land
+#   in whichever agent's worktree assembled last — and go on doing so after
+#   that worktree was pruned, because the registration outlives the directory.
+#   `just run` execs `Contents/MacOS/mark` directly and never consults
+#   LaunchServices, so a worktree build loses nothing by not registering.
+#
+# * A Homebrew build runs this script in a temp directory that brew then
+#   deletes, so registering here writes an entry that is dead on arrival.
+#   `Formula/mark.rb` sets `MARK_NO_LSREGISTER` and registers `prefix/mark.app`
+#   in `post_install` instead — the path that will still be there.
+#
+# `--git-common-dir` is the shared `.git` for every worktree of a repo while
+# `--git-dir` is this worktree's own, so they differ in a linked worktree and
+# agree in the primary checkout. That is the whole test.
 lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -x "${lsregister}" ]]; then
+git_common="$(git -C "${root}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+git_dir="$(git -C "${root}" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+
+if [[ -n "${MARK_NO_LSREGISTER:-}" ]]; then
+    echo "assemble-bundle.sh: MARK_NO_LSREGISTER set; not claiming ${bundle_id}"
+elif [[ -n "${git_common}" && "${git_common}" != "${git_dir}" &&
+        -z "${MARK_FORCE_LSREGISTER:-}" ]]; then
+    echo "assemble-bundle.sh: linked worktree; not claiming ${bundle_id} from a build you did not install"
+    echo "  (\`just run\` uses this bundle directly; MARK_FORCE_LSREGISTER=1 registers it anyway)"
+elif [[ -x "${lsregister}" ]]; then
     "${lsregister}" -f "${bundle}" ||
         echo "assemble-bundle.sh: lsregister failed; 'mark open' may launch a different mark.app" >&2
 fi

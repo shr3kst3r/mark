@@ -72,6 +72,25 @@ Those disagreeing means a `mark` on your PATH and a `mark.app` LaunchServices
 picked come from two different installs — which behaves like one product that is
 subtly wrong, and is otherwise invisible.
 
+It also counts how many bundles claim `dev.mark.app`. There can only be one
+winner of that, of the `mark://` scheme, and of the markdown document types, so
+more than one claimant means `open notes.md` is a coin toss:
+
+```
+registered          2 bundles claim dev.mark.app — * is the one `mark open` launches
+                    * /opt/homebrew/Cellar/mark/HEAD-4504327/mark.app
+                      /Users/you/src/mark/.worktrees/spike/target/mark.app
+                    ! that is not the bundle this CLI is in; `mark open` and `mark render` are two builds
+```
+
+`just build` claims those only from the primary checkout: a build in a `git
+worktree` deliberately does not register, since `just run` execs the bundle
+directly and never asks LaunchServices, and a registration outlives the
+directory it names — so a pruned worktree would otherwise go on answering
+`open notes.md` from a path that no longer exists. `MARK_FORCE_LSREGISTER=1`
+overrides it when you do want a worktree build to be the one Finder opens; to
+undo that, `lsregister -u path/to/mark.app`.
+
 Needs Rust **1.95 or newer** (the MSRV, pinned in `Cargo.toml`; it comes from
 `merman`, the Mermaid renderer) and the Xcode command line tools — not a full
 Xcode.
@@ -312,7 +331,7 @@ script or an agent is usually in:
 | `mark ls [dir] [--json] [--depth N] [--all]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. |
 | `mark grep <pat> [path] [--json] [-i]` | Regex search, reporting the heading each match sits under. |
 | `mark stats <f> [--json]` | Per-stage timings and counters. |
-| `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, theme dir, asset load time. |
+| `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, every bundle registered as `dev.mark.app`, theme dir, asset load time. |
 | `mark theme --list\|--show <name>\|--import <file> [--json]` | List, inspect, or convert a `.tmTheme` or base16 scheme. |
 
 These drive the running app over `$TMPDIR/mark-$UID.sock`, launching it if there

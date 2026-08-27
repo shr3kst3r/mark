@@ -2470,6 +2470,11 @@ struct Doctor {
     /// The enclosing `.app`, resolved from `$0` through its symlink chain
     /// (ADR-1). `None` when this binary is not inside a bundle.
     app_bundle: Option<PathBuf>,
+    /// Every bundle LaunchServices has registered as `dev.mark.app`, first
+    /// one first — see [`client::registered_bundles`]. More than one means
+    /// `mark open` and a double-clicked `.md` may reach a build that is not
+    /// ``app_bundle``, which is the failure this line exists to name.
+    registered_bundles: Vec<PathBuf>,
     syntect_asset_load_ms: f64,
     /// The default theme, and how many there are to choose from. Named
     /// `theme`, not `syntax_theme`: since M7 a theme is chrome *and* code.
@@ -2628,6 +2633,7 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
             .ok()
             .and_then(|path| path.canonicalize().ok()),
         app_bundle: client::app_bundle(),
+        registered_bundles: client::registered_bundles(),
         syntect_asset_load_ms: ms(highlighter.asset_load()),
         theme: theme::default_pair().name().to_owned(),
         themes: theme::list().0.len(),
@@ -2683,6 +2689,48 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
             |p| p.display().to_string()
         )
     )?;
+    // Silent when there is one claimant, which is the healthy machine and the
+    // common case; loud, and listed, when there is more than one — the whole
+    // value is telling a reader that `mark open` is not reaching the build
+    // they think it is, at the moment they are already asking what is
+    // installed.
+    match doctor.registered_bundles.len() {
+        0 => emitln!(
+            out,
+            "registered          none — LaunchServices has no {} (see `brew info mark`)",
+            client::BUNDLE_ID
+        )?,
+        1 => emitln!(
+            out,
+            "registered          1 bundle claims {}",
+            client::BUNDLE_ID
+        )?,
+        count => {
+            emitln!(
+                out,
+                "registered          {count} bundles claim {} — * is the one `mark open` launches",
+                client::BUNDLE_ID
+            )?;
+            for (index, path) in doctor.registered_bundles.iter().enumerate() {
+                emitln!(
+                    out,
+                    "                    {} {}",
+                    if index == 0 { "*" } else { " " },
+                    path.display()
+                )?;
+            }
+            if let (Some(winner), Some(mine)) = (
+                doctor.registered_bundles.first(),
+                doctor.app_bundle.as_ref(),
+            ) && winner != mine
+            {
+                emitln!(
+                    out,
+                    "                    ! that is not the bundle this CLI is in; `mark open` and `mark render` are two builds"
+                )?;
+            }
+        }
+    }
     emitln!(
         out,
         "syntect assets      {:.3} ms",

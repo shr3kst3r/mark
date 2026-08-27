@@ -255,6 +255,22 @@ version bumps reports the same one. Two different builds on those two lines is a
 CLI and an app from separate installs, which behaves like one product that is
 subtly wrong.
 .IP
+The
+.B registered
+line counts the bundles LaunchServices holds for
+.BR dev.mark.app .
+That identifier, the
+.B mark://
+scheme and the markdown document types have exactly one winner, so more than one
+claimant means
+.B "open notes.md"
+is a coin toss; the winner is marked, and a winner that is not the bundle this
+CLI came from is called out. A build in a
+.BR "git worktree" (1)
+does not register, so it cannot become that winner by accident \(em see
+.B MARK_FORCE_LSREGISTER
+below.
+.IP
 With an app running it also prints the window and tab counts, the resident web
 views, and the memory formula evaluated over them. The count is web
 .IR views ,
@@ -419,6 +435,20 @@ to talk to and to launch, instead of the one resolved from
 .TP
 .B MARK_NO_LAUNCH
 Set to 1 to fail with exit 4 instead of launching the app.
+.TP
+.BR MARK_NO_LSREGISTER ", " MARK_FORCE_LSREGISTER
+Read by
+.IR scripts/assemble-bundle.sh ,
+not by this CLI. The first suppresses the LaunchServices registration of a
+freshly assembled bundle \(em the Homebrew formula sets it, and registers the
+installed copy afterwards, because the one built here is in a temp directory
+brew then deletes. The second registers anyway from a linked
+.BR "git worktree" (1),
+where the default is not to: a registration outlives the directory it names, so
+a pruned worktree would go on answering
+.B "open notes.md"
+from a path that is gone. Undo one with
+.BR "lsregister -u " path .
 .TP
 .BR MARK_IPC_TIMEOUT_MS ", " MARK_IPC_LAUNCH_TIMEOUT_MS
 Reply timeout, and how long to wait for a cold launch. Default 30000 and 15000.

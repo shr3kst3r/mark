@@ -95,6 +95,14 @@ class Mark < Formula
     # before compiling a line. It is passed as a just variable and not through
     # `ENV` because superenv scrubs the build environment to an allowlist and an
     # env var set here never reaches the recipe.
+    # `scripts/assemble-bundle.sh` normally registers the bundle it just built
+    # with LaunchServices. Here that would register a path inside Homebrew's
+    # build sandbox — a temp directory brew deletes as soon as this method
+    # returns — leaving a dead claim on `dev.mark.app` and the markdown UTIs
+    # behind on every install. `post_install` registers `prefix/mark.app`
+    # instead, which is the copy that will still exist.
+    ENV["MARK_NO_LSREGISTER"] = "1"
+
     system "just", "swift_build_flags=--disable-sandbox", "build"
 
     prefix.install "target/mark.app"
@@ -114,6 +122,20 @@ class Mark < Formula
     fish_completion.install "packaging/completions/mark.fish" => "mark.fish"
   end
 
+  # Register the *installed* bundle, since the build could not (see
+  # `MARK_NO_LSREGISTER` above).
+  #
+  # LaunchServices does not scan the Cellar — that is what the caveats below
+  # are about — so without this the freshly installed app is unknown to
+  # `open notes.md` and to the CLI's cold-start path until something else
+  # registers it. Best effort: a failure here costs a Finder association, not
+  # an install, and `mark doctor` reports what is registered either way.
+  def post_install
+    lsregister = "/System/Library/Frameworks/CoreServices.framework/" \
+                 "Frameworks/LaunchServices.framework/Support/lsregister"
+    system lsregister, "-f", prefix/"mark.app" if File.executable?(lsregister)
+  end
+
   def caveats
     <<~EOS
       The app bundle is at:
@@ -122,12 +144,17 @@ class Mark < Formula
       Homebrew formulae do not install into /Applications. To put it there:
         ln -sfn "#{opt_prefix}/mark.app" /Applications/mark.app
 
-      Do that even if you live in the terminal. LaunchServices does not scan the
-      Cellar, so until this bundle is somewhere it looks, it is not registered —
-      and a double-click on a .md, or `open notes.md`, goes to whichever other
-      mark.app it does know about, which on a development machine is a stale
-      `target/mark.app`. `mark doctor` names the app that answered and the commit
-      it was built from, so you can tell.
+      Worth doing even if you live in the terminal. LaunchServices does not scan
+      the Cellar, so this install registers the bundle explicitly — but a copy
+      somewhere macOS looks on its own survives a `brew uninstall` of the
+      registration, and is what makes the app findable in Spotlight.
+
+      Only one bundle can win `dev.mark.app`, the `mark://` scheme, and the
+      markdown document types. `just build` in a linked worktree no longer
+      claims them, so a checkout you are hacking on cannot quietly take
+      `open notes.md` away from this install — run `mark doctor` if you suspect
+      it has: it names every bundle registered, marks the one `mark open` will
+      launch, and says so when that is not the build the CLI came from.
 
       The `mark` CLI is on your PATH and drives the running app over a Unix
       socket at $TMPDIR/mark-$UID.sock:

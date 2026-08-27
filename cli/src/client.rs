@@ -204,6 +204,124 @@ pub fn socket_path_in(tmpdir: Option<&str>, uid: u32) -> Result<PathBuf, IpcErro
     Ok(path)
 }
 
+/// Every bundle LaunchServices has registered under [`BUNDLE_ID`], in its own
+/// preference order — **the first is the one `open -g -b` launches**, and so
+/// the one the cold-start path in this file reaches.
+///
+/// Worth a line in `mark doctor` because the bundle id, the `mark://` scheme
+/// and the markdown UTIs are *machine-wide* and have exactly one winner, while
+/// a development machine accumulates claimants: every assembled bundle used to
+/// register one, and a registration outlives the directory it names. When the
+/// winner is not the bundle this CLI lives in, `mark open` and a double-clicked
+/// `.md` reach a **different build** than `mark render` does — which is a
+/// confusing afternoon, and nothing else in the report would have said so.
+///
+/// `LSCopyApplicationURLsForBundleIdentifier` rather than parsing
+/// `lsregister -dump`: the dump is the entire database and takes seconds, and
+/// this is one call that answers exactly the question. It is deprecated as of
+/// macOS 12 and used anyway — the successor, `NSWorkspace`'s
+/// `urlsForApplications(toOpen:)`, is Objective-C and takes a URL rather than a
+/// bundle id, so it cannot answer this from here. If it ever stops working the
+/// failure is an empty list, which the report prints as "none" rather than
+/// mistaking for a clean machine.
+pub fn registered_bundles() -> Vec<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::raw::c_void;
+    use std::os::unix::ffi::OsStrExt;
+
+    type CFTypeRef = *const c_void;
+    type CFIndex = isize;
+    /// `kCFStringEncodingUTF8`.
+    const UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithBytes(
+            allocator: CFTypeRef,
+            bytes: *const u8,
+            num_bytes: CFIndex,
+            encoding: u32,
+            is_external_representation: u8,
+        ) -> CFTypeRef;
+        fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
+        fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
+        fn CFURLGetFileSystemRepresentation(
+            url: CFTypeRef,
+            resolve_against_base: u8,
+            buffer: *mut u8,
+            max_buffer_length: CFIndex,
+        ) -> u8;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        fn LSCopyApplicationURLsForBundleIdentifier(
+            bundle_id: CFTypeRef,
+            out_error: *mut CFTypeRef,
+        ) -> CFTypeRef;
+    }
+
+    let mut bundles = Vec::new();
+
+    // SAFETY: three Core Foundation calls under the Create Rule, which is the
+    // whole of the contract here. `CFStringCreateWithBytes` and the `Copy…`
+    // below return +1 references, and both are released on every path out —
+    // including the early returns, which is why the null checks come before
+    // the next allocation rather than after it. Everything from
+    // `CFArrayGetValueAtIndex` is a borrow owned by the array and must not be
+    // released. The buffer handed to `CFURLGetFileSystemRepresentation` is a
+    // fixed `PATH_MAX` array and its length is passed with it, so the callee
+    // cannot run past it; a path that does not fit returns false and is
+    // skipped rather than truncated into a plausible-looking wrong path.
+    unsafe {
+        let identifier = CFStringCreateWithBytes(
+            std::ptr::null(),
+            BUNDLE_ID.as_ptr(),
+            BUNDLE_ID.len() as CFIndex,
+            UTF8,
+            0,
+        );
+        if identifier.is_null() {
+            return bundles;
+        }
+        let urls = LSCopyApplicationURLsForBundleIdentifier(identifier, std::ptr::null_mut());
+        CFRelease(identifier);
+        if urls.is_null() {
+            // Not an error: this is what "nothing is registered" looks like,
+            // and it is the honest answer on a machine that has never launched
+            // mark.
+            return bundles;
+        }
+
+        let count = CFArrayGetCount(urls);
+        let mut buffer = [0u8; libc::PATH_MAX as usize];
+        for index in 0..count {
+            let url = CFArrayGetValueAtIndex(urls, index);
+            if url.is_null() {
+                continue;
+            }
+            let ok = CFURLGetFileSystemRepresentation(
+                url,
+                1,
+                buffer.as_mut_ptr(),
+                buffer.len() as CFIndex,
+            );
+            if ok == 0 {
+                continue;
+            }
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            bundles.push(PathBuf::from(OsStr::from_bytes(&buffer[..end])));
+        }
+        CFRelease(urls);
+    }
+
+    bundles
+}
+
 /// The `.app` this binary lives in, if it lives in one.
 ///
 /// ADR-1: *"`mark-cli` resolves `$0` through its symlink chain to locate the
@@ -446,6 +564,47 @@ fn launch() -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What can be asserted about a machine whose LaunchServices database is
+    /// not ours to arrange: that the FFI is sound and that what comes back is
+    /// shaped like an answer.
+    ///
+    /// The count is deliberately not asserted — a CI box has no mark
+    /// registered and a development machine has one, and a test that demanded
+    /// either would fail on the other. What *is* worth pinning is that this
+    /// returns rather than trapping (the Create Rule is hand-written above,
+    /// and a double release or a missing null check would show up here under
+    /// the address sanitizer), that it does not leak a truncated path, and
+    /// that every entry is a real bundle path rather than whatever happened to
+    /// be left in the buffer.
+    #[test]
+    fn registered_bundles_are_app_paths_or_nothing_at_all() {
+        for path in registered_bundles() {
+            assert!(
+                path.is_absolute(),
+                "LaunchServices handed back a relative path: {}",
+                path.display()
+            );
+            assert_eq!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("app"),
+                "not a bundle: {}",
+                path.display()
+            );
+            assert!(
+                !path.as_os_str().is_empty(),
+                "an empty path means the NUL scan ran off the buffer"
+            );
+        }
+    }
+
+    /// Called twice because the interesting failure is the *second* call: a
+    /// `CFRelease` too many on the array or the string is invisible on one
+    /// pass and an over-release on the next.
+    #[test]
+    fn registering_can_be_asked_twice() {
+        assert_eq!(registered_bundles(), registered_bundles());
+    }
 
     /// The two sides must agree byte for byte, so the trailing slash `$TMPDIR`
     /// almost always carries has to be handled the same way in both.

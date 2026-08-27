@@ -136,7 +136,7 @@ _mark() {
           actions=(
             'list:every open tab, in bar order'
             'select:bring a tab to the front'
-            'close:close a tab (with no argument, the selected one)'
+            'close:close a tab (with no argument, the selected one; --all closes them all)'
           )
           _arguments -C \
             '1: :{_describe -t actions "tab action" actions}' \
@@ -147,8 +147,14 @@ _mark() {
                 list)
                   _arguments '--json[machine-readable output]'
                   ;;
-                select|close)
+                select)
                   _arguments '--json[machine-readable output]' '1:tab:_mark_tabs'
+                  ;;
+                close)
+                  _arguments \
+                    '--all[close every tab in the window]' \
+                    '--json[machine-readable output]' \
+                    '1:tab:_mark_tabs'
                   ;;
               esac
               ;;

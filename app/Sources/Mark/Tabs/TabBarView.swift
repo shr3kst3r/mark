@@ -617,6 +617,12 @@ public final class TabItemView: NSView {
             withTitle: "Close Other Tabs",
             action: #selector(MainWindowController.closeOtherTabs(_:)), keyEquivalent: "")
         closeOthers.representedObject = tab
+        // No `representedObject`: this one is about the window rather than
+        // about the tab that was clicked, and handing it a tab would suggest
+        // otherwise.
+        menu.addItem(
+            withTitle: "Close All Tabs",
+            action: #selector(MainWindowController.closeAllTabs(_:)), keyEquivalent: "")
         // Right-clicking a tab is also a way of pointing at it, and acting on a
         // tab that is not the selected one without saying so would be a
         // surprise. Selecting first makes the two agree.

@@ -76,6 +76,42 @@ struct MenuBarTests {
         #expect(filterItem.keyEquivalentModifierMask == [.command, .option])
     }
 
+    /// The three closes, and the order they are in.
+    ///
+    /// ⌘W is one tab, ⌥⌘W is all of them, ⇧⌘W is the window: one modifier apart
+    /// and widening as it goes, which is the only reason ⌥⌘W is guessable at
+    /// all. `keyEquivalentsAreUnique` above says they collide with nothing;
+    /// this says which is which, so a later tidy-up cannot swap them.
+    @Test("Close Tab, Close All Tabs and Close Window widen in that order")
+    func closeItemsWiden() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        // The top-level items carry no title of their own — the submenu does,
+        // which is what AppKit draws in the bar.
+        let file = try #require(menu.items.compactMap(\.submenu).first { $0.title == "File" })
+
+        func item(_ title: String) throws -> NSMenuItem {
+            try #require(file.items.first { $0.title == title }, "File has no \(title)")
+        }
+        let one = try item("Close Tab")
+        let all = try item("Close All Tabs")
+        let window = try item("Close Window")
+
+        #expect(one.keyEquivalent == "w")
+        #expect(one.keyEquivalentModifierMask == [.command])
+        #expect(all.keyEquivalent == "w")
+        #expect(all.keyEquivalentModifierMask == [.command, .option])
+        #expect(window.keyEquivalent == "w")
+        #expect(window.keyEquivalentModifierMask == [.command, .shift])
+        #expect(all.action == #selector(MainWindowController.closeAllTabs(_:)))
+
+        let order = file.items.map(\.title)
+        let positions = ["Close Tab", "Close All Tabs", "Close Window"].compactMap {
+            order.firstIndex(of: $0)
+        }
+        #expect(positions == positions.sorted(), "the three closes are out of order in File")
+    }
+
     /// The pane and window commands exist and are reachable, since a shortcut
     /// nobody can find is not a feature.
     @Test("the split and window commands are in the menu bar")

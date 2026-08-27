@@ -309,6 +309,12 @@ public enum Command: Equatable, Sendable {
     case tabList
     case tabSelect(TabSelector)
     case tabClose(TabSelector)
+    /// `mark tab close --all`: every tab in the window being driven, in both
+    /// halves of a split. A separate command rather than a fourth
+    /// ``TabSelector``, because "all of them" is not something the other
+    /// selector-taking command could mean — `tab select --all` addresses
+    /// nothing.
+    case tabCloseAll
     /// Apply a theme, or — with no name — report the one in force. The
     /// appearance is which half of it to show: absent means *the one you
     /// named*, and ``ThemeAppearance/system`` is `mark theme --system`.
@@ -340,6 +346,9 @@ public enum Command: Equatable, Sendable {
             // Closing with no target closes the selected tab, which is what
             // `mark tab close` with no argument means and what ⌘W does.
             return .tabClose(try selector(from: arguments, for: name, allowSelected: true))
+
+        case "tab-close-all":
+            return .tabCloseAll
 
         case "theme":
             // No name is "what is applied?" rather than an error: listing and
@@ -406,8 +415,8 @@ public enum Command: Equatable, Sendable {
     /// Every command this build understands, for the `unknown-command` reply
     /// and for `mark --help`'s counterpart on the app side.
     public static let knownNames = [
-        "ping", "open", "tab-list", "tab-select", "tab-close", "theme", "goto", "reload",
-        "sidebar", "nav",
+        "ping", "open", "tab-list", "tab-select", "tab-close", "tab-close-all", "theme",
+        "goto", "reload", "sidebar", "nav",
     ]
 
     /// The name this command travels under. Round-trips with ``make(name:arguments:)``.
@@ -418,6 +427,7 @@ public enum Command: Equatable, Sendable {
         case .tabList: return "tab-list"
         case .tabSelect: return "tab-select"
         case .tabClose: return "tab-close"
+        case .tabCloseAll: return "tab-close-all"
         case .theme: return "theme"
         case .goTo: return "goto"
         case .reload: return "reload"
@@ -652,6 +662,9 @@ public protocol CommandTarget: AnyObject {
     func documentTabs() -> [TabSummary]
     func selectTab(matching selector: TabSelector) throws -> TabSummary
     func closeTab(matching selector: TabSelector) throws -> TabSummary
+    /// Every tab in this window. Returns what was closed, captured before it
+    /// was — a closed tab has no index to report.
+    func closeAllTabs() -> [TabSummary]
     /// - Throws: ``CommandFailure`` with `anchor-not-found` when the heading is
     ///   not in the document — ADR-3's own example of a failure the CLI must be
     ///   able to exit non-zero on.
@@ -922,6 +935,20 @@ public final class CommandRouter {
         case .tabClose(let selector):
             let closed = try target.closeTab(matching: selector)
             return ["closed": closed.json, "tabs": .int(target.documentTabs().count)]
+
+        case .tabCloseAll:
+            // `closed` is an **array** here, where `tab-close` answers with one
+            // object. Two shapes under one key would be worse than two keys: a
+            // caller reading `.closed.path` on a reply that closed four
+            // documents deserves a type error rather than the first one's path.
+            // `tabs` keeps its meaning — how many are left, in every window —
+            // so a window emptied while another still has documents does not
+            // report zero.
+            let closed = target.closeAllTabs()
+            return [
+                "closed": .array(closed.map(\.json)),
+                "tabs": .int(target.documentTabs().count),
+            ]
 
         case .theme(let name, let appearance):
             let applied = try await target.applyTheme(named: name, appearance: appearance)

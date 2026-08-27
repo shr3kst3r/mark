@@ -86,6 +86,7 @@ If you only want the prose, read the file directly — that is cheaper.
 | "open it without pulling me off what I'm reading" | `mark open <f> --tab --json` |
 | "what's open?" | `mark tab list --json` |
 | "switch to / close that tab" | `mark tab select <index\|path>` / `mark tab close [index\|path]` (bare `close` closes the selected tab) |
+| "close everything" | `mark tab close --all --json` (every tab in the window, both halves of a split; the window stays open) |
 | "jump to the Install section" | `mark goto install --json` (leading `#` optional) |
 | "re-read it from disk" | `mark reload --json` (refuses if the tab has unsaved changes) |
 | "apply a theme to every tab" | `mark theme <name> --json` (shows the half you named, whatever macOS is in) |
@@ -180,6 +181,8 @@ mark open <f>   → {"tab":{…},"tabs":2}       // a file became a tab
 mark open <dir> → {"sidebar":{…},"tabs":2}   // a directory rooted the sidebar
 mark tab select → {"tab":{…}}
 mark tab close  → {"closed":{…},"tabs":1}
+mark tab close --all
+                → {"closed":[{…},{…}],"tabs":0}  // an array, not one object
 mark goto       → {"anchor":"install","tab":{…}}
 mark reload     → {"blocks":12,"tab":{…}}    // blocks actually patched
 mark theme <n>  → {"theme":{"name":…,"kind":"dark","light":…,"dark":…,
@@ -253,6 +256,9 @@ done
 
 - **`mark tab close 2` treats an all-digit argument as an index**, so a file
   literally named `2` needs `./2`. Same convention as `rm`.
+- **`--all` changes the shape of `closed`** from one object to an array, and
+  refuses to be combined with naming a tab. It closes the window being driven,
+  not every window, and leaves that window open with no documents in it.
 - **`mark nav` needs exactly one destination** — a directory *or* one of
   `--up` / `--back` / `--forward`, never both and never neither.
 - **`mark theme` is split across the two halves.** `--list`, `--show`, and

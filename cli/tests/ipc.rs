@@ -344,6 +344,35 @@ fn tab_close_with_no_target_names_no_tab() {
     assert_eq!(request["arguments"], serde_json::json!({}));
 }
 
+/// `--all` is its own command on the wire rather than `tab-close` with a flag,
+/// because "all of them" is not a tab the selector could have named.
+#[test]
+fn tab_close_all_sends_its_own_command_and_counts_what_went() {
+    let mut app = FakeApp::answering(
+        r#"{"version":1,"ok":true,"result":{"closed":[{"index":0,"path":"/a.md","title":"a","selected":true,"resident":true},{"index":1,"path":"/b.md","title":"b","selected":false,"resident":false}],"tabs":0}}"#,
+    );
+    let output = app.run(&["tab", "close", "--all"]);
+    let request = app.request();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(request["command"], serde_json::json!("tab-close-all"));
+    assert_eq!(request["arguments"], serde_json::json!({}));
+    // The count, not two lines of paths: `--json` is there for the caller that
+    // wants them.
+    let text = stdout(&output);
+    assert!(text.contains("closed 2 tabs, 0 left"), "{text}");
+}
+
+/// Closing every tab and closing *that* tab are different requests, and a
+/// command line that asks for both is a mistake worth refusing before the round
+/// trip rather than resolving in favour of one of them.
+#[test]
+fn tab_close_all_refuses_a_target() {
+    let app = FakeApp::answering(r#"{"version":1,"ok":true,"result":{}}"#);
+    let output = app.run(&["tab", "close", "--all", "2"]);
+    assert_ne!(code(&output), 0);
+    assert!(stderr(&output).contains("--all"), "{}", stderr(&output));
+}
+
 #[test]
 fn tab_select_by_number_sends_an_index_and_by_name_sends_a_path() {
     let mut app = FakeApp::answering(

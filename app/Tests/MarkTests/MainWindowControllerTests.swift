@@ -350,6 +350,68 @@ struct MainWindowControllerTests {
         // 30 pt of empty chrome.
         #expect(controller.tabBar.isHidden)
     }
+
+    /// **File ▸ Close All Tabs (⌥⌘W).**
+    ///
+    /// Three claims, and the middle one is the reason this goes through the
+    /// window rather than through ``TabGroups`` alone: closing a tab is what
+    /// writes its unsaved buffer, and a command that emptied the window by
+    /// dropping stores on the floor would lose 800 ms of typing in every one of
+    /// them at once.
+    @Test("Close All Tabs empties both halves of a split and writes what was unsaved")
+    func closeAllTabsEmptiesTheWindow() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        let dirtyURL = fixture.file(named: "a.md")
+        controller.open(dirtyURL)
+        controller.open(fixture.file(named: "b.md"))
+        let dirty = try #require(controller.tabs.tab(for: dirtyURL))
+        let buffer = try #require(controller.buffer(for: dirty))
+        buffer.replaceContents("# a.md\n\nunsaved words\n")
+        #expect(dirty.isDirty)
+        #expect(controller.groups.splitRight())
+        #expect(controller.groups.isSplit)
+
+        controller.closeAllTabs(nil)
+
+        #expect(controller.groups.allTabs.isEmpty)
+        #expect(!controller.groups.isSplit)
+        // The window stays. "Close every document" and "close the window" are
+        // different requests, and the sidebar is the reason the second one has
+        // its own shortcut.
+        #expect(controller.window != nil)
+        #expect(controller.documentView == nil)
+        #expect(
+            try String(contentsOf: dirtyURL, encoding: .utf8).contains("unsaved words"),
+            "closing every tab discarded a buffer that closing one would have written")
+    }
+
+    /// Greyed out with nothing open, and — the part a per-group check would get
+    /// wrong — still live when the only documents left are in the other half of
+    /// a split.
+    @Test("Close All Tabs validates against the window's tabs, not the focused group's")
+    func closeAllTabsValidation() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        let item = NSMenuItem(
+            title: "Close All Tabs",
+            action: #selector(MainWindowController.closeAllTabs(_:)), keyEquivalent: "")
+
+        #expect(!controller.validateMenuItem(item), "nothing is open")
+
+        controller.open(fixture.file(named: "a.md"))
+        controller.open(fixture.file(named: "b.md"))
+        #expect(controller.validateMenuItem(item))
+
+        #expect(controller.groups.splitRight())
+        // Empty the focused group, leaving one document in the other half.
+        controller.groups.focused.closeAll()
+        #expect(controller.groups.focused.isEmpty)
+        #expect(controller.groups.allTabs.count == 1)
+        #expect(
+            controller.validateMenuItem(item),
+            "a document in the other pane is still a document this closes")
+    }
 }
 
 /// **What counts as opening a file** (`2026-08-26-opened-file-history`).

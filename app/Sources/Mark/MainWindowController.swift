@@ -1445,6 +1445,24 @@ extension MainWindowController: CommandTarget {
         return closed
     }
 
+    /// `mark tab close --all`.
+    ///
+    /// **This window's tabs**, in both halves of a split — the same scope the
+    /// menu item has, and the scope every command acting on the key window has
+    /// (`2026-08-26-multiple-windows-and-split-panes`). A caller who wants
+    /// another window's documents gone closes them from that window, the way
+    /// `tab select 2` has always meant "in the window I am driving".
+    ///
+    /// Summaries are captured before the close, because afterwards a tab has no
+    /// index and no group to be reported in.
+    public func closeAllTabs() -> [TabSummary] {
+        let closing = groups.allTabs.map { summary(for: $0) }
+        guard !closing.isEmpty else { return [] }
+        groups.closeAllTabs()
+        saveSessionSoon()
+        return closing
+    }
+
     public func scrollSelectedDocument(toAnchor anchor: String) async throws -> TabSummary {
         let tab = try selectedTab()
         guard let view = tab.documentView else {
@@ -1939,6 +1957,22 @@ extension MainWindowController: NSMenuItemValidation {
         for tab in owner.tabs where tab != keep { owner.close(tab) }
     }
 
+    /// Every tab in the window, both halves of a split included.
+    ///
+    /// Unlike **Close Other Tabs**, which is deliberately per-group — "the
+    /// others in the set I put together" — this one is the window's, because
+    /// "all" that quietly left the other pane's documents open would be the
+    /// surprising reading of the word. ⌥⌘W: ⌘W is one tab, ⇧⌘W is the window,
+    /// and this sits between them.
+    ///
+    /// The window stays open on its empty state. Closing every tab is not the
+    /// same request as closing the window, and the sidebar the reader was
+    /// browsing is still there.
+    @objc public func closeAllTabs(_ sender: Any?) {
+        guard !groups.closeAllTabs().isEmpty else { return }
+        saveSessionSoon()
+    }
+
     // MARK: - Groups (2026-08-26-editor-groups-per-pane-tab-bars)
 
     /// ⌘\ — put this document in a group of its own beside the others.
@@ -2299,6 +2333,11 @@ extension MainWindowController: NSMenuItemValidation {
             return true
         case #selector(closeOtherTabs(_:)):
             return tabs.count > 1
+        case #selector(closeAllTabs(_:)):
+            // The window's tabs, not the focused group's: the item closes both
+            // halves of a split, so it has to stay enabled while the only
+            // documents left are in the other one.
+            return !groups.allTabs.isEmpty
         case #selector(splitRight(_:)):
             // Two tabs in the focused group, because splitting *moves* one: a
             // group with a single tab has nothing to keep on this side, and one

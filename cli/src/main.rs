@@ -351,6 +351,14 @@ enum TabAction {
     Close {
         /// A tab index from `mark tab list`, or a file path.
         target: Option<String>,
+        /// Close every tab in the window, both halves of a split included.
+        ///
+        /// The window stays open on its empty state, exactly as it does when
+        /// the last tab is closed by hand — this is File > Close All Tabs, not
+        /// Close Window. Conflicts with naming a tab: closing all of them and
+        /// closing that one are two different requests.
+        #[arg(long, conflicts_with = "target")]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -909,22 +917,38 @@ fn cmd_tab(action: &TabAction) -> Result<(), CliError> {
             out.finish()
         }
 
-        TabAction::Close { target, json } => {
-            let request = match target {
-                Some(target) => TabAction::selector("tab-close", target)?,
-                None => Request::new("tab-close"),
+        TabAction::Close { target, all, json } => {
+            let request = match (all, target) {
+                (true, _) => Request::new("tab-close-all"),
+                (false, Some(target)) => TabAction::selector("tab-close", target)?,
+                (false, None) => Request::new("tab-close"),
             };
             let result = call(request)?;
             if *json {
                 return print_json(&result);
             }
             let mut out = Output::new();
-            emitln!(
-                out,
-                "closed {}, {} left",
-                result["closed"]["path"].as_str().unwrap_or_default(),
-                result["tabs"].as_i64().unwrap_or(0)
-            )?;
+            let left = result["tabs"].as_i64().unwrap_or(0);
+            if *all {
+                // The count, not the paths: `--all` on a window of twenty
+                // documents would otherwise print twenty lines nobody asked
+                // for, and `--json` is there for the caller that wants them.
+                let closed = result["closed"].as_array().map_or(0, |tabs| tabs.len());
+                emitln!(
+                    out,
+                    "closed {} tab{}, {} left",
+                    closed,
+                    if closed == 1 { "" } else { "s" },
+                    left
+                )?;
+            } else {
+                emitln!(
+                    out,
+                    "closed {}, {} left",
+                    result["closed"]["path"].as_str().unwrap_or_default(),
+                    left
+                )?;
+            }
             out.finish()
         }
     }

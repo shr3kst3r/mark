@@ -165,8 +165,19 @@ addresses the window the command is acting on; a
 .I path
 is looked for in every window, so a document is found wherever it is.
 .TP
-.BI "tab close " [index|path] " [--json]"
+.BI "tab close " [index|path] " [--all] [--json]"
 Close a tab; with no argument, the selected one.
+.B --all
+closes every tab in the window being driven, both halves of a split included,
+and cannot be combined with naming one. The window stays open on its empty state
+\(em it still has its sidebar, and closing every document is not the same
+request as closing the window. With
+.B --json
+the
+.B closed
+key is an
+.I array
+here, where closing a single tab makes it one object.
 .TP
 .BI "goto " anchor " [--json]"
 Scroll the front document to a heading, with or without the leading

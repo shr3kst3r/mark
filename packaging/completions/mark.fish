@@ -82,4 +82,5 @@ complete -c mark -n '__fish_seen_subcommand_from theme' -a '(__mark_themes)' -d 
 complete -c mark -n '__fish_seen_subcommand_from tab; and not __fish_seen_subcommand_from list select close' -a list -d 'Every open tab, in bar order'
 complete -c mark -n '__fish_seen_subcommand_from tab; and not __fish_seen_subcommand_from list select close' -a select -d 'Bring a tab to the front'
 complete -c mark -n '__fish_seen_subcommand_from tab; and not __fish_seen_subcommand_from list select close' -a close -d 'Close a tab'
+complete -c mark -n '__fish_seen_subcommand_from close' -l all -d 'Close every tab in the window'
 complete -c mark -n '__fish_seen_subcommand_from select close' -a '(__mark_tabs)' -d 'Tab'

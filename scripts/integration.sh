@@ -475,6 +475,21 @@ if [[ ${status} -eq 0 ]]; then
 else
     fail "goto install exited ${status} with: ${out}"
 fi
+# Last in this gate on purpose: it empties the window, and everything above
+# needs a front document. The window itself has to survive — closing every tab
+# is not closing the window — so `ping` still has to answer afterwards, which is
+# the half a unit test cannot assert about the shipped app.
+before="$(tab_paths | wc -l | tr -d ' ')"
+if [[ "${before}" -gt 0 ]] && "${cli}" tab close --all >/dev/null 2>&1; then
+    after="$(tab_paths | wc -l | tr -d ' ')"
+    if [[ "${after}" -eq 0 ]] && "${cli}" ping >/dev/null 2>&1; then
+        pass "tab close --all emptied the window (${before} -> 0) and the app is still there"
+    else
+        fail "tab close --all left ${after} tab(s), or took the app with it"
+    fi
+else
+    fail "tab close --all failed with ${before} tab(s) open"
+fi
 
 # ---------------------------------------------------------------- gate 9 ----
 #

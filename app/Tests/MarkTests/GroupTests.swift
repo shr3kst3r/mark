@@ -165,6 +165,46 @@ struct GroupTests {
         #expect(groups.focused.selected == nil)
     }
 
+    /// **Close All Tabs** is the window's, not the focused group's: a split
+    /// window that kept the other pane's documents open would be the surprising
+    /// reading of "all".
+    ///
+    /// The split closes with them. A window with nothing in it has nothing to
+    /// show in two halves, and leaving an empty second group behind is the
+    /// state `2026-08-26-editor-groups-per-pane-tab-bars` says is not a state.
+    @Test("closing all tabs empties both groups and leaves the window unsplit")
+    func closeAllTabsEmptiesEveryGroup() throws {
+        let harness = try TabHarness(files: ["a.md", "b.md", "c.md"])
+        let groups = harness.makeGroups()
+        #expect(groups.splitRight())
+        #expect(groups.isSplit)
+        #expect(groups.allTabs.count == 3)
+        #expect(groups.groups.allSatisfy { !$0.isEmpty })
+
+        let closed = groups.closeAllTabs()
+
+        #expect(closed.count == 3)
+        #expect(groups.allTabs.isEmpty)
+        #expect(!groups.isSplit, "an empty window has nothing to show in two halves")
+        #expect(groups.groups.count == 1)
+        #expect(groups.focusIndex == 0)
+        #expect(groups.focused.selected == nil)
+    }
+
+    /// Nothing to close is not a failure, and — more to the point — not a
+    /// layout change: the menu item is greyed out here, but the socket command
+    /// behind it is reachable from a script at any time.
+    @Test("closing all tabs in an empty window does nothing at all")
+    func closeAllTabsOnAnEmptyWindow() throws {
+        let harness = try TabHarness(files: ["a.md"])
+        let groups = harness.makeGroups()
+        #expect(groups.closeAllTabs().count == 1)
+
+        #expect(groups.closeAllTabs().isEmpty)
+        #expect(groups.groups.count == 1)
+        #expect(!groups.isSplit)
+    }
+
     @Test("moving a tab to the other group splits when there is only one")
     func moveSplitsWhenUnsplit() throws {
         let harness = try TabHarness(files: ["a.md", "b.md"])

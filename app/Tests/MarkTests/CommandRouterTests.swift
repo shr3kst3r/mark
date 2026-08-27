@@ -290,6 +290,46 @@ struct CommandRouterTests {
         #expect(viaSocket.navigator.forward.map(\.path) == ["/tmp"])
     }
 
+    /// `mark tab close --all`, and the thing a caller has to know about it:
+    /// `closed` is an **array** here, where `tab-close` answers with a single
+    /// object. Two shapes under one key would be worse than two keys.
+    @Test("tab-close-all closes every tab and reports them all")
+    func closeAll() async throws {
+        let target = FakeCommandTarget()
+        let router = CommandRouter(target: target)
+        for path in ["/a.md", "/b.md", "/c.md"] {
+            _ = await router.handle(
+                line: #"{"version":1,"command":"open","arguments":{"path":"\#(path)"}}"#)
+        }
+
+        let json = try decode(await router.handle(line: #"{"version":1,"command":"tab-close-all"}"#))
+
+        #expect(json["ok"] as? Bool == true)
+        let result = try #require(json["result"] as? [String: Any])
+        let closed = try #require(result["closed"] as? [[String: Any]])
+        #expect(closed.map { $0["path"] as? String } == ["/a.md", "/b.md", "/c.md"])
+        #expect(result["tabs"] as? Int == 0)
+        #expect(target.documentTabs().isEmpty)
+        #expect(target.log.last == "close all")
+    }
+
+    /// Nothing open is not an error. A script that closes everything before
+    /// opening what it wants would otherwise have to know whether the app was
+    /// already empty, which is exactly the thing it is trying not to care
+    /// about.
+    @Test("tab-close-all on an empty app succeeds with an empty list")
+    func closeAllWithNothingOpen() async throws {
+        let target = FakeCommandTarget()
+        let router = CommandRouter(target: target)
+
+        let json = try decode(await router.handle(line: #"{"version":1,"command":"tab-close-all"}"#))
+
+        #expect(json["ok"] as? Bool == true)
+        let result = try #require(json["result"] as? [String: Any])
+        #expect((result["closed"] as? [[String: Any]])?.isEmpty == true)
+        #expect(result["tabs"] as? Int == 0)
+    }
+
     /// The sidebar command reports the shape `scripts/session-roundtrip.sh`
     /// reads. A rename here would make that gate silently stop asserting.
     @Test("sidebar reports root, breadcrumb, and both history stacks")
@@ -551,6 +591,13 @@ final class FakeCommandTarget: CommandTarget {
         let closed = tabs.remove(at: index)
         for position in tabs.indices { tabs[position].index = position }
         if !tabs.isEmpty && !tabs.contains(where: \.selected) { select(0) }
+        return closed
+    }
+
+    func closeAllTabs() -> [TabSummary] {
+        log.append("close all")
+        let closed = tabs
+        tabs.removeAll()
         return closed
     }
 

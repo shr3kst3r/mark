@@ -54,7 +54,13 @@ _mark_complete() {
                 mapfile -t COMPREPLY < <(compgen -W "list select close" -- "${current}")
                 return
             fi
-            options="--json"
+            # --all belongs to `close` alone; offering it after `list` or
+            # `select` would advertise a flag the binary rejects.
+            if [[ "${COMP_WORDS[2]}" == "close" ]]; then
+                options="--all --json"
+            else
+                options="--json"
+            fi
             ;;
     esac
 

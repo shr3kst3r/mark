@@ -198,6 +198,37 @@ public final class TabGroups {
         return true
     }
 
+    /// Close **every** tab in the window, in every group.
+    ///
+    /// The model half of File ▸ Close All Tabs. Two things make this more than
+    /// a loop over ``allTabs``:
+    ///
+    /// * **A split collapses.** Closing tabs one at a time would collapse it
+    ///   halfway through, on whichever group emptied first, and rebuild the
+    ///   window's areas mid-loop. Each group is emptied in one pass and the
+    ///   split is closed once, at the end, so the window rearranges exactly
+    ///   once no matter how many documents were open.
+    /// * **Nothing is dropped on the floor.** ``TabStore/closeAll()`` is what
+    ///   writes an unsaved buffer and releases its `flock(2)` lock — the same
+    ///   reason ``restore(_:)`` uses it rather than discarding a group.
+    ///
+    /// The window is left with one empty group and its sidebar, which is what
+    /// closing the last tab has always left behind. Returns the tabs that were
+    /// closed, in the order the bar had them, for the caller that has to report
+    /// them.
+    @discardableResult
+    public func closeAllTabs() -> [DocumentTab] {
+        let closing = allTabs
+        guard !closing.isEmpty else { return [] }
+        for group in groups { group.closeAll() }
+        // Both groups are empty now, so which one survives is arbitrary — the
+        // second goes, because ``collapseIfEmpty(_:)`` already knows how to
+        // remove a group and tell the window once.
+        if isSplit { collapseIfEmpty(groups[1]) }
+        Log.tabs.info("closed all \(closing.count) tab(s) in the window")
+        return closing
+    }
+
     // MARK: - The focus
 
     /// Move the focus to the group at `index`.

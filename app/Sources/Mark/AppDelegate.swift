@@ -438,6 +438,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         fileMenu.addItem(
             withTitle: "Close Other Tabs",
             action: #selector(MainWindowController.closeOtherTabs(_:)), keyEquivalent: "")
+        // ⌥⌘W, between the two: ⌘W is one tab, this is all of them, ⇧⌘W is the
+        // window. It leaves the window open on its empty state — "close every
+        // document" and "close the window" are different requests, and the
+        // sidebar is still worth having.
+        let closeAll = fileMenu.addItem(
+            withTitle: "Close All Tabs",
+            action: #selector(MainWindowController.closeAllTabs(_:)), keyEquivalent: "w")
+        closeAll.keyEquivalentModifierMask = [.command, .option]
         let closeWindow = fileMenu.addItem(
             withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)),
             keyEquivalent: "w")

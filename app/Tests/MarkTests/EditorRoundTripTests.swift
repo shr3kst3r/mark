@@ -47,6 +47,14 @@ final class EditorHarness {
         return try #require(tab.buffer)
     }
 
+    /// Simulate the page reporting a scroll, through the real bridge path, so
+    /// what the editor pane does about it is the production path and not a
+    /// call to `follow(previewByte:)` written by the test.
+    func reportScroll(_ y: Double, source: Int? = nil, on tab: DocumentTab) {
+        guard let view = tab.documentView else { return }
+        view.scriptBridge(ScriptBridge(), didReceive: .scroll(y: y, source: source))
+    }
+
     /// Type, through the real text view and its delegate.
     func type(_ text: String, at location: Int) {
         let view = controller.editor.textView
@@ -376,5 +384,102 @@ struct EditorRoundTripTests {
         #expect(harness.controller.flushDirtyBuffers() == 2)
         #expect(try harness.contents(of: "one.md").hasPrefix("edited one. "))
         #expect(try harness.contents(of: "two.md").hasPrefix("edited two. "))
+    }
+
+    // MARK: - The editor follows the preview
+
+    /// The line the editor is showing at the top of its viewport.
+    ///
+    /// The assertion is deliberately on **text**, not on a pixel offset: the
+    /// property is "both panes are showing the same part of the document", and
+    /// a y-coordinate compared against the same function that produced it would
+    /// agree with itself and prove nothing.
+    private func lineAtTop(of pane: EditorPane) -> String {
+        guard let layoutManager = pane.textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager
+        else { return "" }
+        let y = pane.scrollOffset - pane.textView.textContainerOrigin.y
+        guard let fragment = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: y))
+        else { return "" }
+        let start = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.location)
+        let end = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.endLocation)
+        guard end > start else { return "" }
+        return (pane.textView.string as NSString)
+            .substring(with: NSRange(location: start, length: end - start))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A document tall enough that both panes can scroll, whose every line says
+    /// where it is.
+    private func numberedParagraphs(_ count: Int) -> String {
+        (0..<count).map { "Paragraph \($0) of the document.\n" }.joined(separator: "\n")
+    }
+
+    @Test("scrolling the preview scrolls the editor to the same line")
+    func theEditorFollowsThePreview() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        #expect(pane.scrollOffset == 0)
+
+        // What the page reports when block 200 is under the top of the
+        // viewport: its `data-mk-start`. Every byte here is ASCII, so the byte
+        // offset and the UTF-16 offset agree — the case where they do not is
+        // `SourceOffsets`' own, and is tested there.
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.reportScroll(4_000, source: target, on: tab)
+
+        #expect(lineAtTop(of: pane) == "Paragraph 200 of the document.")
+        #expect(pane.scrollOffset > 0)
+
+        // And back up, so this is following rather than a one-way jump.
+        let earlier = (source as NSString).range(of: "Paragraph 40 of the document.").location
+        harness.reportScroll(800, source: earlier, on: tab)
+        #expect(lineAtTop(of: pane) == "Paragraph 40 of the document.")
+    }
+
+    /// A page that cannot say where it is says nothing, and nothing moves. The
+    /// alternative — treating a missing position as byte 0 — would yank the
+    /// editor to the top of the file every time a document could not be mapped.
+    @Test("a scroll report with no source position leaves the editor where it is")
+    func aReportWithNoSourceMovesNothing() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.reportScroll(4_000, source: target, on: tab)
+        let followed = pane.scrollOffset
+        #expect(followed > 0)
+
+        harness.reportScroll(6_000, on: tab)
+        #expect(pane.scrollOffset == followed)
+    }
+
+    /// One editor pane, and a window can have two documents on screen. The pane
+    /// follows the one it is bound to and ignores the other, which is what
+    /// keeps a split from scrolling the source of a document nobody is editing.
+    @Test("the editor ignores a scroll in a document it is not bound to")
+    func theEditorFollowsOnlyItsOwnDocument() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let first = try await harness.open(source, named: "first.md")
+        let second = try await harness.open(numberedParagraphs(400), named: "second.md")
+        _ = try harness.edit(second)
+        let pane = harness.controller.editor
+        #expect(pane.buffer === second.buffer)
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.reportScroll(4_000, source: target, on: first)
+        #expect(pane.scrollOffset == 0, "the pane followed a document it is not showing")
+
+        harness.reportScroll(4_000, source: target, on: second)
+        #expect(pane.scrollOffset > 0)
     }
 }

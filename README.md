@@ -241,12 +241,16 @@ document from the memory budget.
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and
 accessibility are the system's rather than ours. The preview updates as you
-type, one block at a time. Autosave writes 800 ms after you stop, atomically,
-through any symlink to the real file. If something else writes the file while
-you have unsaved changes, autosave pauses and you are asked — keep mine, take
-theirs, or show me the diff — and nothing is written until you answer. The pane
-starts hidden: a document opens read-only until you ask to edit it, and the app
-remembers that you asked.
+type, one block at a time. Scrolling the preview scrolls the editor with it, to
+the same line: the page reports which block is under the top of its viewport and
+the pane goes to the bytes that block was rendered from, so a diagram that is
+one line of source and half a screen of picture does not put the two panes out
+of step. Autosave writes 800 ms after you stop, atomically, through any symlink
+to the real file. If something else writes the file while you have unsaved
+changes, autosave pauses and you are asked — keep mine, take theirs, or show me
+the diff — and nothing is written until you answer. The pane starts hidden: a
+document opens read-only until you ask to edit it, and the app remembers that
+you asked.
 
 **Making one.** ⇧⌘N names a new document in a save panel, creates it, and opens
 it with the editor already focused — there is no untitled buffer to lose,

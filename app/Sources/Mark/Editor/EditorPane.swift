@@ -238,7 +238,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// edit.
     public func bind(_ buffer: Buffer?) {
         if let current = self.buffer {
-            places[ObjectIdentifier(current)] = (textView.selectedRange(), currentScroll)
+            places[ObjectIdentifier(current)] = (textView.selectedRange(), scrollOffset)
         }
         self.buffer = buffer
         parseGeneration += 1
@@ -531,7 +531,115 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         return NSRange(location: clampedLocation, length: clampedEnd - clampedLocation)
     }
 
-    private var currentScroll: CGFloat { scrollView.contentView.bounds.origin.y }
+    // MARK: - Following the preview
+
+    /// Put the source at UTF-8 byte offset `byte` at the top of the editor's
+    /// viewport.
+    ///
+    /// The preview pushes this on every scroll report (`ShellMessage/scroll`)
+    /// while the pane is bound to the document being scrolled, which is what
+    /// makes the two panes show the same part of the same document while the
+    /// reader scrolls the rendered one.
+    ///
+    /// **The byte offset is the whole mapping, and it is the page's, not
+    /// ours.** The alternative — scroll the editor to the same *fraction* of
+    /// its height — is a line of code and is wrong on every document that is
+    /// not uniform prose: a Mermaid diagram is one line of source and half a
+    /// screen of picture, a wrapped table is the reverse. The page reads the
+    /// byte span off the block under its viewport top, and this converts that
+    /// to a position in the text view. Both halves are the core's offsets, so
+    /// neither pane is guessing.
+    ///
+    /// A no-op when the pane has no buffer, when the offset does not land in
+    /// the text, or when the editor is already there — the last of which is the
+    /// common case for a fling that ends inside one long block.
+    public func follow(previewByte byte: Int) {
+        guard let buffer, byte >= 0 else { return }
+        // Measure, move, measure again — up to three times, and stopping as
+        // soon as the answer stops moving.
+        //
+        // One pass is not enough, and the reason is TextKit 2's laziness rather
+        // than a mistake in the arithmetic: the height of everything above the
+        // target is an *estimate* until it is laid out, so the position this
+        // resolves is an estimate too, and scrolling there is what makes the
+        // layout real — which moves the target, by a line or two per pass.
+        // `shell.js` solves the identical problem identically, at
+        // `restoreAnchor`: record where the anchor is, move, measure the delta,
+        // correct.
+        for _ in 0..<3 {
+            guard let y = sourceY(ofByte: byte, in: buffer.text) else { return }
+            // Not clamped to the height of the text, deliberately: that
+            // height is an estimate for the same reason, and clamping to it
+            // would stop the editor short of wherever the reader is going.
+            // A byte offset that is in the document names a line that is in
+            // the document, so the furthest this can go is the last screenful
+            // — where the preview is showing its own bottom padding anyway.
+            let target = max(0, y)
+            guard abs(target - scrollOffset) > 0.5 else { return }
+            scroll(to: target)
+        }
+    }
+
+    /// Where the source byte offset `byte` sits in the laid-out text, in the
+    /// text view's coordinates, or `nil` if TextKit cannot place it.
+    ///
+    /// `text` is the buffer's, not ``NSTextView/string``: the buffer holds a
+    /// native, contiguous UTF-8 `String`, where the text view's is a bridged
+    /// `NSString` whose UTF-8 view has to be materialised before it can be
+    /// counted. The two are the same characters by construction — the length
+    /// check in ``textStorage(_:didProcessEditing:range:changeInLength:)`` is
+    /// what keeps them so.
+    ///
+    /// Resolving a location deep in a document TextKit 2 has not laid out yet
+    /// makes it lay out that far, which is the one expensive thing here. It is
+    /// the same work the reader's own scrolling would have caused, it is bounded
+    /// by the page's 120 ms scroll report rather than by the frame rate, and the
+    /// alternative is an editor that follows the preview only over the part of
+    /// the document it has already seen.
+    func sourceY(ofByte byte: Int, in text: String) -> CGFloat? {
+        guard let layoutManager = textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager,
+            let index = SourceOffsets.utf16(of: [byte], in: text).first
+        else { return nil }
+        guard
+            let location = contentManager.location(
+                contentManager.documentRange.location, offsetBy: index)
+        else { return nil }
+        // TextKit 2 lays out lazily, and asking for a fragment it has not laid
+        // out yet does not return nil — it returns a frame at the top of the
+        // document, which would silently pin the editor to line 1 for every
+        // part of the file the reader has not already visited. That is the
+        // normal case here, so the layout is asked for rather than assumed.
+        if let range = NSTextRange(location: contentManager.documentRange.location, end: location) {
+            layoutManager.ensureLayout(for: range)
+        }
+        guard let fragment = layoutManager.textLayoutFragment(for: location) else { return nil }
+
+        var y = fragment.layoutFragmentFrame.minY
+        // A paragraph is **one** layout fragment however many screen lines it
+        // wraps to. Stopping at the fragment would hold the editor still for
+        // the whole of a long paragraph and then move it a paragraph at a time,
+        // which is exactly the stepping the interpolation on the page side
+        // exists to avoid. The line fragments inside it are what make the
+        // follow continuous.
+        let fragmentStart = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.location)
+        let within = index - fragmentStart
+        for line in fragment.textLineFragments {
+            // Line fragments ascend, so the last one that starts at or before
+            // the offset is the one holding it.
+            guard within >= line.characterRange.location else { break }
+            y = fragment.layoutFragmentFrame.minY + line.typographicBounds.minY
+        }
+        return y + textView.textContainerOrigin.y
+    }
+
+    /// Where the pane is scrolled to, in the text view's coordinates.
+    ///
+    /// `public` for the same reason ``textView`` is: `mark-bench` asserts on it
+    /// from outside the module, and the preview's own position is readable the
+    /// same way at ``DocumentView/scrollOffset``.
+    public var scrollOffset: CGFloat { scrollView.contentView.bounds.origin.y }
 
     private func scroll(to y: CGFloat) {
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))

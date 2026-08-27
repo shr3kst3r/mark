@@ -88,6 +88,31 @@ struct ScriptBridgeTests {
         }
     }
 
+    @Test("a scroll report carries the source position the editor follows")
+    func scrollWithSource() throws {
+        let message = try ScriptBridge.decode(["kind": "scroll", "y": 480.0, "src": 1_204])
+        #expect(message == .scroll(y: 480, source: 1_204))
+    }
+
+    /// A page with nothing to map — an error page, a document with no blocks —
+    /// reports where it is and says nothing about the source. That has to stay
+    /// distinguishable from byte 0, which is a real position the editor would
+    /// scroll to.
+    @Test("a scroll report with no source position is not a report of byte 0")
+    func scrollWithoutSource() throws {
+        #expect(try ScriptBridge.decode(["kind": "scroll", "y": 12.0]) == .scroll(y: 12, source: nil))
+        #expect(try ScriptBridge.decode(["kind": "scroll", "y": 12.0, "src": 0]) == .scroll(y: 12, source: 0))
+    }
+
+    @Test("an unusable source position is refused rather than rounded")
+    func unusableSource() {
+        for src in [-1, 3.5] as [Any] {
+            #expect(throws: ShellMessageError.self) {
+                try ScriptBridge.decode(["kind": "scroll", "y": 12.0, "src": src])
+            }
+        }
+    }
+
     @Test("links decode")
     func link() throws {
         #expect(try ScriptBridge.decode(["kind": "link", "href": "./other.md"]) == .link(href: "./other.md"))

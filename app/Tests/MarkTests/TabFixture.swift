@@ -207,9 +207,9 @@ final class TabHarness {
 
     /// Simulate the page reporting a scroll, through the real bridge path, so
     /// the offset lands where dehydration will actually read it.
-    func reportScroll(_ y: Double, on tab: DocumentTab) {
+    func reportScroll(_ y: Double, source: Int? = nil, on tab: DocumentTab) {
         guard let view = tab.documentView else { return }
-        view.scriptBridge(ScriptBridge(), didReceive: .scroll(y: y))
+        view.scriptBridge(ScriptBridge(), didReceive: .scroll(y: y, source: source))
     }
 
     /// ``DocumentTab/refreshMetadata(completion:)`` reads the file off the main

@@ -64,6 +64,17 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// synchronously.
     public var onScroll: ((Double) -> Void)?
 
+    /// Called with the source position at the top of the viewport — a UTF-8
+    /// byte offset — on every scroll report that carried one.
+    ///
+    /// Separate from ``onScroll`` because the two consumers want different
+    /// things and fail differently. `onScroll` is bookkeeping: it must fire on
+    /// every report, because a tab about to be dehydrated has to remember where
+    /// the reader was. This is the editor pane following the preview, and it
+    /// must *not* fire when the page could not say where it is, because "I do
+    /// not know" and "the top of the file" would then be the same message.
+    public var onSourceTop: ((Int) -> Void)?
+
     /// Called when the reader clicks or tabs into this document.
     ///
     /// With a split there are two documents on screen and the window has to
@@ -209,6 +220,7 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         shellReadyWaiters = []
         for continuation in waiting { continuation.resume() }
         onScroll = nil
+        onSourceTop = nil
         onOpen = nil
         onShellReady = nil
         if let webView {
@@ -915,9 +927,10 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
                 TaskToggle(
                     index: index, span: start..<end, rendered: rendered, desired: checked))
 
-        case .scroll(let y):
+        case .scroll(let y, let source):
             scrollOffset = y
             onScroll?(y)
+            if let source { onSourceTop?(source) }
 
         case .link(let href):
             follow(href: href)

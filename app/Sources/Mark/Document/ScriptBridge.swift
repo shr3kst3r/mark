@@ -39,7 +39,15 @@ public enum ShellMessage: Equatable, Sendable {
     /// consumers — dehydrating a tab, and writing the session file from
     /// `applicationWillTerminate` — both need the offset at a moment when an
     /// async round trip to the page is not available.
-    case scroll(y: Double)
+    ///
+    /// `source` is where the top of the viewport is in the *document source*,
+    /// as a UTF-8 byte offset, read off the `data-mk-start` / `data-mk-end` of
+    /// the block the viewport top sits in. The editor pane follows it. `nil`
+    /// when the page has nothing to map — an error page, or a document with no
+    /// blocks in it yet — which is a different thing from byte 0 and is kept
+    /// different all the way down: a missing position moves no pane, where a
+    /// zero would yank the editor to the top of the file.
+    case scroll(y: Double, source: Int?)
 
     /// `MARK_TRACE=1` timings reported back from the page.
     case metrics(name: String, milliseconds: Double)
@@ -152,7 +160,18 @@ public final class ScriptBridge: NSObject, WKScriptMessageHandler {
             guard let y = (payload["y"] as? NSNumber)?.doubleValue, y.isFinite else {
                 throw ShellMessageError("scroll is missing a finite y")
             }
-            return .scroll(y: max(0, y))
+            // Absent is the normal case for a page that cannot map itself, so
+            // it is not an error; a `src` that is present and unusable is, and
+            // is dropped rather than rounded into a byte offset the editor
+            // would scroll to.
+            var source: Int? = nil
+            if payload["src"] != nil {
+                guard let byte = integer(payload["src"]), byte >= 0 else {
+                    throw ShellMessageError("scroll carries an unusable src")
+                }
+                source = byte
+            }
+            return .scroll(y: max(0, y), source: source)
 
         case "metrics":
             guard let name = payload["name"] as? String,

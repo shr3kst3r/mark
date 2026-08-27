@@ -491,6 +491,150 @@ func waitUntilTrue(seconds: Double, _ condition: @MainActor () -> Bool) async ->
     return condition()
 }
 
+// MARK: - The editor following the preview
+
+/// The gate for "scroll the preview, the editor comes with it".
+///
+/// Only measurable here. Both halves of the mapping are geometry: the page
+/// finds the block under its viewport top, which needs a laid-out `WKWebView`
+/// in a window on screen, and the pane resolves that byte offset to a line,
+/// which needs TextKit to have laid the document out. The unit suite drives the
+/// same path with a synthesised scroll report and can assert on the *mapping*;
+/// what it cannot assert is that the number the page sends is the block the
+/// reader is looking at.
+@MainActor
+func measureEditorFollowingThePreview(_ harness: EditorBenchHarness) async {
+    print("The editor following the preview:")
+
+    // Short paragraphs, one line each in both panes, each saying where it is —
+    // so "which paragraph is at the top" is readable from either side without
+    // a second layout model to be wrong about.
+    var source = ""
+    var starts: [Int] = []
+    for index in 0..<600 {
+        starts.append(source.utf8.count)
+        source += "Paragraph \(index) of the document.\n\n"
+    }
+    do {
+        try harness.write(source, to: "following.md")
+    } catch {
+        require(false, "the follow document could not be written: \(error)")
+        return
+    }
+    guard let tab = await harness.open("following.md"), let view = tab.documentView else {
+        require(false, "the follow document did not open")
+        return
+    }
+    harness.controller.setEditorVisible(true)
+    await view.ensureFullyRendered()
+    await harness.settle(milliseconds: 300)
+
+    let pane = harness.controller.editor
+    /// The paragraph number at the top of the editor's viewport, read out of
+    /// the text itself rather than out of a coordinate.
+    func editorTopParagraph() -> Int? {
+        guard let layoutManager = pane.textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager,
+            let fragment = layoutManager.textLayoutFragment(
+                for: CGPoint(x: 0, y: pane.scrollOffset - pane.textView.textContainerOrigin.y))
+        else { return nil }
+        let start = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.location)
+        let end = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.endLocation)
+        guard end > start else { return nil }
+        let text = (pane.textView.string as NSString)
+            .substring(with: NSRange(location: start, length: end - start))
+        guard text.hasPrefix("Paragraph ") else { return nil }
+        return Int(text.dropFirst("Paragraph ".count).prefix { $0.isNumber })
+    }
+
+    /// Which paragraph a byte offset is in.
+    func paragraph(containing byte: Int) -> Int {
+        var found = 0
+        for (index, start) in starts.enumerated() where start <= byte { found = index }
+        return found
+    }
+
+    var followLatency = Stat()
+    var worstDrift = 0
+
+    for target in [600.0, 3_000.0, 9_000.0, 1_200.0] as [Double] {
+        let before = pane.scrollOffset
+        let began = Date()
+        _ = try? await view.call("return window.mark.scrollTo(y);", arguments: ["y": target])
+        // The page reports on its own throttle; this is what the reader waits.
+        let moved = await waitUntilTrue(seconds: 3) { pane.scrollOffset != before }
+        let elapsed = Date().timeIntervalSince(began) * 1000
+        guard moved else {
+            require(false, "the editor did not follow a scroll to \(Int(target)) pt")
+            continue
+        }
+        followLatency.add(elapsed)
+
+        // `int`, not `double`: a page that reported nothing comes back as -1
+        // here and as a NaN there, and `Int(NaN)` is a trap rather than a
+        // failed check.
+        let reported = PaintReport.int(try? await view.call("return window.mark.sourceTop();"))
+        guard reported >= 0 else {
+            require(false, "the page could not say where it is at \(Int(target)) pt")
+            continue
+        }
+        let expected = paragraph(containing: reported)
+        let shown = editorTopParagraph()
+        let drift = shown.map { abs($0 - expected) } ?? 999
+        worstDrift = max(worstDrift, drift)
+        line(
+            "preview at \(Int(target)) pt",
+            "source byte \(reported) (paragraph \(expected)); editor shows "
+                + (shown.map(String.init) ?? "nothing") + "; \(String(format: "%.0f", elapsed)) ms"
+        )
+        require(
+            drift <= 1,
+            "the editor is showing paragraph \(shown.map(String.init) ?? "nothing") "
+                + "where the preview is showing \(expected)")
+    }
+
+    // And typing above the reader's place must not drag the pane back. A patch
+    // that moves the blocks above the viewport makes the page scroll itself to
+    // hold that place; the reader has not gone anywhere, and an editor they
+    // have scrolled elsewhere — to their caret, here — must stay where it is.
+    // The page suppresses the source position on exactly that report; see
+    // `reportScroll`'s `held`.
+    _ = try? await view.call("return window.mark.scrollTo(y);", arguments: ["y": 9_000.0])
+    _ = await waitUntilTrue(seconds: 3) { pane.scrollOffset > 1_000 }
+    let awayFromTheCaret = pane.scrollOffset
+    pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
+    pane.textView.insertText(
+        "# Inserted above everything\n\nAnd a paragraph under it.\n\n",
+        replacementRange: NSRange(location: 0, length: 0))
+    let atTheCaret = pane.scrollOffset
+    _ = await waitUntilTrue(seconds: 5) { tab.documentView?.renderedSource == tab.buffer?.text }
+    await harness.settle(milliseconds: 600)
+    line(
+        "typing above the viewport",
+        "editor was at \(Int(awayFromTheCaret)) pt, went to the caret at "
+            + "\(Int(atTheCaret)) pt, ended at \(Int(pane.scrollOffset)) pt")
+    require(
+        abs(pane.scrollOffset - atTheCaret) <= 24,
+        "the editor stayed with the caret while typing above the preview's viewport")
+
+    row("follow latency", followLatency, unit: "ms")
+    line("worst paragraph drift", "\(worstDrift)")
+    // The page throttles its scroll reports to 120 ms, so this is what the
+    // reader's trackpad is waiting for and the number to watch if the follow
+    // ever starts to feel behind.
+    require(
+        followLatency.median <= 400,
+        "the editor follows within 400 ms (the page reports every 120 ms)")
+
+    // Closed rather than left open: this gate typed into the document, and
+    // closing is what writes the buffer and hands the web view back before the
+    // snapshot below opens its own.
+    harness.controller.tabs.close(tab)
+    print("")
+}
+
 // MARK: - Entry point
 
 @MainActor
@@ -513,6 +657,8 @@ func runEditorGates(corpus: URL) async {
     await harness.settle(milliseconds: 300)
 
     await measureContinuousTyping(harness, corpus: source)
+
+    await measureEditorFollowingThePreview(harness)
 
     // A small document for the picture: a megabyte of generated corpus makes an
     // unreadable screenshot, and what the snapshot is evidence *of* is the

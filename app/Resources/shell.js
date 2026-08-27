@@ -644,6 +644,66 @@
     });
   };
 
+  /*
+   * Where the top of the viewport is in the *source*, as a UTF-8 byte offset,
+   * or `null` if this document cannot say.
+   *
+   * The editor pane follows the preview by this number and by nothing else.
+   * Pixels do not survive the trip: a 40-line table and a one-line image are
+   * the same height on screen and nothing alike in the source, so any mapping
+   * built on scroll fractions drifts the moment a document stops being uniform
+   * prose. Every block already carries the byte span the core rendered it from
+   * (`data-mk-start` / `data-mk-end`), so the mapping is in the DOM already and
+   * this only has to read it.
+   *
+   * Binary search rather than the linear walk `captureAnchor` does. Blocks are
+   * laid out in document order, so their tops ascend, and a 1 MB document costs
+   * ~12 rect reads instead of thousands — this runs on every scroll report,
+   * where `captureAnchor` runs once per patch.
+   *
+   * The block *containing* the viewport top, not the first one below it, and
+   * interpolated through its byte span by how far into it the viewport has
+   * travelled: without that, a long code fence would hold the editor still for
+   * a screenful and then jump it.
+   */
+  function sourceTop() {
+    var blocks = container.children;
+    var count = blocks.length;
+    if (!count) return null;
+    var low = 0;
+    var high = count - 1;
+    /* 0 when every block is still below the viewport top, which is the top of
+     * the document — where the reader is before the first scroll. */
+    var found = 0;
+    while (low <= high) {
+      var mid = (low + high) >> 1;
+      if (blocks[mid].getBoundingClientRect().top <= 0) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    var block = blocks[found];
+    /* An error page (`mk-error`) is a child of the container and carries no
+     * span. Reporting nothing is right: `Number(null)` is 0, and syncing the
+     * editor to the top of the document would be worse than not syncing it. */
+    if (!block.hasAttribute("data-mk-start")) return null;
+    var start = Number(block.getAttribute("data-mk-start"));
+    var end = Number(block.getAttribute("data-mk-end"));
+    if (!isFinite(start) || start < 0) return null;
+    if (!isFinite(end) || end < start) end = start;
+    var rect = block.getBoundingClientRect();
+    var into = rect.height > 0 ? -rect.top / rect.height : 0;
+    if (!(into > 0)) into = 0;
+    if (into > 1) into = 1;
+    return Math.round(start + (end - start) * into);
+  }
+
+  /* Exposed for the bench gate, which asserts on the mapping itself and not
+   * only on where the editor ended up. */
+  mark.sourceTop = sourceTop;
+
   mark.scrollPosition = function () {
     /* NOT document.body.scrollTop: that returns 0 in WKWebView. */
     return {
@@ -909,15 +969,21 @@
     return null;
   }
 
+  /* Set when the page moved itself to keep the reader still, and read by the
+   * next scroll report. See `reportScroll`. */
+  var heldPlace = false;
+
   function restoreAnchor(anchor) {
     if (!anchor) return false;
     var el = blockElement(anchor.blk);
     if (!el) {
+      heldPlace = true;
       window.scrollTo(0, anchor.scroll);
       return false;
     }
     var delta = el.getBoundingClientRect().top - anchor.offset;
     if (delta !== 0) {
+      heldPlace = true;
       window.scrollBy(0, delta);
     }
     return true;
@@ -1135,12 +1201,15 @@
   );
 
   /*
-   * Scroll reporting, for ADR-4's session file and for dehydration.
+   * Scroll reporting, for ADR-4's session file, for dehydration, and for the
+   * editor pane, which follows the `src` this carries.
    *
-   * Pushed rather than pulled. Both consumers need the offset at a moment when
+   * Pushed rather than pulled. The first two need the offset at a moment when
    * an async round trip to the page is not available — the web view is being
    * torn down, or `applicationWillTerminate` is running — so Swift keeps the
-   * last reported value and reads it synchronously.
+   * last reported value and reads it synchronously. The third needs it to
+   * arrive without one: a query per scroll would be a round trip between the
+   * reader's trackpad and the pane trying to keep up with it.
    *
    * Throttled to one message per 120 ms and only on a change worth recording,
    * because a fling scroll on a 1 MB document fires this hundreds of times and
@@ -1151,11 +1220,34 @@
 
   function reportScroll() {
     scrollTimer = null;
+    /* Read and cleared here rather than where it is set, so that a correction
+     * whose delta was too small to report does not leave the flag standing for
+     * a later scroll that the reader really did make. */
+    var held = heldPlace;
+    heldPlace = false;
     /* NOT document.body.scrollTop: that returns 0 in WKWebView. */
     var y = window.pageYOffset;
     if (Math.abs(y - lastReportedScroll) < 2) return;
     lastReportedScroll = y;
-    post({ kind: "scroll", y: y });
+    /* The source position rides along on the message that already exists
+     * rather than being asked for over a second round trip: the editor pane
+     * follows it, and a query per scroll would put a `callAsyncJavaScript` hop
+     * between the reader's trackpad and the pane that is meant to keep up with
+     * it. Absent on a document that cannot be mapped; never zero as a stand-in
+     * for absent.
+     *
+     * Absent, too, on a re-render that held the reader's place: that moved
+     * `pageYOffset` without the reader going anywhere — the same block is under
+     * the same pixel. The offset still has to be reported, because dehydration
+     * and the session file are about pixels, but the source position must not
+     * be, or typing above the viewport would drag an editor the reader had
+     * scrolled somewhere else back to whatever line the preview is showing. */
+    var source = held ? null : sourceTop();
+    if (source === null) {
+      post({ kind: "scroll", y: y });
+    } else {
+      post({ kind: "scroll", y: y, src: source });
+    }
   }
 
   window.addEventListener(

@@ -1160,6 +1160,21 @@ extension MainWindowController: TabHydrator {
             tab.scrollOffset = y
             self.saveSessionSoon()
         }
+        // The editor follows the preview: scrolling the rendered document
+        // scrolls the source beside it to the same place.
+        //
+        // The guard is the binding itself rather than a flag kept in step with
+        // it. A window has one editor pane and can have two documents on
+        // screen; a hidden pane still holds the buffer it was showing; a view
+        // can arrive here from another window. Asking "is this the document the
+        // pane is showing?" answers all three, and no tab switch, split, or
+        // pop-out can leave that answer stale.
+        view.onSourceTop = { [weak self, weak tab] byte in
+            guard let self, let tab, self.isEditorVisible,
+                let buffer = tab.buffer, self.editor.buffer === buffer
+            else { return }
+            self.editor.follow(previewByte: byte)
+        }
         // Clicking into a document is how a reader says which pane they mean.
         // A `WKWebView` swallows the click, so the signal comes from the view
         // taking first-responder rather than from a mouse event we never see.

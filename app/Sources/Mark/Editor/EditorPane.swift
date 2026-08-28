@@ -508,21 +508,56 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     /// The character range on screen, plus a margin so a small scroll does not
     /// reveal unpainted text before the next pass.
-    private func visibleCharacterRange(padding: CGFloat, length: Int) -> NSRange {
+    ///
+    /// **Both probes are clamped into the text that has been laid out**, and
+    /// that clamp is load-bearing rather than defensive.
+    /// `textLayoutFragment(for:)` answers `nil` for a point below the last line
+    /// rather than answering "the end", and `padding` puts the lower probe
+    /// 2,000 points below the viewport — so reading the last two screenfuls of
+    /// *any* document missed, took the "cannot tell what is visible" branch,
+    /// and attributed the first 20,000 characters instead.
+    ///
+    /// That is an attribute edit across most of the document, and an attribute
+    /// edit invalidates layout. Measured on a 34 KB file with the editor
+    /// following the preview to the end: `usageBoundsForTextContainer` fell
+    /// from 19,669 points to 8,256 in the same pass. The text view sizes itself
+    /// from those bounds, so it shrank to match — and the reader's document
+    /// ended in the middle of itself, with blank space below the last line and
+    /// no way to scroll to the rest. Clamping the probes is what keeps this
+    /// pass reading the layout rather than destroying it.
+    ///
+    /// Not `private`: `EditorRoundTripTests` reads it directly, because the
+    /// consequence — a shrinking text view — only appears once AppKit runs a
+    /// viewport layout pass, and a test window is never on screen.
+    func visibleCharacterRange(padding: CGFloat, length: Int) -> NSRange {
         guard let layoutManager = textView.textLayoutManager,
             let contentManager = layoutManager.textContentManager
         else {
             return NSRange(location: 0, length: min(length, 20_000))
         }
+        // Nothing laid out yet — the first pass after a bind. A bounded prefix
+        // is the right guess at what a fresh viewport shows, and there is no
+        // layout for a wide attribute edit to throw away.
+        let laidOut = layoutManager.usageBoundsForTextContainer.maxY
+        guard laidOut > 0 else {
+            return NSRange(location: 0, length: min(length, 20_000))
+        }
         var rect = scrollView.documentVisibleRect.insetBy(dx: 0, dy: -padding)
         rect.origin.y = max(0, rect.origin.y)
+        let lastLine = laidOut - 1
+        let topProbe = min(max(0, rect.minY), lastLine)
+        let bottomProbe = min(max(topProbe, rect.maxY), lastLine)
         guard
-            let start = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: rect.minY))?
+            let start = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: topProbe))?
                 .rangeInElement.location,
-            let end = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: rect.maxY))?
+            let end = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: bottomProbe))?
                 .rangeInElement.endLocation
         else {
-            return NSRange(location: 0, length: min(length, 20_000))
+            // Both probes are inside laid-out text, so this is not the
+            // "scrolled past the end" case any more and there is nothing left
+            // to guess at. Painting nothing costs one unhighlighted frame; the
+            // 20,000-character guess costs the document's layout.
+            return NSRange(location: 0, length: 0)
         }
         let location = contentManager.offset(from: contentManager.documentRange.location, to: start)
         let endOffset = contentManager.offset(from: contentManager.documentRange.location, to: end)

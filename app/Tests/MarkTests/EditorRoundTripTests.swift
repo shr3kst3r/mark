@@ -70,6 +70,22 @@ final class EditorHarness {
             fixture.directory.appendingPathComponent(name), withItemAt: temp)
     }
 
+    /// Wait for something the editor does off the main actor — the background
+    /// parse behind its highlighting is the one this file needs.
+    func waitUntil(
+        _ what: String,
+        timeout: Duration = .seconds(5),
+        _ condition: @escaping @MainActor () -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            try? await _Concurrency.Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("timed out waiting for \(what)")
+        return false
+    }
+
     func contents(of name: String = "doc.md") throws -> String {
         try String(contentsOf: fixture.directory.appendingPathComponent(name), encoding: .utf8)
     }
@@ -487,5 +503,61 @@ struct EditorRoundTripTests {
 
         harness.reportScroll(4_000, source: target, on: second)
         #expect(pane.scrollOffset > 0)
+    }
+
+    /// `2026-08-28`: the editor pane ended in the middle of the document.
+    ///
+    /// Scroll the preview far enough into a file and the source beside it
+    /// stopped, mid-paragraph, with blank space below the last line and no way
+    /// to reach the rest. Reported against a daily note that is one long fenced
+    /// block, and reproducible on any document taller than the pane.
+    ///
+    /// The fault was in ``EditorPane/visibleCharacterRange(padding:length:)``,
+    /// not in the following. Its lower probe sits 2,000 points below the
+    /// viewport; `textLayoutFragment(for:)` answers `nil` for a point below the
+    /// last line rather than answering "the end"; so reading the last two
+    /// screenfuls of *any* document missed and took the "cannot tell what is
+    /// visible" branch, which attributed the first 20,000 characters. That is
+    /// an attribute edit across most of the document, an attribute edit
+    /// invalidates layout, and the text view sizes itself from that layout —
+    /// so it shrank under the reader. Measured in the app on a 34 KB file:
+    /// `usageBoundsForTextContainer` fell from 19,669 points to 8,256.
+    ///
+    /// The assertion is on the range rather than on the shrinking, and that is
+    /// a limitation of the harness rather than a choice: the text view only
+    /// resizes once AppKit runs a viewport layout pass, and a test window is
+    /// never on screen. What is asserted is the property that failed — a pass
+    /// meant to paint one screenful must not decide to paint the document.
+    @Test("reading the end of a document does not make the editor guess at all of it")
+    func theHighlightedRangeStaysBoundedAtTheEnd() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        let parsed = await harness.waitUntil("the editor to parse its buffer") {
+            pane.highlightPasses > 0
+        }
+        #expect(parsed)
+
+        // Lay the document out, so the probes have real geometry to miss.
+        let layoutManager = try #require(pane.textView.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+        layoutManager.ensureLayout(for: contentManager.documentRange)
+
+        // The reader scrolls the preview to the last paragraph; the editor
+        // follows, which puts the viewport — and the 2,000 points of padding
+        // below it — past the end of the text.
+        let target = (source as NSString).range(of: "Paragraph 399 of the document.").location
+        harness.reportScroll(40_000, source: target, on: tab)
+
+        let length = (pane.textView.string as NSString).length
+        let visible = pane.visibleCharacterRange(padding: 2_000, length: length)
+        #expect(
+            visible.length < length,
+            "the pass would attribute the whole document (\(visible.length) of \(length))")
+        #expect(
+            visible.location > 0,
+            "the pass would start at the top of a document the reader is at the bottom of")
     }
 }

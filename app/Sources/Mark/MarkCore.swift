@@ -72,7 +72,7 @@ public enum MarkCore {
             withOptionalCString(theme) { themePointer in
                 old.withCString { oldPointer in
                     new.withCString { newPointer in
-                        mark_diff_json(oldPointer, newPointer, themePointer)
+                        mark_diff_json(oldPointer, newPointer, themePointer, 0)
                     }
                 }
             }
@@ -168,6 +168,88 @@ public enum MarkCore {
             }
         }
         return try decode([TreeEntry].self, from: json, function: "mark_tree_json")
+    }
+
+    // MARK: - Git
+
+    /// What git says about `path` — the whole repository's changed set.
+    ///
+    /// `path` may be a file or a directory; either way the answer covers the
+    /// repository, because `2026-08-28-git-differences-by-running-git` measured
+    /// that to be the unit: one ~12 ms call answers every row, where one call
+    /// per row would be 6 ms of process startup each.
+    ///
+    /// Returns a report whose ``GitReport/repo`` is `nil` for a path outside any
+    /// repository **and** for a machine with no usable git. That is not an
+    /// error, and the two are deliberately indistinguishable: the row draws
+    /// unbadged either way.
+    ///
+    /// - Important: never call this on the main thread. It forks `git`.
+    public static func git(status path: String, includeUntracked: Bool = true) throws -> GitReport {
+        let flags = includeUntracked ? 0 : MARK_GIT_NO_UNTRACKED
+        let json = try string(function: "mark_git_json") {
+            path.withCString { mark_git_json($0, flags) }
+        }
+        return try decode(GitReport.self, from: json, function: "mark_git_json")
+    }
+
+    /// `HEAD`'s bytes for one file, or `nil` when `HEAD` does not have it.
+    ///
+    /// `nil` covers a new note, a binary blob, and a non-UTF-8 one — all of
+    /// which mean "there is nothing here we can diff", which is what the caller
+    /// does with the answer.
+    ///
+    /// - Important: never call this on the main thread, and cache the result
+    ///   against the repository's `HEAD` oid. The read costs ~7 ms and cannot
+    ///   change while the oid does not.
+    public static func git(base path: String) throws -> GitBase {
+        let json = try string(function: "mark_git_json") {
+            path.withCString { mark_git_json($0, MARK_GIT_BASE) }
+        }
+        return try decode(GitBase.self, from: json, function: "mark_git_json")
+    }
+
+    /// Just the line diff, for a caller that wants counts and hunks and not
+    /// HTML.
+    ///
+    /// The gutter and the dirty-buffer badge both want this and neither wants
+    /// the merged document, which costs a second render of every changed block.
+    public static func lineDiff(old: String, new: String) throws -> LineDiff {
+        let json = try string(function: "mark_diff_json") {
+            old.withCString { oldPointer in
+                new.withCString { newPointer in
+                    mark_diff_json(oldPointer, newPointer, nil, MARK_DIFF_LINES)
+                }
+            }
+        }
+        struct Envelope: Decodable { let lines: LineDiff }
+        return try decode(Envelope.self, from: json, function: "mark_diff_json").lines
+    }
+
+    /// A document's differences against another version of itself, at both
+    /// granularities plus the merged diff document.
+    ///
+    /// One call, one parse of each side. The block diff drives the rendered
+    /// view, the line diff drives the editor's change gutter, and neither is
+    /// derivable from the other — a block spans many lines, so it cannot place
+    /// a bar against line 41.
+    public static func diffDetail(
+        old: String,
+        new: String,
+        theme: String? = nil
+    ) throws -> DiffDetail {
+        let json = try string(function: "mark_diff_json") {
+            withOptionalCString(theme) { themePointer in
+                old.withCString { oldPointer in
+                    new.withCString { newPointer in
+                        mark_diff_json(
+                            oldPointer, newPointer, themePointer,
+                            MARK_DIFF_LINES | MARK_DIFF_DOCUMENT)
+                    }
+                }
+            }
+        }
+        return try decode(DiffDetail.self, from: json, function: "mark_diff_json")
     }
 
     // MARK: - Themes
@@ -382,6 +464,151 @@ public struct CoreError: Error, CustomStringConvertible, Equatable, Sendable {
 ///
 /// `kept + deleted + replaced == oldBlocks` and
 /// `kept + inserted + replaced == newBlocks` always hold; the core asserts it.
+/// How a path differs from `HEAD` — `core::git::Status`.
+public enum GitStatus: String, Decodable, Equatable, Sendable {
+    case modified, added, deleted, renamed, copied
+    case typechange, unmerged, untracked
+
+    /// Whether a diff of this path's content is meaningful. False for a file
+    /// that is not there to diff, and for an unresolved merge.
+    public var hasContent: Bool { self != .deleted && self != .unmerged }
+
+    /// What the row says when there are no numbers to show.
+    public var label: String {
+        switch self {
+        case .modified: return "modified"
+        case .added: return "added"
+        case .deleted: return "deleted"
+        case .renamed: return "renamed"
+        case .copied: return "copied"
+        case .typechange: return "type changed"
+        case .unmerged: return "unmerged"
+        case .untracked: return "new"
+        }
+    }
+}
+
+/// One path that differs from `HEAD` — `core::git::Change`.
+public struct GitChange: Decodable, Equatable, Sendable {
+    /// **Repository-relative**, as git reports it. Join it onto
+    /// ``GitRepo/root`` to get something openable.
+    public let path: String
+    public let status: GitStatus
+    public let from: String?
+
+    /// `nil` means **not countable**, never zero. `git diff --numstat` prints
+    /// `-` `-` for a binary file, and an untracked file's additions are
+    /// deliberately left for the caller to count on its own queue. A `+0 −0`
+    /// badge on a changed binary would be a lie about a file that did change.
+    public let added: Int?
+    public let removed: Int?
+
+    public init(path: String, status: GitStatus, from: String? = nil, added: Int?, removed: Int?) {
+        self.path = path
+        self.status = status
+        self.from = from
+        self.added = added
+        self.removed = removed
+    }
+}
+
+/// A repository and the paths a caller needs from it — `core::git::Repo`.
+public struct GitRepo: Decodable, Equatable, Sendable {
+    public let root: String
+    public let gitDir: String
+    /// The two files ``2026-08-28-git-badges-ride-the-sidebar-poll``'s gate
+    /// `stat`s. Resolved by the core through `rev-parse --git-path`, because a
+    /// linked worktree, a shared index, and `$GIT_INDEX_FILE` each put them
+    /// somewhere that is *not* `gitDir` plus a name.
+    public let indexPath: String
+    public let headPath: String
+    /// Short oid, or `nil` in a repository with no commits.
+    public let head: String?
+    /// Branch name, `"HEAD"` when detached.
+    public let branch: String?
+}
+
+/// What git says about a path — `core::git::Report`.
+public struct GitReport: Decodable, Equatable, Sendable {
+    /// `nil` for a path outside any repository **and** for a machine with no
+    /// usable git. Not an error, and the two are indistinguishable on purpose:
+    /// the row draws unbadged either way.
+    public let repo: GitRepo?
+    public let changes: [GitChange]
+
+    public init(repo: GitRepo?, changes: [GitChange]) {
+        self.repo = repo
+        self.changes = changes
+    }
+
+    /// Whether git had anything to say about this path at all.
+    public var isRepository: Bool { repo != nil }
+}
+
+/// `HEAD`'s bytes for one file.
+public struct GitBase: Decodable, Equatable, Sendable {
+    public let repo: String?
+    public let head: String?
+    public let branch: String?
+    /// False for a file `HEAD` does not have, and for a blob that is binary or
+    /// not UTF-8 — all of which mean "nothing here we can diff".
+    public let tracked: Bool
+    public let base: String?
+}
+
+/// What happened to a run of lines — `core::lines::HunkKind`.
+public enum LineHunkKind: String, Decodable, Equatable, Sendable {
+    case added, removed, changed
+}
+
+/// Zero-based, half-open line range — `core::lines::Hunk`.
+///
+/// **Zero-based**, like every other offset the core reports. A gutter printing
+/// "42" adds one at the point of display, which is the only place that
+/// conversion belongs.
+public struct LineHunk: Decodable, Equatable, Sendable {
+    public struct Span: Decodable, Equatable, Sendable {
+        public let start: Int
+        public let end: Int
+        public var isEmpty: Bool { end <= start }
+        public var count: Int { max(0, end - start) }
+    }
+
+    public let old: Span
+    public let new: Span
+    /// UTF-8 byte range of `new` in the new document. The editor converts it
+    /// once through ``SourceOffsets/utf16(of:in:)`` rather than counting
+    /// newlines again in Swift.
+    public let newBytes: Span
+    public let kind: LineHunkKind
+}
+
+/// A line diff — `core::lines::LineDiff`.
+public struct LineDiff: Decodable, Equatable, Sendable {
+    public let hunks: [LineHunk]
+    public let added: Int
+    public let removed: Int
+    /// The changed region was past the core's table budget, so `hunks` is one
+    /// span covering everything that is not common prefix or suffix. The counts
+    /// are still exact.
+    public let coarse: Bool
+}
+
+/// Both diff granularities plus the merged diff document, from one call.
+public struct DiffDetail: Decodable, Equatable, Sendable {
+    /// The **line** diff, for the editor's change gutter.
+    public let lines: LineDiff
+    /// The merged diff document's block HTML, for the preview.
+    public let document: String
+    public let diffAdded: Int
+    public let diffRemoved: Int
+    public let diffChanged: Int
+
+    /// Nothing to show: the caller leaves the ordinary render up rather than
+    /// swapping to a diff view that says nothing.
+    public var isEmpty: Bool { diffAdded == 0 && diffRemoved == 0 && diffChanged == 0 }
+}
+
 public struct EditScript: Sendable, Equatable {
 
     /// The whole script, exactly as the core emitted it. Handed to `shell.js`

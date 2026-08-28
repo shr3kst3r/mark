@@ -582,3 +582,51 @@ math[display="block"] {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/*
+ * The diff view (2026-08-28-git-differences-by-running-git).
+ *
+ * These rules are the same rules `core/src/render.rs`'s `document_css()`
+ * emits, for the same reason the task-list rules above are: the two
+ * stylesheets are deliberately not generated from one source, but a diff that
+ * looks different in the window than in `mark diff --html` output is exactly
+ * the GUI/CLI split the product exists to avoid.
+ * `ShellAssetsTests.diffRulesMatchTheCore` pins them together.
+ *
+ * No new custom property: additions take `--mk-success`, removals
+ * `--mk-error`, replacements `--mk-warning`, so a theme change stays a CSS
+ * swap and `codeStamp` is untouched.
+ *
+ * The last rule is not cosmetic. A block taken from the old document carries
+ * byte offsets into a version of the file that is not on disk, so a checkbox
+ * inside one must not be clickable — `shell.js`'s `isOldSide` is what actually
+ * refuses the click; this is what makes the refusal visible rather than
+ * mysterious.
+ */
+.mk-blk.mk-diff-add, .mk-blk.mk-diff-mod, .mk-blk.mk-diff-del {
+  position: relative; padding-left: 0.9rem; border-radius: 3px; }
+.mk-blk.mk-diff-add::before, .mk-blk.mk-diff-mod::before, .mk-blk.mk-diff-del::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  border-radius: 2px; }
+.mk-blk.mk-diff-add {
+  background: color-mix(in srgb, var(--mk-success) 10%, transparent); }
+.mk-blk.mk-diff-add::before { background: var(--mk-success); }
+.mk-blk.mk-diff-mod {
+  background: color-mix(in srgb, var(--mk-success) 10%, transparent); }
+.mk-blk.mk-diff-mod::before { background: var(--mk-warning); }
+.mk-blk.mk-diff-del {
+  background: color-mix(in srgb, var(--mk-error) 10%, transparent);
+  color: var(--mk-subtle); }
+.mk-blk.mk-diff-del::before { background: var(--mk-error); }
+/* Deleted content reads as deleted, not merely tinted -- a reader scanning a
+   diff should not have to consult the colour to know which half is gone.
+   Applied to the block's text rather than to the block, so a struck heading
+   does not strike its own rule. */
+.mk-blk.mk-diff-del > * { text-decoration: line-through; }
+/* Except code and diagrams, where a line through every glyph is unreadable.
+   They carry the tint and the bar and nothing else. */
+.mk-blk.mk-diff-del > pre, .mk-blk.mk-diff-del > .mk-diagram { text-decoration: none; }
+/* A removed block is inert: its byte offsets point into a version of the file
+   that is not on disk. The shell refuses the click; this makes the refusal
+   visible rather than mysterious. */
+.mk-blk[data-mk-side='old'] input.mk-task { pointer-events: none; opacity: 0.5; }

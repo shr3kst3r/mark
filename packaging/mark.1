@@ -28,7 +28,7 @@ Commands split into two kinds, and the distinction is the one that matters when
 scripting:
 .TP
 .B local
-.BR render ,\  toc ,\  tasks ,\  check ,\  normalize ,\  ls ,\  grep ,\  stats ,
+.BR render ,\  diff ,\  toc ,\  tasks ,\  check ,\  normalize ,\  ls ,\  grep ,\  stats ,
 .BR doctor ,
 and
 .B theme
@@ -67,6 +67,49 @@ terminal and plain when it is a pipe.
 emits only the first
 .I N
 top-level blocks, which is the first-paint tunable the app itself uses.
+.TP
+.BI "diff " [path] " [--html|--ansi|--plain] [--json] [--stat] [--tracked] [--theme " name ]
+What changed against git
+.BR HEAD .
+A
+.B file
+shows its own changed lines; a
+.B directory
+\(em or nothing at all \(em shows one row per changed file in the repository,
+which is the same pair of meanings
+.B open
+and
+.B ls
+already give a path.
+.IP
+.B --html
+is the
+.I rendered
+diff: a complete self-contained document in which removed blocks are shown in
+place, struck through and tinted, and added blocks tinted \(em markdown as
+markdown rather than as patch text. It needs a single file, because a directory
+has no one document to render.
+.B --stat
+gives the counts and no hunks.
+.B --tracked
+leaves untracked files out; by default they are included with every line counted
+as added, because a note you just wrote is the most interesting row in a notes
+tree.
+.IP
+Untracked files and binaries are reported honestly rather than numerically: a
+binary file that changed reads
+.B binary
+rather than
+.BR "+0 \(mi0" ,
+which would be a lie about a file that did change.
+.IP
+A path that is not in a git repository exits
+.B 0
+and says so on stderr. That is not a failure \(em a script asking "what changed?"
+of a plain directory deserves an empty answer rather than a non-zero exit. A
+machine with no
+.B git
+at all, or with no Command Line Tools, behaves identically.
 .TP
 .BI "toc " file " [--json]"
 The heading tree: level, text, anchor, byte offsets, line, and block id.
@@ -214,7 +257,7 @@ the reverse later cannot change what a bare
 does. Running it twice is a no-op: an already-struck item is not struck again,
 and a tag it would have added is not added twice.
 .TP
-.BI "ls " [dir] " [--json] [--depth " N "] [--all]"
+.BI "ls " [dir] " [--json] [--depth " N "] [--all] [--git]"
 Markdown files with titles and outstanding/active task counts \(em where
 .I active
 excludes cancelled items, so a list you abandoned two of seven items in reads
@@ -225,6 +268,16 @@ every state is counted separately. Honours
 .IR .gitignore .
 .B --all
 includes non-markdown files.
+.B --git
+adds each file's changed lines against git
+.BR HEAD ,
+as
+.BR "+12 \(mi3" ,
+in the same order the app's sidebar draws them \(em changes first, then the task
+count. One
+.B git
+query for the listing's repository, not one per file. A directory that is not in
+a repository simply gains no column.
 .TP
 .BI "grep " pattern " " [path] " [--json] [-i|--ignore-case] [--depth " N ]
 Regular-expression search reporting the heading each match sits under.
@@ -239,7 +292,14 @@ length against the 104-byte limit, whether the app is running, the
 .I .app
 resolved from
 .IR $0 ,
-core version, theme directory, and syntect asset load time.
+core version, theme directory, syntect asset load time, and the
+.B git
+this build would run.
+.IP
+That last line is the first thing to check when change badges are missing: a git
+failure is deliberately invisible in the interface, so this is where it is
+visible instead. "not found" with no Command Line Tools means
+.BR "xcode-select --install" .
 .IP
 It also reports which build this is \(em the commit and commit date under
 .BR "built from" ,

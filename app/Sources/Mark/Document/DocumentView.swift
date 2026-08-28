@@ -103,6 +103,19 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
 
     private var source: String?
     private var isShellReady = false
+
+    /// Whether the page is currently showing the diff against `HEAD` rather
+    /// than the document.
+    ///
+    /// The diff view is a **mode of the tab**, not a separate tab: ⌘⇧D is a way
+    /// of looking at the document you already have open, and opening a second
+    /// tab for it would cost a web view (ADR-4 budgets those at ~52 MB) to say
+    /// something about the first one.
+    public private(set) var isShowingDiff = false
+
+    /// Fired when the mode changes, so the window can retick the menu item and
+    /// the tab can remember.
+    public var onDiffModeChanged: ((Bool) -> Void)?
     private var pendingOpen: URL?
 
     /// The bytes a deferred open should use instead of the file's — see
@@ -278,6 +291,16 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     @discardableResult
     public func apply(source newSource: String) async -> PatchReport? {
         guard let url else { return nil }
+        // In the diff view the page is not this document: it is blocks from two
+        // parses interleaved. An edit script between the file's old and new
+        // sequences does not describe that DOM, and applying one would corrupt
+        // it in exactly the quiet way ADR-2 warns about. So a change to the file
+        // recomputes the *diff* instead of patching.
+        if isShowingDiff {
+            source = newSource
+            _ = await showDiff()
+            return nil
+        }
         // M9 drives this at typing cadence, where a second edit routinely
         // arrives while the first patch is still in the page. Only the newest
         // source matters — every one of them is a whole document — so the
@@ -714,6 +737,111 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             await self.restorePendingScroll(generation: generation)
             self.startBackgroundFill(source: source, prefix: prefix, generation: generation)
         }
+    }
+
+    // MARK: - The diff against HEAD
+
+    /// Why the diff view is unavailable for this document.
+    public enum DiffUnavailable: Error, CustomStringConvertible {
+        case notInRepository
+        case nothingChanged
+        case notDiffable
+
+        public var description: String {
+            switch self {
+            case .notInRepository: return "not in a git repository"
+            case .nothingChanged: return "no changes against HEAD"
+            case .notDiffable: return "nothing here that can be diffed"
+            }
+        }
+    }
+
+    /// Swap the page for the rendered diff against `HEAD`, or back again.
+    ///
+    /// `2026-08-28-git-differences-by-running-git`: the differences are shown as
+    /// *rendered markdown*, so what lands in the page is a document — blocks in
+    /// order, removed ones struck through in place — rather than patch text.
+    ///
+    /// Returns the reason when it could not, so the caller can disable a menu
+    /// item rather than put up an alert. A reader who pressed ⌘⇧D on a note that
+    /// is not in a repository does not need a dialog.
+    @discardableResult
+    public func toggleDiff() async -> DiffUnavailable? {
+        if isShowingDiff {
+            await hideDiff()
+            return nil
+        }
+        return await showDiff()
+    }
+
+    /// Leave the diff view and put the document back.
+    public func hideDiff() async {
+        guard isShowingDiff, let url else { return }
+        isShowingDiff = false
+        onDiffModeChanged?(false)
+        // Re-present rather than patch: the diff document and the real one do
+        // not share a block sequence — the diff carries blocks from two parses —
+        // so an edit script between them would be meaningless.
+        if let source { present(url, source: source) } else { present(url) }
+        // Awaited, so `hideDiff()` returning means the document is actually
+        // back. `present` is fire-and-forget for the open path, where the caller
+        // wants the frame; here the caller is a toggle, and a toggle that
+        // returns before it has finished toggling is a race every caller would
+        // have to know about.
+        await presentTask?.value
+    }
+
+    /// Show the diff against `HEAD`.
+    private func showDiff() async -> DiffUnavailable? {
+        guard let url else { return .notInRepository }
+        // The buffer when a tab is holding one, so ⌘⇧D on a document being
+        // edited shows what the reader is looking at rather than what is saved.
+        let working = source ?? (try? DocumentSource.read(url))
+        guard let working else { return .notDiffable }
+
+        let path = url.path
+        let theme = ThemeController.shared.name
+        let detail: DiffDetail
+        do {
+            // Both hops off the main thread: `git(base:)` forks a process, and
+            // the diff renders every changed block.
+            detail = try await _Concurrency.Task.detached(priority: .userInitiated) {
+                let base = try MarkCore.git(base: path)
+                guard base.repo != nil else { throw DiffUnavailable.notInRepository }
+                return try MarkCore.diffDetail(
+                    old: base.base ?? "", new: working, theme: theme)
+            }.value
+        } catch let reason as DiffUnavailable {
+            return reason
+        } catch {
+            Log.git.debug("diff view unavailable: \(String(describing: error))")
+            return .notDiffable
+        }
+
+        guard !detail.isEmpty else { return .nothingChanged }
+
+        isShowingDiff = true
+        onDiffModeChanged?(true)
+        generation += 1
+        fillTask?.cancel()
+        do {
+            // One injection, not a prefix plus a pump: the diff document is
+            // bounded by what actually changed rather than by the document's
+            // size, and ⌘⇧D is a deliberate gesture rather than an open.
+            let injected = try await call(
+                "return window.mark.setDocument(html, meta);",
+                arguments: ["html": detail.document, "meta": ["path": url.path]])
+            absorb(paintReport: injected)
+        } catch {
+            Log.render.error("injecting the diff failed: \(String(describing: error))")
+            isShowingDiff = false
+            onDiffModeChanged?(false)
+            return .notDiffable
+        }
+        Log.git.debug(
+            "diff view: +\(detail.diffAdded) −\(detail.diffRemoved) ~\(detail.diffChanged) blocks"
+        )
+        return nil
     }
 
     /// Put the reader back where ADR-4's tab layer says they were.

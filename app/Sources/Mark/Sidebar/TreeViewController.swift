@@ -94,6 +94,16 @@ public final class TreeViewController: NSViewController {
     /// Per-file task badges, lazily and in the background.
     public let badges = TaskBadgeService()
 
+    /// Per-repository git badges, refreshed on the same poll tick.
+    ///
+    /// Deliberately a *different* service from ``badges`` rather than a second
+    /// mode of it: `2026-08-28-git-badges-ride-the-sidebar-poll` inverts the
+    /// cost model — a task badge is ~0.34 ms per file and is asked for per
+    /// visible row, a git badge is ~12 ms per **repository** and one query
+    /// answers every row in it. Folding them together would mean one of the two
+    /// paying the other's cost shape.
+    public let gitBadges = GitBadgeService()
+
     /// Expansion state, tracked by us rather than read back off the outline
     /// view.
     ///
@@ -164,6 +174,11 @@ public final class TreeViewController: NSViewController {
         }
         self.badges.onBadge = { [weak self] url, _ in
             self?.badgeArrived(for: url)
+        }
+        self.gitBadges.onBadges = { [weak self] urls in
+            // A repository query answers many rows at once, so they arrive
+            // together and coalesce into one redraw rather than one apiece.
+            for url in urls { self?.badgeArrived(for: url) }
         }
     }
 
@@ -477,6 +492,10 @@ public final class TreeViewController: NSViewController {
         let previouslyExpanded = expansionSnapshot()
         dataSource.invalidate()
         badges.invalidateAll()
+        // Including the negative answers and the repositories that had gone
+        // quiet after a failure: ⌘R is the reader saying "look again", and it
+        // is the documented way back for a repository that timed out.
+        gitBadges.invalidateAll()
         expanded.removeAll()
         guard let outlineView else { return }
         outlineView.reloadData()
@@ -494,6 +513,11 @@ public final class TreeViewController: NSViewController {
     public func invalidateBadge(for url: URL) {
         badges.invalidate(url)
         badges.request(url)
+        // This is what closes the in-place-edit gap for a file the app is
+        // actually watching: writing new bytes into a tracked file moves neither
+        // `index` nor `HEAD`, so the poll's gate cannot see it, but the document
+        // watcher can.
+        gitBadges.invalidate(url)
     }
 
     // MARK: - Polling
@@ -595,6 +619,18 @@ public final class TreeViewController: NSViewController {
     @discardableResult
     public func pollForChanges() -> Bool {
         guard outlineView != nil else { return false }
+
+        // Two `stat` calls per known repository, and a `git` process only for
+        // the ones whose `index` or `HEAD` actually moved
+        // (`2026-08-28-git-badges-ride-the-sidebar-poll`). Runs on every tick
+        // regardless of whether any *listing* changed, because a commit moves
+        // no directory mtime and would otherwise leave every badge stale until
+        // an unrelated file appeared.
+        let requeried = gitBadges.poll()
+        if !requeried.isEmpty {
+            Log.git.debug("poll: re-querying \(requeried.count) repositor(ies)")
+        }
+
         let change = dataSource.reconcile()
         guard !change.isEmpty else { return false }
 
@@ -862,7 +898,11 @@ extension TreeViewController: NSOutlineViewDelegate {
         if badge == nil, node.isMarkdown {
             badges.request(node.url)
         }
-        cell.configure(with: node, badge: badge)
+        // Also a dictionary lookup, and `request(for:)` is per *directory*
+        // rather than per file: after the first row in a folder it is one more
+        // lookup, not another query.
+        gitBadges.request(for: node.url)
+        cell.configure(with: node, badge: badge, git: gitBadges.badge(for: node.url))
         return cell
     }
 
@@ -877,7 +917,21 @@ extension TreeViewController: NSOutlineViewDelegate {
         mouseLocation: NSPoint
     ) -> String {
         guard let node = item as? TreeNode else { return "" }
-        return node.listingError ?? node.url.path
+        if let error = node.listingError { return error }
+        // The path, and — when git has something to say — what it says. This is
+        // the one place the *reason* for a badge is spelled out, since the row
+        // itself only has room for the numbers.
+        var lines = [node.url.path]
+        if let git = gitBadges.badge(for: node.url) {
+            let branch = gitBadges.branch(for: node.url).map { " on \($0)" } ?? ""
+            switch (git.added, git.removed) {
+            case let (added?, removed?):
+                lines.append("\(git.status.label)\(branch): +\(added) −\(removed) since HEAD")
+            default:
+                lines.append("\(git.status.label)\(branch)")
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {

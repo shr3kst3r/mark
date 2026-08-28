@@ -117,6 +117,23 @@ opened — and it stops entirely when the window is covered or the sidebar is
 collapsed. Whatever you had expanded stays expanded and whatever was selected
 stays selected, even when the new file sorts above it.
 
+**It shows you what you have changed.** If a file is in a git repository, its
+sidebar row carries `+12 −3` next to the task badge, the editor draws a bar in
+the margin against every line that differs from `HEAD`, and ⌘⇧D turns the
+preview into a *rendered* diff — removed paragraphs struck through where they
+used to be, added ones tinted, still markdown rather than a patch. A note you
+have written but not committed counts every line as an addition; a changed
+binary says `binary` rather than claiming `+0 −0`.
+
+> The badges cost one `git` invocation per **repository**, not per file, and
+> only when that repository's own `index` or `HEAD` has moved — so a window left
+> open beside a folder nobody is committing to costs two `stat` calls every two
+> seconds. `mark` never writes to a repository: every invocation carries
+> `--no-optional-locks`, because a plain `git status` rewrites the index and a
+> viewer polling on a timer must not race your own commands. If git is missing,
+> or the Command Line Tools are not installed, the feature is simply absent —
+> no badges, no dialog, and `mark doctor` says which `git` it found.
+
 ⌘O and ⌘T are the same open panel — several files at once, starting in the
 folder you are reading, and a folder itself is a valid choice that roots the
 tree there. Both offer **every** extension mark counts as markdown — `.md`,
@@ -345,7 +362,8 @@ script or an agent is usually in:
 | `mark tasks [path] [--tag @t] [--priority N] [--due-before\|--due-after <when>] [--overdue] [--no-due] [--sort due\|priority\|state\|index] [--today YYYY-MM-DD]` | The metadata filters. `<when>` is a date, `today`, or `+Nd`. `--today` is the only place a date comparison reads a clock, and naming it makes the answer testable. |
 | `mark check <f> --item N [--on\|--off\|--toggle\|--state <s>] [--stamp] [--json]` | Flips one checkbox by changing exactly one byte. `--state` reaches the other three; `--stamp` also appends `@done(YYYY-MM-DD)`, in the same atomic write. Refuses, with exit 6, if another `mark` holds the file — see below. |
 | `mark normalize <f> [--gfm] [--in-place] [--check]` | Rewrites `[-]`, `[/]` and `[?]` as GFM, losslessly: struck-and-ticked, or `[ ]` with a `@doing`/`@blocked` tag. **Writes to stdout** unless `--in-place`. |
-| `mark ls [dir] [--json] [--depth N] [--all]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. |
+| `mark ls [dir] [--json] [--depth N] [--all] [--git]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. `--git` adds each file's `+12 −3` against `HEAD`. |
+| `mark diff [path] [--html\|--ansi\|--plain] [--json] [--stat] [--tracked]` | What changed against git `HEAD`. A **file** shows its changed lines; a **directory** shows one row per changed file. `--html` is the *rendered* diff — removed blocks struck through in place — not patch text. Exits 0 outside a repository. |
 | `mark grep <pat> [path] [--json] [-i]` | Regex search, reporting the heading each match sits under. |
 | `mark stats <f> [--json]` | Per-stage timings and counters. |
 | `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, every bundle registered as `dev.mark.app`, theme dir, asset load time. |

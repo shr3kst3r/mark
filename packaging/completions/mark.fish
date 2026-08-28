@@ -8,7 +8,7 @@
 function __mark_no_subcommand
     for token in (commandline -opc)[2..-1]
         switch $token
-            case render toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav
+            case render diff toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav
                 return 1
         end
     end
@@ -27,6 +27,7 @@ end
 
 complete -c mark -f
 complete -c mark -n __mark_no_subcommand -a render -d 'Render a document to stdout'
+complete -c mark -n __mark_no_subcommand -a diff -d 'Show what changed against git HEAD'
 complete -c mark -n __mark_no_subcommand -a toc -d 'Print the heading tree'
 complete -c mark -n __mark_no_subcommand -a tasks -d 'List every task in a file or directory'
 complete -c mark -n __mark_no_subcommand -a check -d 'Set, clear, or flip one checkbox in place'
@@ -44,7 +45,7 @@ complete -c mark -n __mark_no_subcommand -a sidebar -d 'Report the sidebar root,
 complete -c mark -n __mark_no_subcommand -a nav -d "Move the sidebar's root"
 
 # --- files and directories --------------------------------------------------
-complete -c mark -n '__fish_seen_subcommand_from render toc tasks check normalize stats open grep' -F
+complete -c mark -n '__fish_seen_subcommand_from render diff toc tasks check normalize stats open grep' -F
 complete -c mark -n '__fish_seen_subcommand_from ls nav' -a '(__fish_complete_directories)'
 
 # --- per-subcommand flags ---------------------------------------------------
@@ -53,8 +54,15 @@ complete -c mark -n '__fish_seen_subcommand_from render' -l ansi -d 'Styled term
 complete -c mark -n '__fish_seen_subcommand_from render' -l plain -d 'No escape sequences'
 complete -c mark -n '__fish_seen_subcommand_from render' -l prefix -r -d 'Only the first N top-level blocks'
 complete -c mark -n '__fish_seen_subcommand_from render' -l theme -r -a '(__mark_themes)' -d 'Theme to render with'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l html -d 'The rendered diff, as a self-contained document'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l ansi -d 'Styled terminal output'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l plain -d 'No escape sequences'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l stat -d 'Counts only, no hunks'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l tracked -d 'Leave untracked files out'
+complete -c mark -n '__fish_seen_subcommand_from diff' -l theme -r -a '(__mark_themes)' -d 'Theme for --html and --ansi'
+complete -c mark -n '__fish_seen_subcommand_from ls' -l git -d 'Add changed lines against git HEAD'
 
-complete -c mark -n '__fish_seen_subcommand_from toc tasks check ls grep stats doctor open theme goto reload sidebar nav tab' -l json -d 'Machine-readable output'
+complete -c mark -n '__fish_seen_subcommand_from toc tasks check diff ls grep stats doctor open theme goto reload sidebar nav tab' -l json -d 'Machine-readable output'
 
 # The five task states (2026-08-27-five-task-states). Hard-coded: nothing lists
 # them, and an unknown name is a usage error rather than an empty filter.

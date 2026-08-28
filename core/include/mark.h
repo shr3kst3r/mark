@@ -16,6 +16,10 @@
  * Growing this past roughly a dozen functions, or needing to pass a struct
  * across, is the signal ADR-1 names for reconsidering the design in a
  * superseding ADR.
+ *
+ * There are thirteen. 2026-08-28-git-differences-by-running-git spent the last
+ * one on mark_git_json and set the ceiling there; the next capability that
+ * wants to cross this boundary supersedes that ADR.
  */
 
 #ifndef MARK_H
@@ -93,10 +97,69 @@ char *mark_render_range(const char *source, size_t start, size_t end,
  * "coarse":true means the edit distance exceeded the search budget and the
  * differing middle was replaced wholesale: still correct, no longer minimal.
  *
+ * flags of 0 returns exactly the bytes it always did. MARK_DIFF_LINES adds
+ * "lines": the LINE-level diff, which the block diff cannot supply -- a block
+ * spans many lines, so it cannot put a bar against line 41, which is what the
+ * editor's change gutter draws. MARK_DIFF_DOCUMENT adds "document": the merged
+ * diff document's HTML, plus diffAdded / diffRemoved / diffChanged block
+ * counts.
+ *
  * Returns NULL on failure.
  */
+#define MARK_DIFF_LINES    (1 << 0)
+#define MARK_DIFF_DOCUMENT (1 << 1)
+
 char *mark_diff_json(const char *old_source, const char *new_source,
-                     const char *theme);
+                     const char *theme, int flags);
+
+/*
+ * What git says about `path`. The thirteenth and last function here.
+ *
+ * flags of 0: `path` is a file or a directory, and the answer describes its
+ * whole REPOSITORY --
+ *
+ *   {"repo":{"root":"/Users/x/notes", "gitDir":"...", "indexPath":"...",
+ *            "headPath":"...", "head":"a1b2c3d", "branch":"main"},
+ *    "changes":[{"path":"weekly.md","status":"modified","added":12,"removed":3},
+ *               {"path":"ideas.md","status":"untracked","added":null,"removed":0},
+ *               {"path":"logo.png","status":"modified","added":null,"removed":null}]}
+ *
+ * A path outside any repository answers {"repo":null,"changes":[]}, and that is
+ * a SUCCESS -- not NULL. So is a machine with no usable git. The two are
+ * indistinguishable on purpose: the reader sees an unbadged row either way.
+ *
+ * indexPath and headPath exist so the caller can stat the poll gate itself
+ * (2026-08-28-git-badges-ride-the-sidebar-poll) without spending a git process
+ * per tick. They come from `rev-parse --git-path`, NOT from gitDir joined with
+ * a name: a linked worktree, a shared index, or $GIT_INDEX_FILE each put them
+ * somewhere else.
+ *
+ * Paths in "changes" are repository-relative. Join them onto repo.root once.
+ *
+ * added/removed are null when the lines cannot be counted -- a binary file,
+ * per git's own `-` `-`. NEVER RENDER null AS 0: "+0 -0" on a changed binary
+ * is a lie about a file that did change. An untracked file carries
+ * removed:0 (it removed nothing, which is known) and added:null (its
+ * additions are the caller's to count, on its own screen-bounded queue).
+ *
+ * MARK_GIT_NO_UNTRACKED leaves untracked files out, saving the second git
+ * invocation they cost (22.5 ms, against the first one's 11.6 ms).
+ *
+ * MARK_GIT_BASE: `path` is a FILE, and the answer is its committed bytes --
+ *
+ *   {"repo":"...", "head":"a1b2c3d", "tracked":true, "base":"# Weekly...\n"}
+ *
+ * tracked:false with base:null for a file HEAD does not have (a new note --
+ * ordinary), and for a blob that is binary or not UTF-8. Cache the result
+ * against (repo, path, head): the read costs ~7 ms and cannot change while the
+ * oid does not.
+ *
+ * Returns NULL only on a genuine failure.
+ */
+#define MARK_GIT_BASE         (1 << 0)
+#define MARK_GIT_NO_UNTRACKED (1 << 1)
+
+char *mark_git_json(const char *path, int flags);
 
 /*
  * JSON array of {index, state, checked, start, end, line, text, label, tags,

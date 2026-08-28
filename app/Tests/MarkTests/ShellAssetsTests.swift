@@ -342,6 +342,53 @@ struct ShellAssetsTests {
         }
     }
 
+    /// The diff view's rules, pinned to the core's the same way the checkbox
+    /// rules are.
+    ///
+    /// The failure this catches is one the app cannot: a diff that is tinted in
+    /// `mark diff --html` and plain in the window. That is exactly what happened
+    /// the first time the diff view was run — the rules had been added to
+    /// `document_css()` and not to `shell.css`, and the page rendered the right
+    /// blocks with none of the colour.
+    @Test("the diff view's rules match the core's")
+    func diffRulesMatchTheCore() throws {
+        let core = try Self.coreDocumentCSS()
+        let shell = try text("shell.css")
+
+        let selectors = [
+            ".mk-blk.mk-diff-add, .mk-blk.mk-diff-mod, .mk-blk.mk-diff-del",
+            ".mk-blk.mk-diff-add::before, .mk-blk.mk-diff-mod::before, .mk-blk.mk-diff-del::before",
+            ".mk-blk.mk-diff-add",
+            ".mk-blk.mk-diff-add::before",
+            ".mk-blk.mk-diff-mod",
+            ".mk-blk.mk-diff-mod::before",
+            ".mk-blk.mk-diff-del",
+            ".mk-blk.mk-diff-del::before",
+            ".mk-blk.mk-diff-del > *",
+            ".mk-blk.mk-diff-del > pre, .mk-blk.mk-diff-del > .mk-diagram",
+            // Double quotes, because `declarations(of:in:)` normalises the
+            // stylesheet's quotes and not the selector's.
+            ".mk-blk[data-mk-side=\"old\"] input.mk-task",
+        ]
+        for selector in selectors {
+            let inCore = try #require(
+                Self.declarations(of: selector, in: core),
+                "the core's stylesheet has no rule for \(selector)")
+            let inShell = try #require(
+                Self.declarations(of: selector, in: shell),
+                "shell.css has no rule for \(selector) — the two have drifted")
+            #expect(inCore == inShell, "\(selector) differs between the two stylesheets")
+        }
+
+        // No new custom property: the tints reuse the slots a theme already
+        // defines, so a theme change stays a CSS swap.
+        for property in ["--mk-diff", "--mk-added", "--mk-removed"] {
+            #expect(
+                !shell.contains(property) && !core.contains(property),
+                "\(property) would be a new theme slot; the ADR says there is none")
+        }
+    }
+
     /// Overdue colouring is the *app's*, and only the app's: the core may not
     /// read a clock (`2026-08-27-inline-task-metadata`), so the two stylesheets
     /// are asymmetric here on purpose and the test says which way round.

@@ -85,6 +85,21 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     private let scrollView: NSScrollView
 
+    /// The change gutter. Owned by the scroll view, so it scrolls with the text
+    /// without an observer keeping it aligned.
+    private let ruler: ChangeRuler
+
+    /// `HEAD`'s bytes for the bound buffer's file, and the oid they came from.
+    ///
+    /// Cached because the read costs ~7 ms and cannot change while the oid does
+    /// not — and this is recomputed at typing cadence, so paying it per keystroke
+    /// would be the one thing a change gutter must not do.
+    private var gutterBase: (path: String, head: String?, text: String)?
+
+    /// Bumped whenever the buffer is rebound, so a base read for the previous
+    /// document is dropped rather than diffed against this one.
+    private var gutterGeneration = 0
+
     public private(set) var buffer: Buffer?
 
     /// Per-buffer undo, so ⌘Z never crosses a document boundary. Keyed by the
@@ -152,6 +167,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     public override init(frame: NSRect) {
         textView = NSTextView(usingTextLayoutManager: true)
         scrollView = NSScrollView(frame: frame)
+        ruler = ChangeRuler(scrollView: scrollView)
         super.init(frame: frame)
 
         Self.configure(textView)
@@ -164,6 +180,14 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.documentView = textView
+        // The ruler after `documentView`, because it takes its client view from
+        // it.
+        ruler.clientView = textView
+        scrollView.verticalRulerView = ruler
+        scrollView.hasVerticalRuler = true
+        // Off until there is something to draw: an empty 8-point strip beside
+        // every clean document is chrome that says nothing.
+        scrollView.rulersVisible = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
         NSLayoutConstraint.activate([
@@ -242,10 +266,12 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         }
         self.buffer = buffer
         parseGeneration += 1
+        gutterGeneration += 1
         guard let buffer else {
             replaceText(with: "")
             textView.isEditable = false
             highlightRanges = []
+            showGutter(nil)
             return
         }
         textView.isEditable = true
@@ -401,6 +427,65 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// another pass over the text, and neither belongs between a keystroke and
     /// its glyph. The result is dropped if the text has moved on, which is what
     /// ``parseGeneration`` is for.
+    // MARK: - The change gutter
+
+    /// Recompute the margin's bars against git `HEAD`.
+    ///
+    /// Two hops off the main actor, and neither is on the keystroke path: the
+    /// base read forks `git` (~7 ms, and cached against the oid), and the line
+    /// diff is a parse of two documents.
+    private func refreshGutter() {
+        guard let buffer else {
+            showGutter(nil)
+            return
+        }
+        let path = buffer.url.path
+        let text = buffer.text
+        gutterGeneration += 1
+        let generation = gutterGeneration
+
+        if let cached = gutterBase, cached.path == path {
+            diffGutter(base: cached.text, text: text, generation: generation)
+            return
+        }
+
+        _Concurrency.Task.detached(priority: .utility) {
+            let base = try? MarkCore.git(base: path)
+            await MainActor.run { [weak self] in
+                guard let self, generation == self.gutterGeneration else { return }
+                guard let base, base.repo != nil else {
+                    // Not in a repository, or git could not answer. No bars, no
+                    // explanation — the ADR's degradation policy.
+                    self.gutterBase = nil
+                    self.showGutter(nil)
+                    return
+                }
+                self.gutterBase = (path: path, head: base.head, text: base.base ?? "")
+                self.diffGutter(base: base.base ?? "", text: text, generation: generation)
+            }
+        }
+    }
+
+    private func diffGutter(base: String, text: String, generation: Int) {
+        _Concurrency.Task.detached(priority: .utility) {
+            let diff = try? MarkCore.lineDiff(old: base, new: text)
+            await MainActor.run { [weak self] in
+                guard let self, generation == self.gutterGeneration else { return }
+                self.showGutter(diff)
+            }
+        }
+    }
+
+    private func showGutter(_ diff: LineDiff?) {
+        ruler.show(diff)
+        // The strip appears and disappears with the bars, so a clean document
+        // looks exactly as it did before this feature existed.
+        scrollView.rulersVisible = !ruler.isEmpty
+    }
+
+    /// What the gutter is currently showing, for the tests and for `mark-bench`.
+    public var gutterDiff: LineDiff? { ruler.diff }
+
     public func scheduleHighlight(immediately: Bool = false) {
         guard immediately else {
             // A **throttle**, not a debounce, for the reason `Buffer` gives at
@@ -433,6 +518,11 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         isParsing = true
         parseGeneration += 1
         let generation = parseGeneration
+        // Rides the same throttle as the source highlighting rather than having
+        // its own: both are "the buffer settled, recompute what is derived from
+        // it", and two independent timers over one buffer is how a keystroke
+        // ends up paying for two parses.
+        refreshGutter()
         let text = buffer.text
         _Concurrency.Task.detached(priority: .userInitiated) {
             let started = DispatchTime.now().uptimeNanoseconds

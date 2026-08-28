@@ -565,10 +565,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "Show Table of Contents",
             action: #selector(MainWindowController.toggleTableOfContents(_:)), keyEquivalent: "t"
         ).keyEquivalentModifierMask = [.command, .control]
+        // #27's Tasks tab and this branch's Changes view are both View-menu
+        // toggles over the front document; they simply sit next to each other.
         viewMenu.addItem(
             withTitle: "Show Tasks",
             action: #selector(MainWindowController.toggleTaskList(_:)), keyEquivalent: "y"
         ).keyEquivalentModifierMask = [.command, .control]
+        // `2026-08-28-git-differences-by-running-git`. A mode of the tab rather
+        // than a second tab: it is a way of looking at the document already
+        // open, and a tab of its own would cost a web view (~52 MB, ADR-4) to
+        // say something about the first one. Disabled — not beeping, not
+        // alerting — for a document with no repository or no changes.
+        viewMenu.addItem(
+            withTitle: "Show Changes",
+            action: #selector(MainWindowController.toggleDiffView(_:)), keyEquivalent: "D"
+        ).keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(.separator())
 
         // `2026-08-26-editor-groups-per-pane-tab-bars`: two editor groups, each

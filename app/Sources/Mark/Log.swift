@@ -39,6 +39,18 @@ public enum Log {
     /// this tool reads private notes.
     public static let ipc = Logger(subsystem: subsystem, category: "ipc")
 
+    /// Everything to do with git: which binary was resolved, every invocation
+    /// with its duration and exit status, every gate hit, every refusal.
+    ///
+    /// `2026-08-28-git-differences-by-running-git` makes a git failure
+    /// deliberately invisible to the reader, which means this log is the *only*
+    /// way to find out why a badge is missing. `mark doctor` reports the
+    /// resolved binary for the same reason.
+    ///
+    /// Paths stay at `debug`: a notes path is private, and this category is
+    /// noisy by design.
+    public static let git = Logger(subsystem: subsystem, category: "git")
+
     /// One signposter for the render pipeline, so the intervals nest in
     /// Instruments the way ADR-2 describes the pipeline.
     public static let signposter = OSSignposter(

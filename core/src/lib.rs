@@ -7,10 +7,22 @@
 //! (`2026-08-24-rust-core-swift-appkit-shell`). Four constraints from that ADR
 //! are load-bearing here, and none of them are checked by the compiler:
 //!
-//! 1. **The surface stays small and string-shaped.** Twelve flat functions
+//! 1. **The surface stays small and string-shaped.** Thirteen flat functions
 //!    taking and returning C strings and scalars. Growing past roughly a dozen,
 //!    or needing to pass a struct, is a signal to reconsider via a superseding
 //!    ADR — not to smuggle a struct across.
+//!
+//!    M10 spent the thirteenth, deliberately and with an ADR that says so:
+//!    `2026-08-28-git-differences-by-running-git` sets the ceiling at thirteen
+//!    and names [`mark_git_json`] as the last increment. It could not be a flag
+//!    on anything already here — "what does git say about this path" is a
+//!    different question from "list this directory" or "diff these two
+//!    strings", and the listing is called with `with_stats: false` precisely so
+//!    it never opens a file. What *did* fit as flags is the rest of that
+//!    feature: [`MARK_DIFF_LINES`] and [`MARK_DIFF_DOCUMENT`] on
+//!    [`mark_diff_json`], which already took `(old_source, new_source, theme)`
+//!    — exactly the shape a line diff and a merged diff document need.
+//!    **The next capability that wants to cross supersedes that ADR.**
 //!
 //!    M9 spent the last slot, on [`mark_write_json`] — the one function that
 //!    writes an edited document, covering both of
@@ -20,7 +32,6 @@
 //!    source highlighting, is a **flag** on [`mark_tasks_json`] rather than
 //!    the `mark_blocks_json` M5 sketched: the ceiling is reached, and the
 //!    parameter answers the same question that function already answers.
-//!    **The surface is now full.** Anything further is a superseding ADR.
 //!
 //!    M7 spent one of the two remaining slots and no more. Themes need two
 //!    things from Swift — "what themes are there" and "resolve this one" — and
@@ -46,7 +57,9 @@
 
 pub mod block;
 pub mod diff;
+pub mod git;
 pub mod highlight;
+pub mod lines;
 pub mod lock;
 pub mod parse;
 pub mod render;
@@ -324,6 +337,14 @@ pub unsafe extern "C" fn mark_render_range(
 /// the rendered HTML already carries. `insert` and `replace` carry the HTML of
 /// the blocks they introduce, so patching needs no second call.
 ///
+/// With [`MARK_DIFF_LINES`] the answer also carries `"lines"`: the *line*-level
+/// diff, for the editor's change gutter and for `mark diff`. With
+/// [`MARK_DIFF_DOCUMENT`] it also carries `"document"`: the merged diff
+/// document's HTML.
+///
+/// `flags` of 0 returns exactly the bytes it always did, which is what keeps
+/// ADR-2's patch path and `core/tests/diff_apply.rs` unaffected.
+///
 /// Returns null on failure. Free with [`mark_free`].
 ///
 /// # Safety
@@ -333,6 +354,7 @@ pub unsafe extern "C" fn mark_diff_json(
     old_source: *const c_char,
     new_source: *const c_char,
     theme: *const c_char,
+    flags: c_int,
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let Some(old_source) = (unsafe { input(old_source, "old_source") }) else {
@@ -350,9 +372,71 @@ pub unsafe extern "C" fn mark_diff_json(
         };
         let old = Document::parse(old_source);
         let new = Document::parse(new_source);
-        json_out(&diff::diff_documents(&old, &new, &theme))
+        let script = diff::diff_documents(&old, &new, &theme);
+
+        if flags == 0 {
+            return json_out(&script);
+        }
+
+        // `flags != 0` makes the response an object with the script's own
+        // fields plus whichever extras were asked for — rather than nesting the
+        // script under a key, which would make the two shapes needlessly
+        // different for a consumer that reads `ops` either way.
+        let mut value = match serde_json::to_value(&script) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => {
+                set_last_error("edit script did not serialize as an object");
+                return std::ptr::null_mut();
+            }
+        };
+        if flags & MARK_DIFF_LINES != 0 {
+            let lines = crate::lines::diff(old_source, new_source);
+            match serde_json::to_value(&lines) {
+                Ok(value_lines) => {
+                    value.insert("lines".to_owned(), value_lines);
+                }
+                Err(error) => {
+                    set_last_error(format!("line diff did not serialize: {error}"));
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+        if flags & MARK_DIFF_DOCUMENT != 0 {
+            let document = diff::diff_document(&old, &new, &theme);
+            value.insert(
+                "document".to_owned(),
+                serde_json::Value::String(document.html),
+            );
+            value.insert(
+                "diffAdded".to_owned(),
+                serde_json::Value::from(document.added),
+            );
+            value.insert(
+                "diffRemoved".to_owned(),
+                serde_json::Value::from(document.removed),
+            );
+            value.insert(
+                "diffChanged".to_owned(),
+                serde_json::Value::from(document.changed),
+            );
+        }
+        json_out(&serde_json::Value::Object(value))
     })
 }
+
+/// Ask [`mark_diff_json`] for the line-level diff as well as the block one.
+///
+/// The two are **not** derivable from each other — see `core/src/lines.rs`. A
+/// block diff cannot put a bar against line 41, which is what the editor's
+/// change gutter draws.
+pub const MARK_DIFF_LINES: c_int = 1 << 0;
+
+/// Ask [`mark_diff_json`] for the merged diff document's HTML.
+///
+/// `2026-08-28-git-differences-by-running-git`'s rendered diff view: blocks in
+/// document order, each classed added / removed / changed, with removed blocks
+/// rendered out of the old parse and marked `data-mk-side="old"`.
+pub const MARK_DIFF_DOCUMENT: c_int = 1 << 1;
 
 /// Ask [`mark_tasks_json`] for the document's **blocks** as well as its tasks.
 ///
@@ -686,6 +770,144 @@ pub unsafe extern "C" fn mark_tree_json(
     })
 }
 
+/// Ask [`mark_git_json`] for `HEAD`'s bytes rather than the repository's
+/// changed set.
+pub const MARK_GIT_BASE: c_int = 1 << 0;
+
+/// Leave untracked files out of [`mark_git_json`]'s changed set.
+///
+/// They are included by default, because a note the reader just wrote is the
+/// most interesting row in a notes tree — but finding them is a second `git`
+/// invocation, measured at 22.5 ms against the first one's 11.6 ms, so a caller
+/// that does not want them should not pay for them.
+pub const MARK_GIT_NO_UNTRACKED: c_int = 1 << 1;
+
+/// What git says about `path`. **The thirteenth and last function on this ABI.**
+///
+/// With `flags` of 0, `path` is a file or a directory and the answer describes
+/// its whole **repository**:
+///
+/// ```json
+/// {"repo":{"root":"/Users/x/notes","gitDir":"/Users/x/notes/.git",
+///          "indexPath":"/Users/x/notes/.git/index",
+///          "headPath":"/Users/x/notes/.git/HEAD",
+///          "head":"a1b2c3d","branch":"main"},
+///  "changes":[{"path":"weekly.md","status":"modified","added":12,"removed":3},
+///             {"path":"ideas.md","status":"untracked","added":null,"removed":0},
+///             {"path":"logo.png","status":"modified","added":null,"removed":null}]}
+/// ```
+///
+/// **A path outside any repository answers `{"repo":null,"changes":[]}` and that
+/// is a success, not a null return.** So is a repository git could not be asked
+/// about. `2026-08-28-git-differences-by-running-git` makes both indistinguishable
+/// on purpose: the reader sees a row with no badge either way, and a caller that
+/// treated "not a repository" as an error would have to special-case the common
+/// case.
+///
+/// `indexPath` and `headPath` are the reason this returns paths rather than
+/// timestamps: `2026-08-28-git-badges-ride-the-sidebar-poll` gates its poll on
+/// `stat`ing those two files, and resolving them costs a `git` process, so the
+/// caller resolves them **once** and stats them itself thereafter. They are
+/// `rev-parse --git-path`'s answers, not `gitDir` joined with a name — a linked
+/// worktree, a shared index, or `$GIT_INDEX_FILE` all put them elsewhere.
+///
+/// Paths in `changes` are **repository-relative**, as git reports them. Join
+/// them onto `repo` once rather than having the core emit an absolute path per
+/// entry.
+///
+/// `added` and `removed` are `null` when the lines cannot be counted — a binary
+/// file, per `git diff --numstat`'s own `-` `-`. **Never render a `null` as
+/// `0`:** `+0 −0` on a changed binary is a lie about a file that did change.
+/// An untracked file has `removed: 0` and `added: null`, because it removed
+/// nothing (which is known) and its additions are the caller's to count on its
+/// own screen-bounded queue.
+///
+/// With [`MARK_GIT_BASE`], `path` is a **file** and the answer is that file's
+/// committed bytes:
+///
+/// ```json
+/// {"repo":"…","head":"a1b2c3d","tracked":true,"base":"# Weekly notes\n…"}
+/// ```
+///
+/// `tracked:false` with `base:null` for a file `HEAD` does not have — a new
+/// note, which is ordinary — and for a blob that is binary or not UTF-8, which
+/// the diff view cannot show either way. Cache the result against
+/// `(repo, path, head)`: the read costs ~7 ms and cannot change while the oid
+/// does not.
+///
+/// Returns null only on a genuine failure. Free with [`mark_free`].
+///
+/// # Safety
+/// `path` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_git_json(path: *const c_char, flags: c_int) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(path) = (unsafe { input(path, "path") }) else {
+            return std::ptr::null_mut();
+        };
+        clear_last_error();
+        let path = Path::new(path);
+
+        let Some(repo) = git::discover(path) else {
+            // Not a repository, or no usable git. Both are answers — but they
+            // have to be answers *in the shape the caller asked for*. Returning
+            // the status shape here for a `MARK_GIT_BASE` call gave Swift a
+            // response with no `tracked` key, which failed to decode and
+            // surfaced as "nothing here that can be diffed" instead of "not in a
+            // repository". `DiffViewTests` caught it.
+            if flags & MARK_GIT_BASE != 0 {
+                return json_out(&serde_json::json!({
+                    "repo": serde_json::Value::Null,
+                    "head": serde_json::Value::Null,
+                    "branch": serde_json::Value::Null,
+                    "tracked": false,
+                    "base": serde_json::Value::Null,
+                }));
+            }
+            return json_out(&git::Report::none());
+        };
+
+        if flags & MARK_GIT_BASE != 0 {
+            let base = match git::base_bytes(&repo, path, git::DEFAULT_TIMEOUT) {
+                Ok(base) => base,
+                Err(error) => {
+                    // A real failure — a timeout, a broken repository. Reported
+                    // rather than turned into "no base", so the caller can log
+                    // it instead of silently showing an all-added diff.
+                    set_last_error(error.to_string());
+                    return std::ptr::null_mut();
+                }
+            };
+            return json_out(&serde_json::json!({
+                "repo": repo.root,
+                "head": repo.head,
+                "branch": repo.branch,
+                "tracked": base.is_some(),
+                "base": base,
+            }));
+        }
+
+        let query = git::Query {
+            untracked: flags & MARK_GIT_NO_UNTRACKED == 0,
+            // Never here: this is the repository-scoped query the sidebar runs
+            // on a timer, and reading every untracked file on it would put
+            // per-file I/O back on a path whose whole point is being per-repo.
+            count_untracked_lines: false,
+            ..git::Query::default()
+        };
+        match git::changes(&repo, &query) {
+            Ok(changes) => json_out(&git::Report {
+                repo: Some(repo),
+                changes,
+            }),
+            Err(error) => {
+                set_last_error(error.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
 /// List the available themes, or resolve one.
 ///
 /// `flags` is [`MARK_THEME_LIST`] or 0. With it, `name` is ignored and the
@@ -924,7 +1146,7 @@ mod tests {
     fn diff_json_describes_an_inserted_paragraph() {
         let old = c("# H\n\nalpha\n");
         let new = c("# H\n\ninserted\n\nalpha\n");
-        let json = take(unsafe { mark_diff_json(old.as_ptr(), new.as_ptr(), THEME) }).unwrap();
+        let json = take(unsafe { mark_diff_json(old.as_ptr(), new.as_ptr(), THEME, 0) }).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["old_blocks"], 2);
@@ -945,7 +1167,7 @@ mod tests {
     fn diff_json_of_an_unchanged_document_is_all_keep() {
         let source = c("# H\n\nalpha\n\n- [x] done\n");
         let json =
-            take(unsafe { mark_diff_json(source.as_ptr(), source.as_ptr(), THEME) }).unwrap();
+            take(unsafe { mark_diff_json(source.as_ptr(), source.as_ptr(), THEME, 0) }).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let ops = parsed["ops"].as_array().unwrap();
         assert_eq!(ops.len(), 1, "{json}");
@@ -956,12 +1178,12 @@ mod tests {
     #[test]
     fn diff_json_rejects_a_null_source_on_either_side() {
         let source = c("a\n");
-        assert!(unsafe { mark_diff_json(std::ptr::null(), source.as_ptr(), THEME) }.is_null());
+        assert!(unsafe { mark_diff_json(std::ptr::null(), source.as_ptr(), THEME, 0) }.is_null());
         assert_eq!(
             take(mark_last_error()).as_deref(),
             Some("old_source is null")
         );
-        assert!(unsafe { mark_diff_json(source.as_ptr(), std::ptr::null(), THEME) }.is_null());
+        assert!(unsafe { mark_diff_json(source.as_ptr(), std::ptr::null(), THEME, 0) }.is_null());
         assert_eq!(
             take(mark_last_error()).as_deref(),
             Some("new_source is null")

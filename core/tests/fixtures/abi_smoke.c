@@ -147,17 +147,17 @@ static void a_null_source_is_an_error_not_a_crash(void) {
     take_error(message, sizeof message);
     ok(strcmp(message, "source is null") == 0, "mark_render_range(NULL) message");
 
-    ok(mark_diff_json(NULL, DOC, NULL) == NULL, "mark_diff_json(NULL, _) returned non-NULL");
+    ok(mark_diff_json(NULL, DOC, NULL, 0) == NULL, "mark_diff_json(NULL, _) returned non-NULL");
     take_error(message, sizeof message);
     ok(strcmp(message, "old_source is null") == 0, "mark_diff_json(NULL, _) message");
 
-    ok(mark_diff_json(DOC, NULL, NULL) == NULL, "mark_diff_json(_, NULL) returned non-NULL");
+    ok(mark_diff_json(DOC, NULL, NULL, 0) == NULL, "mark_diff_json(_, NULL) returned non-NULL");
     take_error(message, sizeof message);
     ok(strcmp(message, "new_source is null") == 0, "mark_diff_json(_, NULL) message");
 }
 
 static void diff_of_an_unchanged_document_is_all_keep(void) {
-    char *json = mark_diff_json(DOC, DOC, NULL);
+    char *json = mark_diff_json(DOC, DOC, NULL, 0);
     ok(json != NULL, "mark_diff_json(same, same) returned NULL");
     if (json == NULL) {
         return;
@@ -175,7 +175,7 @@ static void diff_of_an_unchanged_document_is_all_keep(void) {
 
 static void diff_of_an_edited_document_names_the_changed_block(void) {
     static const char *const EDITED = "# Title\n\n- [x] task\n\nalpha\n\nbravo\n";
-    char *json = mark_diff_json(DOC, EDITED, NULL);
+    char *json = mark_diff_json(DOC, EDITED, NULL, 0);
     ok(json != NULL, "mark_diff_json(doc, edited) returned NULL");
     if (json == NULL) {
         return;
@@ -193,7 +193,7 @@ static void diff_of_an_edited_document_names_the_changed_block(void) {
 
 static void diff_of_an_insert_carries_an_anchor(void) {
     static const char *const INSERTED = "# Title\n\n- [ ] task\n\nalpha\n\ninserted\n\nbravo\n";
-    char *json = mark_diff_json(DOC, INSERTED, NULL);
+    char *json = mark_diff_json(DOC, INSERTED, NULL, 0);
     ok(json != NULL, "mark_diff_json(doc, inserted) returned NULL");
     if (json == NULL) {
         return;
@@ -208,7 +208,7 @@ static void diff_of_an_insert_carries_an_anchor(void) {
 static void a_document_with_identical_blocks_diffs_by_ordinal(void) {
     static const char *const FIVE = "same\n\nsame\n\nsame\n\nsame\n\nsame\n";
     static const char *const FOUR = "same\n\nsame\n\nsame\n\nsame\n";
-    char *json = mark_diff_json(FIVE, FOUR, NULL);
+    char *json = mark_diff_json(FIVE, FOUR, NULL, 0);
     ok(json != NULL, "mark_diff_json over identical blocks returned NULL");
     if (json == NULL) {
         return;
@@ -221,7 +221,7 @@ static void a_document_with_identical_blocks_diffs_by_ordinal(void) {
 }
 
 static void an_empty_document_diffs(void) {
-    char *json = mark_diff_json("", "", NULL);
+    char *json = mark_diff_json("", "", NULL, 0);
     ok(json != NULL, "mark_diff_json(\"\", \"\") returned NULL");
     if (json == NULL) {
         return;
@@ -504,6 +504,53 @@ static void write_json_saves_and_toggles(void) {
     remove(path);
 }
 
+
+static void diff_flags_add_lines_and_a_document(void) {
+    /* The two granularities are not derivable from each other, and a caller
+       asking for neither must still get exactly the old bytes. */
+    char *plain = mark_diff_json(DOC, "# Title\n\n- [ ] task\n\nALPHA\n\nbravo\n", NULL, 0);
+    ok(plain != NULL, "mark_diff_json(flags=0) returned NULL");
+    if (plain != NULL) {
+        ok(strstr(plain, "\"lines\"") == NULL, "flags=0 must not carry lines");
+        ok(strstr(plain, "\"document\"") == NULL, "flags=0 must not carry a document");
+        mark_free(plain);
+    }
+
+    char *both = mark_diff_json(DOC, "# Title\n\n- [ ] task\n\nALPHA\n\nbravo\n", NULL,
+                                MARK_DIFF_LINES | MARK_DIFF_DOCUMENT);
+    ok(both != NULL, "mark_diff_json(both flags) returned NULL");
+    if (both != NULL) {
+        ok(strstr(both, "\"lines\"") != NULL, "MARK_DIFF_LINES adds lines");
+        ok(strstr(both, "\"newBytes\"") != NULL, "a hunk carries its byte range");
+        ok(strstr(both, "\"document\"") != NULL, "MARK_DIFF_DOCUMENT adds a document");
+        ok(strstr(both, "\"ops\"") != NULL, "the edit script survives alongside them");
+        ok(strstr(both, "mk-diff-") != NULL, "the document carries diff classes");
+        mark_free(both);
+    }
+}
+
+static void git_json_answers_for_a_path_with_no_repository(void) {
+    /* The degradation policy, from C: not a repository is a SUCCESS carrying an
+       explicit null, never NULL-plus-an-error. A machine with no git at all
+       takes this same path, which is why this check needs no repository and no
+       git to pass. */
+    char *json = mark_git_json("/", 0);
+    ok(json != NULL, "mark_git_json outside a repository returned NULL");
+    if (json == NULL) {
+        return;
+    }
+    ok(strstr(json, "\"repo\":null") != NULL, "expected an explicit null repo");
+    ok(strstr(json, "\"changes\":[]") != NULL, "expected an empty changes array");
+    mark_free(json);
+}
+
+static void git_json_rejects_a_null_path(void) {
+    char message[256];
+    ok(mark_git_json(NULL, 0) == NULL, "mark_git_json(NULL) returned non-NULL");
+    take_error(message, sizeof message);
+    ok(strcmp(message, "path is null") == 0, "mark_git_json(NULL) message");
+}
+
 int main(void) {
     printf("mark C ABI smoke test\n");
 
@@ -529,6 +576,9 @@ int main(void) {
     tasks_json_carries_state_and_metadata();
     toggle_returns_a_state_code();
     write_json_saves_and_toggles();
+    diff_flags_add_lines_and_a_document();
+    git_json_answers_for_a_path_with_no_repository();
+    git_json_rejects_a_null_path();
 
     printf("  %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

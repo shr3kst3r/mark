@@ -103,7 +103,12 @@ pub fn render(doc: &Document<'_>, opts: &RenderOptions) -> Render {
         .prefix_blocks
         .unwrap_or(usize::MAX)
         .min(doc.blocks().len());
-    let mut render = with_context(doc, &Context::new(doc, &opts.theme), 0..end);
+    let mut render = with_context(
+        doc,
+        &Context::new(doc, &opts.theme),
+        0..end,
+        BlockMark::default(),
+    );
     render.blocks_total = doc.blocks().len();
 
     if opts.standalone {
@@ -132,7 +137,28 @@ pub fn render_range_themed(
     blocks: Range<usize>,
     theme: &Arc<ThemePair>,
 ) -> Render {
-    with_context(doc, &Context::new(doc, theme), blocks)
+    with_context(doc, &Context::new(doc, theme), blocks, BlockMark::default())
+}
+
+/// An extra class, and an origin, stamped onto every `mk-blk` div in a range.
+///
+/// This exists for one caller — [`crate::diff::diff_document`], which composes
+/// a document out of runs taken from two different parses and has to say which
+/// is which. The class goes **on the `mk-blk` div** rather than on a wrapper
+/// element because ADR-2's shell addresses blocks by `data-blk` and anchors
+/// scrolling on `.mk-blk`; an extra level of nesting would quietly break both.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockMark {
+    /// Appended to the div's class list, e.g. `mk-diff-add`.
+    pub class: Option<&'static str>,
+    /// Emit `data-mk-side="old"`, meaning the byte offsets on this block refer
+    /// to the *old* document.
+    ///
+    /// Load-bearing rather than informational: a checkbox click inside deleted
+    /// content would otherwise write to a byte range in the current file that
+    /// no longer means what the attribute says. The shell must treat such
+    /// blocks as inert.
+    pub old_side: bool,
 }
 
 /// Render several ranges of one document, building the per-document lookups
@@ -152,11 +178,34 @@ pub fn render_ranges(
     let ctx = Context::new(doc, theme);
     ranges
         .iter()
-        .map(|blocks| with_context(doc, &ctx, blocks.clone()))
+        .map(|blocks| with_context(doc, &ctx, blocks.clone(), BlockMark::default()))
         .collect()
 }
 
-fn with_context(doc: &Document<'_>, ctx: &Context, blocks: Range<usize>) -> Render {
+/// [`render_ranges`], with a [`BlockMark`] per range.
+///
+/// One `Context` for the whole document, as above: `diff_document` has one
+/// range per changed run, and rebuilding the task and heading lookups per run
+/// would be quadratic on exactly the document where every block changed.
+#[must_use]
+pub fn render_marked_ranges(
+    doc: &Document<'_>,
+    ranges: &[(Range<usize>, BlockMark)],
+    theme: &Arc<ThemePair>,
+) -> Vec<Render> {
+    let ctx = Context::new(doc, theme);
+    ranges
+        .iter()
+        .map(|(blocks, mark)| with_context(doc, &ctx, blocks.clone(), *mark))
+        .collect()
+}
+
+fn with_context(
+    doc: &Document<'_>,
+    ctx: &Context,
+    blocks: Range<usize>,
+    mark: BlockMark,
+) -> Render {
     let start = blocks.start.min(doc.blocks().len());
     let end = blocks.end.clamp(start, doc.blocks().len());
 
@@ -174,7 +223,7 @@ fn with_context(doc: &Document<'_>, ctx: &Context, blocks: Range<usize>) -> Rend
     };
 
     for block in &doc.blocks()[start..end] {
-        render_block(doc, block, ctx, &mut out);
+        render_block(doc, block, ctx, mark, &mut out);
     }
     out
 }
@@ -229,14 +278,26 @@ impl Context {
     }
 }
 
-fn render_block(doc: &Document<'_>, block: &Block, ctx: &Context, out: &mut Render) {
+fn render_block(
+    doc: &Document<'_>,
+    block: &Block,
+    ctx: &Context,
+    mark: BlockMark,
+    out: &mut Render,
+) {
     let _ = write!(
         out.html,
-        "<div class=\"mk-blk mk-{}\" data-blk=\"{}\" data-mk-start=\"{}\" data-mk-end=\"{}\">",
+        "<div class=\"mk-blk mk-{}{}\" data-blk=\"{}\" data-mk-start=\"{}\" data-mk-end=\"{}\"{}>",
         block.kind.slug(),
+        mark.class.map(|c| format!(" {c}")).unwrap_or_default(),
         block.id,
         block.start,
-        block.end
+        block.end,
+        if mark.old_side {
+            " data-mk-side=\"old\""
+        } else {
+            ""
+        }
     );
 
     let events = doc.block_events(block);
@@ -663,6 +724,38 @@ math[display='block'] { display: block; margin: 0.6rem 0; overflow-x: auto; }
    of failing visibly rather than blanking the construct. */
 .mk-rich-source { user-select: text; white-space: pre-wrap; margin: 0 0.4em 0 0; }
 .mk-diagram-error .mk-rich-source { display: block; margin: 0.4em 0 0; }
+/* 2026-08-28-git-differences-by-running-git. No new theme slot: additions take
+   `success`, removals `error`, and the gutter bar `muted` -- so a theme change
+   stays a CSS swap and `codeStamp` is untouched. `color-mix` keeps the tint a
+   wash rather than a fill, because these blocks contain running prose that
+   still has to be readable. */
+.mk-blk.mk-diff-add, .mk-blk.mk-diff-mod, .mk-blk.mk-diff-del {
+  position: relative; padding-left: 0.9rem; border-radius: 3px; }
+.mk-blk.mk-diff-add::before, .mk-blk.mk-diff-mod::before, .mk-blk.mk-diff-del::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  border-radius: 2px; }
+.mk-blk.mk-diff-add {
+  background: color-mix(in srgb, var(--mk-success) 10%, transparent); }
+.mk-blk.mk-diff-add::before { background: var(--mk-success); }
+.mk-blk.mk-diff-mod {
+  background: color-mix(in srgb, var(--mk-success) 10%, transparent); }
+.mk-blk.mk-diff-mod::before { background: var(--mk-warning); }
+.mk-blk.mk-diff-del {
+  background: color-mix(in srgb, var(--mk-error) 10%, transparent);
+  color: var(--mk-subtle); }
+.mk-blk.mk-diff-del::before { background: var(--mk-error); }
+/* Deleted content reads as deleted, not merely tinted -- a reader scanning a
+   diff should not have to consult the colour to know which half is gone.
+   Applied to the block's text rather than to the block, so a struck heading
+   does not strike its own rule. */
+.mk-blk.mk-diff-del > * { text-decoration: line-through; }
+/* Except code and diagrams, where a line through every glyph is unreadable.
+   They carry the tint and the bar and nothing else. */
+.mk-blk.mk-diff-del > pre, .mk-blk.mk-diff-del > .mk-diagram { text-decoration: none; }
+/* A removed block is inert: its byte offsets point into a version of the file
+   that is not on disk. The shell refuses the click; this makes the refusal
+   visible rather than mysterious. */
+.mk-blk[data-mk-side='old'] input.mk-task { pointer-events: none; opacity: 0.5; }
 ",
     );
     css.push_str(&token_css());
@@ -690,6 +783,18 @@ pub fn token_css() -> String {
 #[must_use]
 pub fn theme_css(theme: &ThemePair) -> String {
     theme.css()
+}
+
+/// Wrap pre-rendered block HTML in a complete, self-contained document.
+///
+/// [`render`] does this for itself via [`RenderOptions::standalone`], but the
+/// merged diff document ([`crate::diff::diff_document`]) is assembled out of two
+/// parses and so arrives as bare block HTML with no `RenderOptions` behind it.
+/// `mark diff --html` needs the same page furniture around it, including the
+/// diff rules in [`document_css`].
+#[must_use]
+pub fn standalone_document(title: &str, body: &str, theme: &Arc<ThemePair>) -> String {
+    standalone(title, body, theme)
 }
 
 fn standalone(title: &str, body: &str, theme: &Arc<ThemePair>) -> String {

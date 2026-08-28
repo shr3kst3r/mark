@@ -1060,3 +1060,181 @@ mod tests {
         assert_eq!(seen.len(), 5);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The merged diff document
+// ---------------------------------------------------------------------------
+
+/// Classes [`diff_document`] stamps on `mk-blk` divs. Public so the shell's CSS
+/// and the Swift side can refer to the same strings rather than two spellings
+/// that drift.
+pub const CLASS_ADDED: &str = "mk-diff-add";
+pub const CLASS_REMOVED: &str = "mk-diff-del";
+pub const CLASS_CHANGED: &str = "mk-diff-mod";
+
+/// One document showing what changed, ready to inject.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffDocument {
+    /// `mk-blk` divs in new-document order, with removed blocks spliced in at
+    /// the position they used to occupy.
+    pub html: String,
+    /// Blocks the new document has and the old did not.
+    pub added: usize,
+    /// Blocks the old document had and the new does not.
+    pub removed: usize,
+    /// Blocks that exist on both sides but differ.
+    pub changed: usize,
+    /// Blocks that are the same on both sides.
+    pub unchanged: usize,
+    /// The underlying [`EditScript`] gave up on minimality — see
+    /// [`EditScript::coarse`]. The document is still correct; it just marks a
+    /// larger run as changed than strictly necessary.
+    pub coarse: bool,
+}
+
+impl DiffDocument {
+    /// Whether there is anything to show. A caller can use this to leave the
+    /// normal render up rather than swapping to a diff view that says nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.added == 0 && self.removed == 0 && self.changed == 0
+    }
+}
+
+/// Render `new` as a document that shows how it differs from `old`.
+///
+/// This is what `2026-08-28-git-differences-by-running-git` means by
+///
+/// > Differences are shown as rendered markdown, not as patch text. The core
+/// > emits a *merged diff document*: `mk-blk` divs in document order, each
+/// > classed unchanged / added / removed / changed, with removed blocks
+/// > rendered from HEAD's own parse so deleted content is visible in place.
+///
+/// [`EditScript`] alone cannot do this, and that is why this function exists:
+/// [`Op::Delete`] carries no HTML, because ADR-2's patcher only ever needs to
+/// *remove* those nodes from a live DOM. A reader looking at a diff needs to
+/// see them, so they are rendered here out of `old`'s parse.
+///
+/// Blocks taken from `old` carry `data-mk-side="old"`, and the shell must treat
+/// them as inert: their `data-mk-start` / `data-mk-end` are offsets into a
+/// version of the file that is not on disk, so a checkbox click inside one
+/// would write to the wrong bytes.
+///
+/// Both documents are rendered with **one** `Context` each
+/// ([`render::render_marked_ranges`]), so a document in which every block
+/// changed costs two context builds rather than two per run.
+#[must_use]
+pub fn diff_document(
+    old: &Document<'_>,
+    new: &Document<'_>,
+    theme: &std::sync::Arc<crate::theme::ThemePair>,
+) -> DiffDocument {
+    let script = diff(old.blocks(), new.blocks());
+
+    // Collect the ranges each side owes, in output order, then render each side
+    // in one pass. `slot` remembers where each rendered run goes, so the two
+    // passes can be reassembled without re-walking the ops.
+    enum Side {
+        New(usize),
+        Old(usize),
+    }
+    let mut new_ranges: Vec<(Range<usize>, render::BlockMark)> = Vec::new();
+    let mut old_ranges: Vec<(Range<usize>, render::BlockMark)> = Vec::new();
+    let mut layout: Vec<Side> = Vec::new();
+
+    let mut push_new = |range: Range<usize>, class: Option<&'static str>| {
+        let index = new_ranges.len();
+        new_ranges.push((
+            range,
+            render::BlockMark {
+                class,
+                old_side: false,
+            },
+        ));
+        Side::New(index)
+    };
+
+    for op in &script.ops {
+        match op {
+            Op::Keep {
+                new_index, count, ..
+            } => {
+                let side = push_new(*new_index..*new_index + count, None);
+                layout.push(side);
+            }
+            Op::Insert {
+                new_index, new_ids, ..
+            } => {
+                let side = push_new(*new_index..*new_index + new_ids.len(), Some(CLASS_ADDED));
+                layout.push(side);
+            }
+            Op::Delete {
+                old_index, old_ids, ..
+            } => {
+                let index = old_ranges.len();
+                old_ranges.push((
+                    *old_index..*old_index + old_ids.len(),
+                    render::BlockMark {
+                        class: Some(CLASS_REMOVED),
+                        old_side: true,
+                    },
+                ));
+                layout.push(Side::Old(index));
+            }
+            Op::Replace {
+                old_index,
+                new_index,
+                old_ids,
+                new_ids,
+                ..
+            } => {
+                // Removed first, then its replacement: reading order is "this
+                // was, and now it is that".
+                let index = old_ranges.len();
+                old_ranges.push((
+                    *old_index..*old_index + old_ids.len(),
+                    render::BlockMark {
+                        class: Some(CLASS_REMOVED),
+                        old_side: true,
+                    },
+                ));
+                layout.push(Side::Old(index));
+                let side = push_new(*new_index..*new_index + new_ids.len(), Some(CLASS_CHANGED));
+                layout.push(side);
+            }
+        }
+    }
+
+    let new_rendered = render::render_marked_ranges(new, &new_ranges, theme);
+    let old_rendered = render::render_marked_ranges(old, &old_ranges, theme);
+
+    let mut html = String::new();
+    for slot in &layout {
+        let piece = match slot {
+            Side::New(index) => new_rendered.get(*index),
+            Side::Old(index) => old_rendered.get(*index),
+        };
+        if let Some(piece) = piece {
+            html.push_str(&piece.html);
+        }
+    }
+
+    DiffDocument {
+        html,
+        added: script.inserted,
+        removed: script.deleted,
+        changed: script.replaced,
+        unchanged: script.kept,
+        coarse: script.coarse,
+    }
+}
+
+/// [`diff_document`]'s HTML as a complete page, for `mark diff --html`.
+#[must_use]
+pub fn standalone_diff(
+    title: &str,
+    body: &str,
+    theme: &std::sync::Arc<crate::theme::ThemePair>,
+) -> String {
+    render::standalone_document(title, body, theme)
+}

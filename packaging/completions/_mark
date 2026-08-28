@@ -57,6 +57,7 @@ _mark() {
   local -a commands
   commands=(
     'render:render a document to stdout'
+    'diff:show what changed against git HEAD'
     'toc:print the heading tree'
     'tasks:list every task in a file or directory'
     'check:set, clear, or flip one checkbox in place'
@@ -91,6 +92,17 @@ _mark() {
             '--prefix=[emit only the first N top-level blocks]:blocks:' \
             '--theme=[theme to render with]:theme:_mark_themes' \
             '1:file:_files -g "*.md"'
+          ;;
+        diff)
+          _arguments \
+            '(--ansi --plain)--html[the rendered diff, as a self-contained document]' \
+            '(--html --plain)--ansi[styled terminal output]' \
+            '(--html --ansi)--plain[terminal output with no escape sequences]' \
+            '--json[machine-readable output]' \
+            '--stat[counts only, no hunks]' \
+            '--tracked[leave untracked files out]' \
+            '--theme=[theme for --html and --ansi]:theme:_mark_themes' \
+            '1:path:_files'
           ;;
         toc|stats)
           _arguments '--json[machine-readable output]' '1:file:_files -g "*.md"'
@@ -137,6 +149,7 @@ _mark() {
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
             '--all[include non-markdown files]' \
+            '--git[add changed lines against git HEAD]' \
             '1:dir:_files -/'
           ;;
         grep)

@@ -756,6 +756,11 @@
      * span. Reporting nothing is right: `Number(null)` is 0, and syncing the
      * editor to the top of the document would be worse than not syncing it. */
     if (!block.hasAttribute("data-mk-start")) return null;
+    /* A block taken from the old document carries the old document's offsets,
+     * so scrolling the editor to one would put the caret in the wrong place —
+     * or past the end of a file that has since shrunk. Reporting nothing is the
+     * same answer an error card gets, and for the same reason. */
+    if (block.getAttribute("data-mk-side") === "old") return null;
     var start = Number(block.getAttribute("data-mk-start"));
     var end = Number(block.getAttribute("data-mk-end"));
     if (!isFinite(start) || start < 0) return null;
@@ -1292,6 +1297,21 @@
     return rendered === "done" ? "open" : "done";
   }
 
+  /*
+   * Is this element inside a block taken from the *old* document?
+   *
+   * `2026-08-28-git-differences-by-running-git` marks removed blocks in the
+   * diff view with `data-mk-side="old"`, and requires the shell to treat them
+   * as inert. That is not cosmetic: their `data-mk-start` / `data-mk-end` are
+   * offsets into a version of the file that is not on disk, so writing through
+   * one would edit the wrong bytes of the current document. The CSS dims such a
+   * checkbox; this is what actually refuses it.
+   */
+  function isOldSide(node) {
+    var block = node && node.closest ? node.closest(".mk-blk") : null;
+    return !!(block && block.getAttribute("data-mk-side") === "old");
+  }
+
   function taskPayload(target) {
     return {
       index: Number(target.getAttribute("data-mk-idx")),
@@ -1307,6 +1327,10 @@
       var target = event.target;
       if (target && target.classList && target.classList.contains("mk-task")) {
         event.preventDefault();
+        /* Deleted content is not editable. Swallow the click rather than
+         * reporting it: a toggle would write to a byte range that no longer
+         * means what the attribute says. */
+        if (isOldSide(target)) return;
         var message = taskPayload(target);
         message.kind = "toggle";
         message.state = desiredStateFor(message.renderedState, event);
@@ -1341,6 +1365,8 @@
       var target = event.target;
       if (!target || !target.classList || !target.classList.contains("mk-task")) return;
       event.preventDefault();
+      /* Same reason as the click: no state picker over deleted content. */
+      if (isOldSide(target)) return;
       var message = taskPayload(target);
       message.kind = "taskMenu";
       message.x = event.clientX;

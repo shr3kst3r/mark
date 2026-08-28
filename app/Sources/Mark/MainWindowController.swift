@@ -297,6 +297,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar.badges.dirtySource = { [weak self] url in
             self?.tab(for: url)?.authoritativeSource
         }
+        // The same hook, for the same rule, and it matters more here: `+12 −3`
+        // claims to say how far this file is from what is committed, so
+        // answering it from disk while the reader has unsaved edits answers a
+        // different question. Bounded by the number of dirty tabs.
+        sidebar.gitBadges.dirtySource = { [weak self] url in
+            self?.tab(for: url)?.authoritativeSource
+        }
         body.onDrop = { [weak self] urls in
             self?.sidebar.handleDrop(urls) ?? false
         }
@@ -2384,6 +2391,23 @@ extension MainWindowController: NSMenuItemValidation {
         alert.beginSheetModal(for: window)
     }
 
+    /// ⌘⇧D — show the document's differences against git `HEAD`, or stop.
+    ///
+    /// Failure is silent by design. `2026-08-28-git-differences-by-running-git`
+    /// makes "no git here" indistinguishable from "not in a repository", and a
+    /// reader who pressed this on a note outside a repository needs the menu
+    /// item to have been greyed out, not a dialog explaining itself. The reason
+    /// goes to the log, which is where `mark doctor` points.
+    @objc public func toggleDiffView(_ sender: Any?) {
+        guard let documentView else { return }
+        _Concurrency.Task { @MainActor in
+            if let reason = await documentView.toggleDiff() {
+                Log.git.debug("changes view: \(reason.description, privacy: .public)")
+                NSSound.beep()
+            }
+        }
+    }
+
     @objc public func reloadDocument(_ sender: Any?) {
         guard let documentView, let tab = tabs.selected else { return }
         // Same refusal as the socket's `reload`, for the same reason: a reload
@@ -2449,6 +2473,15 @@ extension MainWindowController: NSMenuItemValidation {
         case #selector(toggleTaskList(_:)):
             item.state = documentPaneIsShowing(.tasks) ? .on : .off
             return true
+        case #selector(toggleDiffView(_:)):
+            // The title says which way the toggle goes, as `toggleEditorPane`
+            // does. Enabled whenever there is a document: whether it has
+            // changes is a question only `git` can answer, and answering it
+            // here would fork a process on every menu-bar tracking pass.
+            let showing = documentView?.isShowingDiff == true
+            item.title = showing ? "Hide Changes" : "Show Changes"
+            item.state = showing ? .on : .off
+            return tabs.selected != nil
         case #selector(performFindAction(_:)):
             // The editor's find bar can do everything `NSTextFinder` defines,
             // including Replace; the preview's can do the four that make sense

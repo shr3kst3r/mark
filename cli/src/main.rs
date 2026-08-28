@@ -37,6 +37,7 @@ mod ansi;
 mod client;
 mod wire;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -45,6 +46,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
+use mark_core::diff;
+use mark_core::git::{self, GitError};
+use mark_core::lines;
 use mark_core::parse::Document;
 use mark_core::render::{RenderOptions, render};
 use mark_core::tasks::{self, Action, TaskError};
@@ -118,6 +122,34 @@ enum Command {
         /// the page picks with `prefers-color-scheme`; this chooses the pair.
         /// `--ansi` has no CSS to defer to, so it takes the named theme's own
         /// colours.
+        #[arg(long, value_name = "NAME")]
+        theme: Option<String>,
+    },
+    /// Show what changed against git HEAD.
+    ///
+    /// A **file** shows its own changed lines; a **directory**, or nothing at
+    /// all, shows one row per changed file in the repository — which is the
+    /// same pair of meanings `mark open` and `mark ls` already give a path.
+    ///
+    /// Exits 0 for a path that is not in a git repository, saying so on stderr.
+    /// That is not a failure: `2026-08-28-git-differences-by-running-git` makes
+    /// "no git here" an ordinary answer rather than an error, and a script
+    /// asking "what changed?" of a plain directory deserves an empty answer
+    /// rather than a non-zero exit.
+    Diff {
+        path: Option<PathBuf>,
+        #[command(flatten)]
+        format: Format,
+        #[arg(long)]
+        json: bool,
+        /// Counts only, with no hunks, even for a single file.
+        #[arg(long)]
+        stat: bool,
+        /// Leave untracked files out. They are included by default, with every
+        /// line counted as added.
+        #[arg(long)]
+        tracked: bool,
+        /// Theme for `--html` and for the colours `--ansi` uses.
         #[arg(long, value_name = "NAME")]
         theme: Option<String>,
     },
@@ -222,6 +254,14 @@ enum Command {
         /// Include non-markdown files.
         #[arg(long)]
         all: bool,
+        /// Add each file's changed lines against git HEAD, as `+12 -3`.
+        ///
+        /// One `git` query for the listing's repository, not one per file —
+        /// see `2026-08-28-git-differences-by-running-git` for why that is the
+        /// unit. Silently adds nothing for a directory that is not in a
+        /// repository.
+        #[arg(long)]
+        git: bool,
     },
     /// Search markdown files, reporting the heading each match sits under.
     Grep {
@@ -543,6 +583,10 @@ enum CliError {
     Output(io::Error),
     /// ADR-3's socket: could not reach the app, or the app said no.
     Ipc(IpcError),
+    /// We could not find out what git thinks. Never "not in a repository",
+    /// which `2026-08-28-git-differences-by-running-git` makes an ordinary
+    /// answer rather than a failure.
+    Git(GitError),
     /// A theme that does not exist, will not parse, or is missing a slot.
     Theme(ThemeError),
     /// A combination of arguments clap accepts and this tool does not — today
@@ -567,6 +611,10 @@ impl CliError {
             // does not exist.
             CliError::Theme(ThemeError::NotFound { .. }) => EXIT_USAGE,
             CliError::Theme(_) => EXIT_FILE,
+            // A git query that failed is not the *file* being wrong, and it is
+            // not usage. It is "the environment could not answer", which is
+            // what EXIT_REFUSED already means for the socket and the anchor.
+            CliError::Git(_) => EXIT_REFUSED,
             CliError::Usage(_) => EXIT_USAGE,
         }
     }
@@ -582,6 +630,7 @@ impl fmt::Display for CliError {
             CliError::Output(error) => write!(f, "writing to stdout: {error}"),
             CliError::Ipc(error) => error.fmt(f),
             CliError::Theme(error) => error.fmt(f),
+            CliError::Git(error) => error.fmt(f),
             CliError::Usage(message) => write!(f, "{message}"),
         }
     }
@@ -596,6 +645,7 @@ impl std::error::Error for CliError {
             CliError::Pattern(error) => Some(error),
             CliError::Ipc(error) => Some(error),
             CliError::Theme(error) => Some(error),
+            CliError::Git(error) => Some(error),
             CliError::Usage(_) => None,
         }
     }
@@ -652,6 +702,12 @@ impl From<TaskError> for CliError {
     }
 }
 
+impl From<GitError> for CliError {
+    fn from(error: GitError) -> Self {
+        CliError::Git(error)
+    }
+}
+
 impl From<TreeError> for CliError {
     fn from(error: TreeError) -> Self {
         CliError::Tree(error)
@@ -692,6 +748,21 @@ fn run(command: &Command) -> Result<(), CliError> {
             prefix,
             theme,
         } => cmd_render(file, format, *prefix, theme.as_deref()),
+        Command::Diff {
+            path,
+            format,
+            json,
+            stat,
+            tracked,
+            theme,
+        } => cmd_diff(
+            path.as_deref(),
+            format,
+            *json,
+            *stat,
+            *tracked,
+            theme.as_deref(),
+        ),
         Command::Toc { file, json } => cmd_toc(file, *json),
         Command::Tasks {
             path,
@@ -750,7 +821,8 @@ fn run(command: &Command) -> Result<(), CliError> {
             json,
             depth,
             all,
-        } => cmd_ls(dir.as_deref(), *json, *depth, *all),
+            git,
+        } => cmd_ls(dir.as_deref(), *json, *depth, *all, *git),
         Command::Grep {
             pattern,
             path,
@@ -2112,9 +2184,384 @@ struct LsRow {
     cancelled: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blocked: Option<usize>,
+    /// `--git` only. Absent for a clean file, and for a directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<git::Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<u32>,
 }
 
-fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(), CliError> {
+/// Every changed path in the repository containing `root`, keyed by the path
+/// spelling `tree::list_dir` produced — so the join is a hash lookup per row.
+///
+/// Empty when `root` is not in a repository, or when git could not answer.
+/// Both are ordinary: the columns simply do not appear.
+fn git_changes_for(root: &Path) -> HashMap<PathBuf, git::Change> {
+    let Some(repo) = git::discover(root) else {
+        return HashMap::new();
+    };
+    let query = git::Query {
+        // One shot, so an untracked file's lines are counted here rather than
+        // deferred to a screen-bounded queue the way the sidebar defers them.
+        count_untracked_lines: true,
+        ..git::Query::default()
+    };
+    let Ok(changes) = git::changes(&repo, &query) else {
+        return HashMap::new();
+    };
+
+    // `Change::path` is repository-relative; `Entry::path` is however the
+    // caller spelled it. Rebuild the caller's spelling rather than making every
+    // row canonicalize itself, which would be a syscall per row on a tree
+    // research 2.8 measured at 608k files.
+    let base = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let prefix = fs::canonicalize(&base)
+        .ok()
+        .and_then(|real| {
+            fs::canonicalize(&repo.root)
+                .ok()
+                .and_then(|repo_root| real.strip_prefix(&repo_root).ok().map(Path::to_path_buf))
+        })
+        .unwrap_or_default();
+
+    changes
+        .into_iter()
+        .filter_map(|change| {
+            let below = change.path.strip_prefix(&prefix).ok()?.to_path_buf();
+            Some((root.join(below), change))
+        })
+        .collect()
+}
+
+/// One changed file, as `mark diff` reports it.
+#[derive(Serialize)]
+struct DiffRow {
+    path: PathBuf,
+    status: git::Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<PathBuf>,
+    /// `null` for a file with no countable lines — a binary, per
+    /// `git diff --numstat`'s own `-` `-`. Never `0`, which would claim the
+    /// file did not change.
+    added: Option<u32>,
+    removed: Option<u32>,
+}
+
+/// The whole answer, so `--json` is one object rather than a bare array and can
+/// grow a field without breaking a consumer.
+#[derive(Serialize)]
+struct DiffReport {
+    /// `null` when the path is not in a repository.
+    repo: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    files: Vec<DiffRow>,
+    added: u32,
+    removed: u32,
+    /// Present only when a single file was named: its line-level hunks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hunks: Option<lines::LineDiff>,
+}
+
+/// `mark diff` — what changed against `HEAD`.
+fn cmd_diff(
+    path: Option<&Path>,
+    format: &Format,
+    json: bool,
+    stat: bool,
+    tracked_only: bool,
+    theme: Option<&str>,
+) -> Result<(), CliError> {
+    let target = path.unwrap_or_else(|| Path::new("."));
+
+    let Some(repo) = git::discover(target) else {
+        // Not an error. See the `Diff` variant's own documentation for why.
+        if json {
+            return print_json(&DiffReport {
+                repo: None,
+                head: None,
+                branch: None,
+                files: Vec::new(),
+                added: 0,
+                removed: 0,
+                hunks: None,
+            });
+        }
+        eprintln!("{}: not in a git repository", target.display());
+        return Ok(());
+    };
+
+    let query = git::Query {
+        untracked: !tracked_only,
+        // One shot, so counting an untracked file's lines here is fine — the
+        // per-visible-row deferral in
+        // `2026-08-28-git-badges-ride-the-sidebar-poll` exists for the sidebar's
+        // 2-second tick, not for a command a person just typed.
+        count_untracked_lines: true,
+        ..git::Query::default()
+    };
+    let changes = git::changes(&repo, &query)?;
+
+    // A single *file* narrows the report to itself and gains hunks.
+    let single = (!target.is_dir())
+        .then(|| relative_in(&repo, target))
+        .flatten();
+
+    let rows: Vec<DiffRow> = changes
+        .iter()
+        .filter(|change| single.as_ref().is_none_or(|only| change.path == *only))
+        .map(|change| DiffRow {
+            path: change.path.clone(),
+            status: change.status,
+            from: change.from.clone(),
+            added: change.added,
+            removed: change.removed,
+        })
+        .collect();
+
+    let added = rows.iter().filter_map(|row| row.added).sum();
+    let removed = rows.iter().filter_map(|row| row.removed).sum();
+
+    // The two content-bearing formats need both versions of the file, so they
+    // are only available for a single named file.
+    if format.html || (!stat && single.is_some()) {
+        if let Some(relative) = &single {
+            return diff_one_file(&repo, target, relative, format, json, stat, theme, rows);
+        }
+        if format.html {
+            return Err(CliError::Usage(
+                "--html needs a single file: a directory has no one document to render".to_owned(),
+            ));
+        }
+    }
+
+    if json {
+        return print_json(&DiffReport {
+            repo: Some(repo.root.clone()),
+            head: repo.head.clone(),
+            branch: repo.branch.clone(),
+            files: rows,
+            added,
+            removed,
+            hunks: None,
+        });
+    }
+
+    let color = format.ansi || (!format.plain && io::stdout().is_terminal());
+    let paint = DiffPaint::new(color, theme)?;
+    let mut out = Output::new();
+    for row in &rows {
+        emitln!(
+            out,
+            "{}  {}",
+            paint.counts(row.added, row.removed),
+            row.path.display()
+        )?;
+    }
+    if rows.is_empty() {
+        emitln!(out, "no changes against HEAD")?;
+    }
+    out.finish()
+}
+
+/// `mark diff <file>` — the counts, then the changed lines.
+#[allow(clippy::too_many_arguments)]
+fn diff_one_file(
+    repo: &git::Repo,
+    target: &Path,
+    relative: &Path,
+    format: &Format,
+    json: bool,
+    stat: bool,
+    theme: Option<&str>,
+    rows: Vec<DiffRow>,
+) -> Result<(), CliError> {
+    // HEAD's bytes, or empty for a file HEAD does not have — which is what
+    // makes an untracked note read as "every line added" rather than as an
+    // error.
+    let base = git::base_bytes(repo, target, git::DEFAULT_TIMEOUT)?.unwrap_or_default();
+    let working = read(target)?;
+    let diff = lines::diff(&base, &working);
+
+    if format.html {
+        let theme = resolve_theme(theme)?;
+        let old = Document::parse(&base);
+        let new = Document::parse(&working);
+        let document = diff::diff_document(&old, &new, &theme);
+        let title = format!("{} — changes vs HEAD", relative.display());
+        let mut out = Output::new();
+        emit!(
+            out,
+            "{}",
+            diff::standalone_diff(&title, &document.html, &theme)
+        )?;
+        return out.finish();
+    }
+
+    if json {
+        return print_json(&DiffReport {
+            repo: Some(repo.root.clone()),
+            head: repo.head.clone(),
+            branch: repo.branch.clone(),
+            files: rows,
+            added: diff.added,
+            removed: diff.removed,
+            hunks: Some(diff),
+        });
+    }
+
+    let color = format.ansi || (!format.plain && io::stdout().is_terminal());
+    let paint = DiffPaint::new(color, theme)?;
+    let mut out = Output::new();
+    emitln!(
+        out,
+        "{}  {}",
+        paint.counts(Some(diff.added), Some(diff.removed)),
+        relative.display()
+    )?;
+    if stat {
+        return out.finish();
+    }
+
+    if diff.coarse {
+        // Say so rather than printing a wall of lines that implies precision.
+        emitln!(out, "  (too different to diff line by line)")?;
+        return out.finish();
+    }
+
+    let base_lines: Vec<&str> = base.lines().collect();
+    let working_lines: Vec<&str> = working.lines().collect();
+    for hunk in &diff.hunks {
+        emitln!(out, "{}", paint.hunk_header(hunk))?;
+        for line in hunk.old.clone() {
+            if let Some(text) = base_lines.get(line as usize) {
+                emitln!(out, "{}", paint.removed_line(text))?;
+            }
+        }
+        for line in hunk.new.clone() {
+            if let Some(text) = working_lines.get(line as usize) {
+                emitln!(out, "{}", paint.added_line(text))?;
+            }
+        }
+    }
+    if diff.hunks.is_empty() {
+        emitln!(out, "  no changes against HEAD")?;
+    }
+    out.finish()
+}
+
+/// `target` as a repository-relative path, if it is inside `repo`.
+///
+/// Compared canonically, because `$TMPDIR` on macOS is a symlink into
+/// `/private` and git reports the resolved spelling — so a plain
+/// `strip_prefix` misses on exactly the paths the tests use.
+fn relative_in(repo: &git::Repo, target: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(target).ok()?;
+    if let Ok(relative) = absolute.strip_prefix(&repo.root) {
+        return Some(relative.to_path_buf());
+    }
+    let root = fs::canonicalize(&repo.root).ok()?;
+    let real = fs::canonicalize(&absolute).ok()?;
+    real.strip_prefix(&root).ok().map(Path::to_path_buf)
+}
+
+/// Colours for `mark diff`'s terminal output.
+///
+/// The same theme slots the rendered view uses — `success` for additions,
+/// `error` for removals, `muted` for the hunk header — so the terminal and the
+/// app agree about what green means. `--plain`, or a pipe, yields no escape
+/// sequences at all.
+struct DiffPaint {
+    add: String,
+    del: String,
+    dim: String,
+    reset: String,
+}
+
+impl DiffPaint {
+    fn new(color: bool, theme: Option<&str>) -> Result<DiffPaint, CliError> {
+        if !color {
+            return Ok(DiffPaint {
+                add: String::new(),
+                del: String::new(),
+                dim: String::new(),
+                reset: String::new(),
+            });
+        }
+        let pair = resolve_theme(theme)?;
+        let primary = pair.primary();
+        let fg = |key: &str, fallback: &str| {
+            primary.chrome(key).map_or_else(
+                || fallback.to_owned(),
+                |rgb| format!("\x1b[38;2;{};{};{}m", rgb.r, rgb.g, rgb.b),
+            )
+        };
+        Ok(DiffPaint {
+            add: fg("success", "\x1b[32m"),
+            del: fg("error", "\x1b[31m"),
+            dim: fg("muted", "\x1b[2m"),
+            reset: "\x1b[0m".to_owned(),
+        })
+    }
+
+    /// `+12 −3`, or the status word for a file whose lines cannot be counted.
+    fn counts(&self, added: Option<u32>, removed: Option<u32>) -> String {
+        match (added, removed) {
+            (Some(added), Some(removed)) => format!(
+                "{}+{added}{} {}\u{2212}{removed}{}",
+                self.add, self.reset, self.del, self.reset
+            ),
+            // A binary file. `+0 -0` would be a lie, so it says nothing
+            // numeric at all.
+            _ => format!("{}binary{}", self.dim, self.reset),
+        }
+    }
+
+    fn hunk_header(&self, hunk: &lines::Hunk) -> String {
+        // 1-based for display, which is the one place that conversion belongs
+        // (`lines::Hunk` is zero-based like every other offset in the core).
+        //
+        // A zero-length range prints the line *before* it rather than the line
+        // after, which is what `git diff` does and therefore what anyone
+        // reading this expects: a pure insertion after old line 5 is `-5,0`.
+        let start = |range: &std::ops::Range<u32>| {
+            if range.is_empty() {
+                range.start
+            } else {
+                range.start + 1
+            }
+        };
+        format!(
+            "{}  @@ -{},{} +{},{} @@{}",
+            self.dim,
+            start(&hunk.old),
+            hunk.old.end - hunk.old.start,
+            start(&hunk.new),
+            hunk.new.end - hunk.new.start,
+            self.reset
+        )
+    }
+
+    fn removed_line(&self, text: &str) -> String {
+        format!("  {}\u{2212} {text}{}", self.del, self.reset)
+    }
+
+    fn added_line(&self, text: &str) -> String {
+        format!("  {}+ {text}{}", self.add, self.reset)
+    }
+}
+
+fn cmd_ls(
+    dir: Option<&Path>,
+    json: bool,
+    depth: usize,
+    all: bool,
+    git_columns: bool,
+) -> Result<(), CliError> {
     let root = dir.unwrap_or_else(|| Path::new("."));
     let options = tree::Options {
         max_depth: depth.max(1),
@@ -2124,22 +2571,39 @@ fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(),
     };
     let entries = tree::list_dir(root, &options)?;
 
+    // One query for the whole repository, joined onto the entries in memory.
+    // `2026-08-28-git-differences-by-running-git` measured why this is the
+    // unit: above git's 5.9 ms process floor, the work over 1,709 files is
+    // ~3.7 ms, so one call answering every row beats one call per row by an
+    // order of magnitude.
+    let changes = if git_columns {
+        git_changes_for(root)
+    } else {
+        HashMap::new()
+    };
+
     let rows: Vec<LsRow> = entries
         .into_iter()
-        .map(|entry| LsRow {
-            path: entry.path,
-            name: entry.name,
-            is_dir: entry.is_dir,
-            depth: entry.depth,
-            title: entry.title,
-            open: entry.tasks.map(|t| t.open),
-            total: entry.tasks.map(|t| t.total),
-            outstanding: entry.tasks.map(|t| t.outstanding()),
-            active: entry.tasks.map(|t| t.active()),
-            in_progress: entry.tasks.map(|t| t.in_progress),
-            done: entry.tasks.map(|t| t.done),
-            cancelled: entry.tasks.map(|t| t.cancelled),
-            blocked: entry.tasks.map(|t| t.blocked),
+        .map(|entry| {
+            let change = changes.get(entry.path.as_path());
+            LsRow {
+                path: entry.path,
+                name: entry.name,
+                is_dir: entry.is_dir,
+                depth: entry.depth,
+                title: entry.title,
+                open: entry.tasks.map(|t| t.open),
+                total: entry.tasks.map(|t| t.total),
+                outstanding: entry.tasks.map(|t| t.outstanding()),
+                active: entry.tasks.map(|t| t.active()),
+                in_progress: entry.tasks.map(|t| t.in_progress),
+                done: entry.tasks.map(|t| t.done),
+                cancelled: entry.tasks.map(|t| t.cancelled),
+                blocked: entry.tasks.map(|t| t.blocked),
+                git: change.map(|c| c.status),
+                added: change.and_then(|c| c.added),
+                removed: change.and_then(|c| c.removed),
+            }
         })
         .collect();
 
@@ -2155,6 +2619,14 @@ fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(),
             continue;
         }
         let title = row.title.as_deref().unwrap_or("");
+        // Changes first, then the task badge — the same order the sidebar row
+        // draws them in (`2026-08-28-git-badges-ride-the-sidebar-poll`), so the
+        // two halves of the product read alike.
+        let changed = match (row.added, row.removed) {
+            (Some(added), Some(removed)) => format!("  +{added} \u{2212}{removed}"),
+            _ if row.git.is_some() => "  binary".to_owned(),
+            _ => String::new(),
+        };
         // Outstanding over active, which for a document with no extended
         // markers *is* open over total — so no existing listing changes. A file
         // whose every task is cancelled shows no count, on the same grounds the
@@ -2163,11 +2635,11 @@ fn cmd_ls(dir: Option<&Path>, json: bool, depth: usize, all: bool) -> Result<(),
             (Some(outstanding), Some(active)) if active > 0 => {
                 emitln!(
                     out,
-                    "{indent}{}  {title}  [{outstanding}/{active}]",
+                    "{indent}{}{changed}  {title}  [{outstanding}/{active}]",
                     row.name
                 )?;
             }
-            _ => emitln!(out, "{indent}{}  {title}", row.name)?,
+            _ => emitln!(out, "{indent}{}{changed}  {title}", row.name)?,
         }
     }
     out.finish()
@@ -2476,6 +2948,18 @@ struct Doctor {
     /// ``app_bundle``, which is the failure this line exists to name.
     registered_bundles: Vec<PathBuf>,
     syntect_asset_load_ms: f64,
+    /// The `git` this build would run, and its version.
+    ///
+    /// The first thing to ask when someone reports missing change badges,
+    /// because `2026-08-28-git-differences-by-running-git` makes every git
+    /// failure deliberately invisible in the UI. `None` means no usable git,
+    /// which on macOS most often means the Command Line Tools are not
+    /// installed — hence ``command_line_tools`` next to it, since `/usr/bin/git`
+    /// exists either way and is a shim that would raise a modal dialog if
+    /// invoked without them.
+    git: Option<PathBuf>,
+    git_version: Option<String>,
+    command_line_tools: bool,
     /// The default theme, and how many there are to choose from. Named
     /// `theme`, not `syntax_theme`: since M7 a theme is chrome *and* code.
     theme: String,
@@ -2635,6 +3119,9 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         app_bundle: client::app_bundle(),
         registered_bundles: client::registered_bundles(),
         syntect_asset_load_ms: ms(highlighter.asset_load()),
+        git: git::program().map(Path::to_path_buf),
+        git_version: git::version(),
+        command_line_tools: git::command_line_tools(),
         theme: theme::default_pair().name().to_owned(),
         themes: theme::list().0.len(),
         socket_path: socket.as_ref().ok().map(|path| path.display().to_string()),
@@ -2736,6 +3223,24 @@ fn cmd_doctor(json: bool) -> Result<(), CliError> {
         "syntect assets      {:.3} ms",
         doctor.syntect_asset_load_ms
     )?;
+    // The first thing to ask when change badges are missing, since every git
+    // failure is invisible in the UI by design.
+    match (&doctor.git, &doctor.git_version) {
+        (Some(path), Some(version)) => {
+            emitln!(out, "git                 {version} at {}", path.display())?;
+        }
+        _ => {
+            emitln!(
+                out,
+                "git                 not found{}",
+                if doctor.command_line_tools {
+                    ""
+                } else {
+                    " (no Command Line Tools; run `xcode-select --install`)"
+                }
+            )?;
+        }
+    }
     emitln!(
         out,
         "default theme       {} ({} available)",

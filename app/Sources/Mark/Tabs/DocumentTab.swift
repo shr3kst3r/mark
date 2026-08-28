@@ -40,7 +40,23 @@ public enum HydrationState: String, Sendable, Equatable {
 public struct DocumentMetadata: Sendable, Equatable {
 
     /// Per-state task counts, straight from `mark_tasks_json`.
-    public let tasks: TaskCounts
+    ///
+    /// Named `taskCounts` rather than `tasks` since
+    /// `2026-08-28-tabbed-document-pane` put the list itself beside it: two
+    /// fields where `.tasks.total` and `.tasks.count` meant different things one
+    /// line apart would be a trap rather than a saving.
+    public let taskCounts: TaskCounts
+
+    /// Every task, in document order, with its state, label, tags, priority and
+    /// byte span.
+    ///
+    /// Here for the same reason ``headings`` is, and free in the same sense:
+    /// ``taskCounts`` was already a `mark_tasks_json` call, and this keeps its
+    /// result instead of reducing it to five integers and dropping the array
+    /// (`2026-08-28-tabbed-document-pane`). It is what the sidebar's Tasks tab
+    /// lists, so — like the outline — it must be an answer about the *bytes*,
+    /// working for a tab whose web view has been torn down.
+    public let tasks: [Task]
 
     /// The document's own first heading, when it has one. Used for the tooltip
     /// and the accessibility description, not for the tab's label — the label
@@ -62,10 +78,14 @@ public struct DocumentMetadata: Sendable, Equatable {
     /// entry away.
     public let headings: [Heading]
 
-    public init(tasks: TaskCounts, documentTitle: String?, headings: [Heading] = []) {
-        self.tasks = tasks
+    public init(
+        taskCounts: TaskCounts, documentTitle: String?, headings: [Heading] = [],
+        tasks: [Task] = []
+    ) {
+        self.taskCounts = taskCounts
         self.documentTitle = documentTitle
         self.headings = headings
+        self.tasks = tasks
     }
 
     /// The same, for bytes already in hand.
@@ -83,9 +103,13 @@ public struct DocumentMetadata: Sendable, Equatable {
             // Counted in one place, by the same rule the core uses: outstanding
             // is open + in-progress + blocked, and cancelled leaves the
             // denominator (`2026-08-27-five-task-states`).
-            tasks: TaskCounts(tasks),
+            taskCounts: TaskCounts(tasks),
             documentTitle: heading?.isEmpty == true ? nil : heading,
-            headings: headings
+            headings: headings,
+            // Kept rather than dropped (`2026-08-28-tabbed-document-pane`):
+            // the array is already in hand, and the sidebar's Tasks tab is
+            // what reads it.
+            tasks: tasks
         )
     }
 
@@ -114,9 +138,13 @@ public struct DocumentMetadata: Sendable, Equatable {
             // Counted in one place, by the same rule the core uses: outstanding
             // is open + in-progress + blocked, and cancelled leaves the
             // denominator (`2026-08-27-five-task-states`).
-            tasks: TaskCounts(tasks),
+            taskCounts: TaskCounts(tasks),
             documentTitle: heading?.isEmpty == true ? nil : heading,
-            headings: headings
+            headings: headings,
+            // Kept rather than dropped (`2026-08-28-tabbed-document-pane`):
+            // the array is already in hand, and the sidebar's Tasks tab is
+            // what reads it.
+            tasks: tasks
         )
     }
 }
@@ -169,7 +197,7 @@ public final class DocumentTab: Identifiable {
     /// (`2026-08-27-five-task-states`). For a document containing only GFM
     /// markers this is the same number it always was.
     public var openTaskCount: Int? {
-        guard let outstanding = metadata?.tasks.outstanding, outstanding > 0 else { return nil }
+        guard let outstanding = metadata?.taskCounts.outstanding, outstanding > 0 else { return nil }
         return outstanding
     }
 

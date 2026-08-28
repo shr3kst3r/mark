@@ -209,6 +209,29 @@ struct ShellAssetsTests {
         #expect(js.contains("mark.ensureFullyRendered"))
     }
 
+    /// The sidebar's Tasks tab navigates through this, and
+    /// `2026-08-28-tabbed-document-pane` fixes both halves of how: the byte
+    /// offset is tried before the index, and the lookup goes through
+    /// `ensureFullyRendered` for ADR-2's reason — a task three quarters of the
+    /// way down the document is not in the DOM until it does.
+    ///
+    /// Asserted against the shipped source, because a page that scrolls to the
+    /// wrong task is indistinguishable from one that scrolls to the right one
+    /// when nothing has renumbered.
+    @Test("the shell exposes scrollToTask, byte offset first")
+    func scrollToTaskExists() throws {
+        let js = try code("shell.js")
+        #expect(js.contains("mark.scrollToTask"))
+        let body = try #require(js.range(of: "mark.scrollToTask")).upperBound
+        let tail = String(js[body...].prefix(900))
+        #expect(tail.contains("mark.ensureFullyRendered()"))
+        let byOffset = try #require(tail.range(of: "data-mk-start"))
+        let byIndex = try #require(tail.range(of: "data-mk-idx"))
+        #expect(
+            byOffset.lowerBound < byIndex.lowerBound,
+            "the byte offset is the identity; the index is the fallback")
+    }
+
     /// > **`requestAnimationFrame` is suspended for an occluded window.**
     ///
     /// M4 hit this — `mark reload` on a background window never resolved — and

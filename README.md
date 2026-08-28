@@ -4,7 +4,8 @@ A fast native markdown viewer and editor for macOS, with a headless CLI that is
 fast enough to call in a loop.
 
 Three panes in one window — a directory sidebar that also holds the front
-document's table of contents, a rendered preview, and an optional source editor.
+document's outline and its task list, a rendered preview, and an optional source
+editor.
 Tabs. Find-in-document that highlights every match at once. Sixteen themes that
 follow the system appearance instantly. Math and Mermaid diagrams rendered ahead
 of time in Rust, so a document ships no JavaScript. Click a checkbox and it
@@ -140,13 +141,27 @@ destination is refused rather than overwritten.
 > which is what keeps it affordable on the 608k-file tree the sidebar is built
 > against.
 
-**Under the tree, the front document's table of contents.** Its headings,
-nested by level, following whichever tab is selected — click one and the
-preview scrolls to it, the same jump `mark goto '#install'` makes. It costs no
-extra file read: the headings come from the `toc` call the tab bar's badge
-already pays for, so a tab whose web view has been torn down still has a correct
-outline. ⌃⌘T hides the pane; ⌃⌘S still hides the whole sidebar. Drag the divider
-to say how the two halves share the height.
+**Under the tree, the front document — in two tabs.** **Contents** is its
+headings, nested by level, following whichever tab is selected: click one and the
+preview scrolls to it, the same jump `mark goto '#install'` makes. **Tasks** is
+its checkboxes, grouped by state with the count of each, outstanding groups first
+and done and cancelled collapsed; above them, the badge's own arithmetic and the
+five-state breakdown — `3 of 4 outstanding · 1 open · 1 in progress · 1 blocked ·
+1 done · 2 cancelled`. Click a task and the preview scrolls to it, by the
+marker's byte offset rather than its index, so a document that renumbered under
+you still lands on the item you clicked. A row shows the text with its `@tags`
+stripped and the priority and due date in the margin.
+
+Neither tab costs an extra file read: both come from the `mark_tasks_json` and
+`toc` calls the tab bar's badge already pays for, so a tab whose web view has
+been torn down still has a correct outline *and* a correct task list. Ticking a
+box stays in the preview and in `mark check` — the pane navigates and never
+writes, which keeps one locked, byte-verified write path.
+
+⌃⌘T is Contents and ⌃⌘Y is Tasks; either one hides the pane when its own tab is
+already showing, and ⌃⌘S still hides the whole sidebar. The tab you last used is
+remembered, like the divider. Drag the divider to say how the two halves share
+the height.
 
 **Find in the document** with ⌘F, in a bar along the bottom edge. Every match is
 highlighted at once and the current one is picked out; ⌘G and ⇧⌘G — or ↩, ⇧↩,
@@ -294,7 +309,9 @@ box itself so a half-filled one is possible at all. A cancelled item is struck
 through and **leaves the denominator**: a list you abandoned two of seven items
 in reads `3/5`, not `3/7`, which is what stops the counts lying about work you
 dropped. Only `[ ]` and `[x]` are GitHub-flavoured markdown; `mark normalize`
-degrades the other three losslessly for publishing.
+degrades the other three losslessly for publishing. The sidebar's **Tasks** tab
+is where the five states are read back per document; `mark stats` and
+`mark ls --json` are where a script reads them.
 
 A task can also carry metadata in its own text — `@work`, `@due(2026-09-01)`,
 `@waiting-on-legal`, and `!`/`!!`/`!!!` for priority — as plain prose that every

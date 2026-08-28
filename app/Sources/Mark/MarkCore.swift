@@ -462,6 +462,48 @@ public enum TaskState: String, Codable, Equatable, Sendable, CaseIterable {
     /// read out.
     public var spoken: String { self == .inProgress ? "in progress" : rawValue }
 
+    /// The state's name where a person reads it — a group heading in the
+    /// sidebar's Tasks tab, a summary line. Sentence case, so a column of five
+    /// of them reads as prose rather than as Title Case Labels.
+    public var title: String {
+        switch self {
+        case .open: return "Open"
+        case .inProgress: return "In progress"
+        case .done: return "Done"
+        case .cancelled: return "Cancelled"
+        case .blocked: return "Blocked"
+        }
+    }
+
+    /// The marker as it is written in the document — the Swift side of
+    /// `core::tasks::State::byte` (`2026-08-27-five-task-states`), brackets
+    /// included.
+    ///
+    /// Shown rather than a drawn box or an SF Symbol: it is what the file says,
+    /// what `mark tasks` prints, and what the reader would type. A sidebar that
+    /// invented a sixth vocabulary for the same five bytes would be one more
+    /// thing to learn.
+    public var marker: String {
+        switch self {
+        case .open: return "[ ]"
+        case .inProgress: return "[/]"
+        case .done: return "[x]"
+        case .cancelled: return "[-]"
+        case .blocked: return "[?]"
+        }
+    }
+
+    /// The five states in the order the Tasks tab groups them: outstanding
+    /// first, in marker order, then the two that are finished with.
+    ///
+    /// Deliberately not ``allCases``, which is marker order and would put done
+    /// between in-progress and blocked. The pane is read to answer "what is
+    /// left", so what is left comes first
+    /// (`2026-08-28-tabbed-document-pane`).
+    public static let groupingOrder: [TaskState] = [
+        .open, .inProgress, .blocked, .done, .cancelled,
+    ]
+
     /// The action that puts a marker into this state.
     ///
     /// Every state is reachable, which is what lets the context menu and
@@ -668,6 +710,11 @@ public struct TaskCounts: Decodable, Equatable, Sendable {
         self.blocked = blocked
         self.total = total
     }
+
+    /// No tasks at all — what a pane shows for a document that has none, and
+    /// for no document at all. Both are `0/0`; the two are told apart by
+    /// whether there is a URL, not by the counts.
+    public static let empty = TaskCounts(total: 0)
 
     /// Count a document's tasks. **The one place in the app that does.**
     ///

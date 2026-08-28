@@ -23,10 +23,19 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     public let sidebar: TreeViewController
 
-    /// The sidebar's lower half: the front document's headings, clickable.
+    /// The document pane's Contents tab: the front document's headings,
+    /// clickable.
     public let toc: TableOfContentsViewController
 
-    /// The two of them, stacked. One sidebar still, as ADR-4 requires.
+    /// The document pane's Tasks tab: the front document's tasks, grouped by
+    /// state and clickable (`2026-08-28-tabbed-document-pane`).
+    public let taskList: TaskListViewController
+
+    /// The two tabs, and the control that chooses between them.
+    public let documentPane: DocumentPaneController
+
+    /// The tree and the document pane, stacked. One sidebar still, as ADR-4
+    /// requires.
     public let sidebarPane: SidebarPaneController
 
     /// This window's editor groups: one, or two when split
@@ -158,12 +167,22 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// web view exists" bug the ADR warns about.
     public var documentView: DocumentView? { tabs.selected?.documentView }
 
-    public init(root: URL, session: Session = Session(), history: OpenHistory = OpenHistory()) {
+    /// - Parameter preferences: where the document pane's tab is remembered.
+    ///   Injectable for the reason ``session`` is: it is a real user preference
+    ///   (`2026-08-28-tabbed-document-pane`), and a test run must not rewrite
+    ///   the developer's own.
+    public init(
+        root: URL, session: Session = Session(), history: OpenHistory = OpenHistory(),
+        preferences: UserDefaults = .standard
+    ) {
         self.session = session
         self.history = history
         sidebar = TreeViewController(root: root)
         toc = TableOfContentsViewController()
-        sidebarPane = SidebarPaneController(tree: sidebar, contents: toc)
+        taskList = TaskListViewController()
+        documentPane = DocumentPaneController(
+            contents: toc, taskList: taskList, defaults: preferences)
+        sidebarPane = SidebarPaneController(tree: sidebar, documentPane: documentPane)
         groups = TabGroups()
         groupSplit = GroupSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
 
@@ -289,6 +308,19 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // half answers "which file", this one answers "where in it".
         toc.onSelect = { [weak self] heading in
             self?.scrollToHeading(heading)
+        }
+        // The other tab of the same pane, answering the same question about the
+        // same document: where in it. It navigates and never writes — ticking a
+        // box stays in the preview and in `mark check`
+        // (`2026-08-28-tabbed-document-pane`).
+        taskList.onSelect = { [weak self] task in
+            self?.scrollToTask(task)
+        }
+        // The tab that is about to appear has not been fed while it was off
+        // screen — see ``updateDocumentPane()`` for the measurement that made
+        // that the rule.
+        documentPane.onNeedsContent = { [weak self] in
+            self?.updateDocumentPane()
         }
         // The focused group's document, asked for freshly every time: which
         // one that is changes with the selection, with the focus moving between
@@ -616,7 +648,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                         // The preview keeps showing the buffer: while dirty,
                         // the buffer is truth, and the file's version is not
                         // rendered anywhere until the user asks for it.
-                        tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+                        tab.refreshMetadata { [weak self] in
+                            self?.metadataDidChange(of: tab)
+                        }
                         continue
                     case .adopted, .converged:
                         // `adopted` has already pushed the text into the editor
@@ -627,10 +661,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 }
 
                 tab.refreshMetadata { [weak self, weak tab] in
-                    guard let self, let tab, let index = self.groups.index(of: tab),
-                        self.areas.indices.contains(index)
-                    else { return }
-                    self.areas[index].tabBar.reload()
+                    guard let self, let tab else { return }
+                    self.metadataDidChange(of: tab)
                 }
                 guard let view = tab.documentView else {
                     Log.watch.debug(
@@ -749,12 +781,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             // The sidebar's badge for this file now comes from the buffer (or
             // stops doing so), so the cached one is wrong either way.
             self.sidebar.invalidateBadge(for: tab.url)
-            tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+            tab.refreshMetadata { [weak self] in self?.metadataDidChange(of: tab) }
         }
         buffer.onSaved = { [weak self, weak tab] _ in
             guard let self, let tab else { return }
             self.sidebar.invalidateBadge(for: tab.url)
-            tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+            tab.refreshMetadata { [weak self] in self?.metadataDidChange(of: tab) }
         }
         buffer.onConflict = { [weak self, weak buffer] conflict in
             guard let self, let buffer else { return }
@@ -782,15 +814,15 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The one place the preview is fed while a tab is dirty, and it feeds it
     /// the **buffer**, never the file.
     private func updatePreview(of tab: DocumentTab, from source: String) {
-        // The outline is a function of the document, so it has to move when the
-        // document does. This is the only edit path that changes the headings
-        // without changing dirtiness — `onDirtyChanged` catches the first
-        // keystroke and the save, and every keystroke in between lands here.
-        // It costs the same background `toc` call the tab bar's badge already
-        // pays for, against the buffer rather than the file.
+        // The document pane is a function of the document, so it has to move
+        // when the document does. This is the only edit path that changes the
+        // headings and the tasks without changing dirtiness — `onDirtyChanged`
+        // catches the first keystroke and the save, and every keystroke in
+        // between lands here. It costs the same background `mark_tasks_json`
+        // call the tab bar's badge already pays for, against the buffer rather
+        // than the file.
         tab.refreshMetadata { [weak self] in
-            self?.tabBar.reload()
-            self?.updateTableOfContents()
+            self?.metadataDidChange(of: tab)
         }
         guard let view = tab.documentView else {
             // ADR-6's last constraint: *"the editor pane must not assume a
@@ -831,19 +863,64 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         return saved
     }
 
-    // MARK: - The table of contents
+    // MARK: - The document pane
 
-    /// Show the selected document's headings in the sidebar's lower half.
+    /// Whether the document pane is on screen showing `mode`.
+    public func documentPaneIsShowing(_ mode: DocumentPaneController.Mode) -> Bool {
+        sidebarPane.isDocumentPaneVisible && documentPane.mode == mode
+    }
+
+    /// Show the selected document in both tabs of the sidebar's lower half.
     ///
     /// Called from ``updateChrome()``, which is the one place that already runs
     /// on every tab switch, every tab-list change, and every metadata load —
     /// so there is no second list of "things that should also refresh the
-    /// outline" to forget to update. ``TableOfContentsViewController/show(_:for:)``
-    /// compares before it rebuilds, so calling it that often costs an array
-    /// comparison rather than a reload.
-    private func updateTableOfContents() {
+    /// document pane" to forget to update. Both children compare before they
+    /// rebuild, so calling this often costs two array comparisons rather than a
+    /// reload.
+    ///
+    /// Only the tab on screen is fed, and the reason is measured: on
+    /// `bench/corpus/1mb.md` (1,787 tasks) a rebuild of the Tasks tab costs
+    /// 1.9 ms to group plus an outline reload of ~1,800 rows, and a tab switch
+    /// would pay it whether or not anyone was looking at that tab. (It is *not*
+    /// what makes `mark-bench`'s `full select` gate fail; that reads the same
+    /// with either feeding strategy.) ``DocumentPaneController/onNeedsContent``
+    /// fills the other tab at the moment it becomes visible — before it is
+    /// installed, so no frame of the previous document is ever shown.
+    private func updateDocumentPane() {
         let tab = tabs.selected
-        toc.show(tab?.metadata?.headings ?? [], for: tab?.url)
+        switch documentPane.mode {
+        case .contents:
+            toc.show(tab?.metadata?.headings ?? [], for: tab?.url)
+        case .tasks:
+            taskList.show(
+                tab?.metadata?.tasks ?? [],
+                counts: tab?.metadata?.taskCounts ?? .empty,
+                for: tab?.url)
+        }
+    }
+
+    /// The one completion for a metadata refresh.
+    ///
+    /// Anything fed by `DocumentMetadata` is brought up to date here or it is
+    /// brought up to date nowhere. `2026-08-28-tabbed-document-pane` names the
+    /// five call sites that used to reload only the tab bar — the watcher, the
+    /// buffer going dirty, the save, and ⌘R — and the Tasks tab going stale
+    /// after a checkbox click is what turned that from a latent bug into a
+    /// visible one: a click writes one byte to the file, and the pane's own
+    /// numbers come back through the watcher.
+    private func metadataDidChange(of tab: DocumentTab) {
+        // The bar of the group that *owns* this tab, not the focused one: a
+        // background tab in the other half of a split has a badge too, and
+        // reloading the focused bar for it would redraw the wrong documents and
+        // leave the right ones stale. A tab in no group has no badge anywhere,
+        // so there is nothing to reload for it.
+        if let index = groups.index(of: tab), areas.indices.contains(index) {
+            areas[index].tabBar.reload()
+        }
+        // The pane draws the *selected* document, so a background tab's refresh
+        // changes nothing in it.
+        if tab === tabs.selected { updateDocumentPane() }
     }
 
     /// Scroll the preview to `heading`.
@@ -861,6 +938,33 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         Log.app.info("goto #\(heading.anchor, privacy: .public)")
         _Concurrency.Task { @MainActor in
             _ = try? await view.scrollToAnchor(heading.anchor)
+        }
+    }
+
+    /// Scroll the preview to `task`.
+    ///
+    /// Identified by its marker's byte offset, with the task index as the
+    /// fallback (`2026-08-28-tabbed-document-pane`): the pane's list comes from
+    /// the core's parse of the bytes and the page's `data-mk-idx` comes from the
+    /// last render of them, and for the moment between a metadata refresh and a
+    /// re-render those can be two different sets of bytes. The offset is the
+    /// identity the write path already re-verifies against; an index alone would
+    /// land on the wrong item exactly then.
+    ///
+    /// A dehydrated tab has no view and nothing to scroll — the pane still
+    /// listed the task correctly, which is the point of feeding it from
+    /// metadata. Focus stays in the pane, as it does for a heading.
+    public func scrollToTask(_ task: Task) {
+        guard let view = documentView else { return }
+        Log.app.info("goto task \(task.index) @\(task.start)")
+        _Concurrency.Task { @MainActor in
+            let found = (try? await view.scrollToTask(index: task.index, byteOffset: task.start))
+            if found != true {
+                // Not an error: the page is rendered from bytes that no longer
+                // hold this task, and the watcher is already on its way with
+                // the ones that do.
+                Log.app.info("task \(task.index) @\(task.start) is not in the rendered page")
+            }
         }
     }
 
@@ -1080,7 +1184,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         let selected = tabs.selected
         window?.title = selected?.title ?? "mark"
         window?.representedURL = selected?.url
-        updateTableOfContents()
+        updateDocumentPane()
         refreshAreas()
         // Only the window in front owns the menu bar. Without the guard, a
         // background window refreshing its badges would retitle ⌘1–⌘9 with
@@ -1524,7 +1628,7 @@ extension MainWindowController: CommandTarget {
         }
         await view.awaitReady()
         let report = await view.reload()
-        tab.refreshMetadata { [weak self] in self?.tabBar.reload() }
+        tab.refreshMetadata { [weak self] in self?.metadataDidChange(of: tab) }
         return report?.blocks ?? 0
     }
 
@@ -1749,8 +1853,8 @@ extension MainWindowController: CommandTarget {
             selected: tab == tabs.selected,
             resident: tab.state.isResident,
             preview: tab.isPreview,
-            openTasks: tab.metadata?.tasks.open,
-            totalTasks: tab.metadata?.tasks.total,
+            openTasks: tab.metadata?.taskCounts.open,
+            totalTasks: tab.metadata?.taskCounts.total,
             window: windows?.index(of: self),
             group: groups.index(of: tab)
         )
@@ -2152,9 +2256,30 @@ extension MainWindowController: NSMenuItemValidation {
         sidebar.focusPathBar()
     }
 
-    /// ⌃⌘T — show or hide the sidebar's table of contents.
+    /// ⌃⌘T — the document pane, showing the outline.
     @objc public func toggleTableOfContents(_ sender: Any?) {
-        sidebarPane.setContentsVisible(!sidebarPane.isContentsVisible)
+        toggleDocumentPane(.contents)
+    }
+
+    /// ⌃⌘Y — the document pane, showing the tasks.
+    @objc public func toggleTaskList(_ sender: Any?) {
+        toggleDocumentPane(.tasks)
+    }
+
+    /// One rule for both items: show the pane on this tab, or hide the pane if
+    /// this tab is already the one showing
+    /// (`2026-08-28-tabbed-document-pane`).
+    ///
+    /// It is what makes the pair read as a choice rather than as two
+    /// independent toggles — and it leaves ⌃⌘T behaving exactly as it did for a
+    /// reader who never presses ⌃⌘Y.
+    public func toggleDocumentPane(_ mode: DocumentPaneController.Mode) {
+        if sidebarPane.isDocumentPaneVisible, documentPane.mode == mode {
+            sidebarPane.setDocumentPaneVisible(false)
+            return
+        }
+        documentPane.mode = mode
+        sidebarPane.setDocumentPaneVisible(true)
     }
 
     /// Every item in the Edit ▸ Find submenu, told apart by `tag`.
@@ -2273,7 +2398,7 @@ extension MainWindowController: NSMenuItemValidation {
         _Concurrency.Task { @MainActor in
             await documentView.reload()
             tab.refreshMetadata { [weak self] in
-                self?.tabBar.reload()
+                self?.metadataDidChange(of: tab)
             }
         }
     }
@@ -2316,8 +2441,13 @@ extension MainWindowController: NSMenuItemValidation {
             // no group — a window with nothing open at all is exactly where
             // someone reaches for it.
             return true
+        // Two items, one pane: each is ticked only when the pane is on screen
+        // *and* showing its tab, so the pair reads as a choice.
         case #selector(toggleTableOfContents(_:)):
-            item.state = sidebarPane.isContentsVisible ? .on : .off
+            item.state = documentPaneIsShowing(.contents) ? .on : .off
+            return true
+        case #selector(toggleTaskList(_:)):
+            item.state = documentPaneIsShowing(.tasks) ? .on : .off
             return true
         case #selector(performFindAction(_:)):
             // The editor's find bar can do everything `NSTextFinder` defines,

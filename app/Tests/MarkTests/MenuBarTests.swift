@@ -136,6 +136,37 @@ struct MenuBarTests {
         }
     }
 
+    /// `2026-08-28-tabbed-document-pane`: the document pane's two tabs are two
+    /// View items, next to each other, one rule between them.
+    ///
+    /// ⌃⌘T keeps the key it has always had — a reader who never opens the Tasks
+    /// tab must find nothing changed — and Tasks takes ⌃⌘Y, which
+    /// `keyEquivalentsAreUnique` above is what proves was free. ⌘Y is File ▸
+    /// History and stays that; the modifier is the difference.
+    @Test("View ▸ Show Tasks sits under Show Table of Contents, on ⌃⌘Y")
+    func documentPaneItems() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        // The bar's own items carry no titles; the submenu does.
+        let view = try #require(
+            menu.items.compactMap(\.submenu).first { $0.title == "View" })
+
+        let contents = try #require(view.items.first { $0.title == "Show Table of Contents" })
+        let tasks = try #require(view.items.first { $0.title == "Show Tasks" })
+        #expect(contents.keyEquivalent == "t")
+        #expect(contents.keyEquivalentModifierMask == [.command, .control])
+        #expect(tasks.keyEquivalent == "y")
+        #expect(tasks.keyEquivalentModifierMask == [.command, .control])
+        #expect(tasks.action == #selector(MainWindowController.toggleTaskList(_:)))
+
+        let order = view.items.map(\.title)
+        let contentsIndex = try #require(order.firstIndex(of: "Show Table of Contents"))
+        let tasksIndex = try #require(order.firstIndex(of: "Show Tasks"))
+        #expect(
+            tasksIndex == contentsIndex + 1,
+            "the two tabs of one pane belong next to each other")
+    }
+
     /// `2026-08-26-new-documents-are-files-on-disk`.
     ///
     /// Three separate claims, and each has been wrong somewhere before:

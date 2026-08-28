@@ -4,12 +4,13 @@
 
 # ADR index
 
-12 active · 4 superseded
+13 active · 4 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-08-28-tabbed-document-pane](2026-08-28-tabbed-document-pane.md) | Make the sidebar's lower half a tabbed document pane, and give the five task states somewhere to be read | Accepted | app, sidebar, tabs | — | 2026-08-28 |
 | [2026-08-27-sidebar-polls-listed-directories](2026-08-27-sidebar-polls-listed-directories.md) | Refresh the sidebar by polling the directories it has already listed, gated on each one's own mtime | Accepted | app, sidebar | — | 2026-08-27 |
 | [2026-08-27-inline-task-metadata](2026-08-27-inline-task-metadata.md) | Carry task metadata as TaskPaper-style `@tag` and `@key(value)` tokens in the item's own text, parsed in the core and never compared against a clock at render time | Accepted | core, render, cli, app | — | 2026-08-27 |
 | [2026-08-27-five-task-states](2026-08-27-five-task-states.md) | Recognise five one-byte task states, and draw every checkbox ourselves so the fifth one is possible | Accepted | core, render, cli, app | — | 2026-08-27 |

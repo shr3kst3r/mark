@@ -181,7 +181,7 @@ struct TabBarTests {
         #expect(await harness.waitForMetadata(of: [tab]), "metadata never arrived")
         harness.bar.reload()
 
-        let counts = try #require(tab.metadata?.tasks)
+        let counts = try #require(tab.metadata?.taskCounts)
         #expect(counts == TaskCounts(
             open: 1, inProgress: 1, done: 1, cancelled: 2, blocked: 1, total: 6))
         #expect(tab.openTaskCount == 3, "open + in-progress + blocked")

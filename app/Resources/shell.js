@@ -791,6 +791,44 @@
     });
   };
 
+  /*
+   * Scroll to a task — the sidebar's Tasks tab clicking through to the item.
+   *
+   * Two identities, tried in this order, and the order is the decision
+   * (2026-08-28-tabbed-document-pane):
+   *
+   *   1. `start`, the marker's byte offset. What the write path re-verifies
+   *      before it changes a byte, and stable when the task set grows.
+   *   2. `index`, the `data-mk-idx` ordinal. The fallback, because the pane's
+   *      list is the core's parse of the bytes and these attributes are the last
+   *      render of them — for the moment between a metadata refresh and a
+   *      re-render those are two different sets of bytes, and an index alone
+   *      lands on the wrong item exactly then.
+   *
+   * Scrolls the *item*, not the checkbox: a reader clicking a task wants to see
+   * its text, and `li` is where the text is. Centred rather than aligned to the
+   * top, because a task is one line and a line pinned to the top of the viewport
+   * reads as having nothing after it.
+   *
+   * Routed through ensureFullyRendered for ADR-2's reason: a task three quarters
+   * of the way down the document is not in the DOM until it is.
+   */
+  mark.scrollToTask = function (index, start) {
+    return mark.ensureFullyRendered().then(function () {
+      var input = null;
+      if (start !== null && start !== undefined) {
+        input = document.querySelector('.mk-task[data-mk-start="' + String(start) + '"]');
+      }
+      if (!input && index !== null && index !== undefined) {
+        input = document.querySelector('.mk-task[data-mk-idx="' + String(index) + '"]');
+      }
+      if (!input) return false;
+      var item = input.closest("li") || input;
+      item.scrollIntoView({ block: "center", behavior: "auto" });
+      return true;
+    });
+  };
+
   /* ---------------------------------------------------------------- finding */
 
   /*

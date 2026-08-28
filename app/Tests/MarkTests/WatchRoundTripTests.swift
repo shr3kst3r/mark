@@ -17,12 +17,17 @@ final class RoundTripHarness {
     let fixture: PatchFixture
     let controller: MainWindowController
 
+    /// The document pane's tab is a real preference, so the harness gets its own
+    /// domain rather than moving the developer's (`VolatileDefaults`).
+    let preferences = VolatileDefaults()
+
     init(residentLimit: Int = TabStore.defaultResidentLimit) throws {
         fixture = try PatchFixture()
         controller = MainWindowController(
             root: fixture.directory,
             session: Session(
-                url: fixture.directory.appendingPathComponent("session.json"), debounce: 0.05)
+                url: fixture.directory.appendingPathComponent("session.json"), debounce: 0.05),
+            preferences: preferences.defaults
         )
         controller.tabs.residentLimit = residentLimit
     }
@@ -380,7 +385,7 @@ struct WatchRoundTripTests {
         #expect(background.documentView == nil)
         #expect(
             await harness.waitUntil("the initial badge") { background.metadata != nil })
-        #expect(background.metadata?.tasks == TaskCounts(open: 1, total: 1))
+        #expect(background.metadata?.taskCounts == TaskCounts(open: 1, total: 1))
 
         // The rewrite drops one item and starts another, so the badge has to
         // move for two reasons at once: `[-]` leaves the denominator and `[/]`
@@ -389,12 +394,12 @@ struct WatchRoundTripTests {
             "# A\n\n- [ ] one\n- [/] two\n- [x] three\n- [-] four\n", to: "a.md")
         #expect(
             await harness.waitUntil("the badge to follow the file") {
-                background.metadata?.tasks
+                background.metadata?.taskCounts
                     == TaskCounts(
                         open: 1, inProgress: 1, done: 1, cancelled: 1, blocked: 0, total: 4)
             })
         #expect(background.openTaskCount == 2, "open + in-progress")
-        #expect(background.metadata?.tasks.active == 3, "the dropped item left the denominator")
+        #expect(background.metadata?.taskCounts.active == 3, "the dropped item left the denominator")
         #expect(background.state == .dehydrated, "the watcher hydrated a tab nobody is looking at")
         #expect(background.documentView == nil)
     }

@@ -179,7 +179,7 @@ struct TabStoreTests {
         #expect(a.state == .dehydrated, "limit 1 should have evicted a.md")
         #expect(a.webView == nil)
         #expect(a.openTaskCount == TabFixture.openTaskCounts["a.md"])
-        #expect(a.metadata?.tasks.total == 5)
+        #expect(a.metadata?.taskCounts.total == 5)
         #expect(d.openTaskCount == TabFixture.openTaskCounts["d.md"])
     }
 
@@ -188,7 +188,7 @@ struct TabStoreTests {
         let harness = try TabHarness()
         let c = harness.open("c.md")
         #expect(await harness.waitForMetadata(of: [c]))
-        #expect(c.metadata?.tasks.total == 2)
+        #expect(c.metadata?.taskCounts.total == 2)
         #expect(c.openTaskCount == nil)
     }
 
@@ -206,8 +206,8 @@ struct TabStoreTests {
         #expect(extended.state == .dehydrated, "limit 1 should have evicted extended.md")
         #expect(extended.webView == nil)
         #expect(extended.openTaskCount == 3, "open + in-progress + blocked")
-        #expect(extended.metadata?.tasks.active == 4, "two of six were dropped")
-        #expect(extended.metadata?.tasks.cancelled == 2)
+        #expect(extended.metadata?.taskCounts.active == 4, "two of six were dropped")
+        #expect(extended.metadata?.taskCounts.cancelled == 2)
     }
 
     /// The prose-bracket regression from research §2.4, asserted from the tab
@@ -217,7 +217,7 @@ struct TabStoreTests {
         let harness = try TabHarness()
         let b = harness.open("b.md")
         #expect(await harness.waitForMetadata(of: [b]))
-        #expect(b.metadata?.tasks.total == 3, "one open, two checked, zero from the prose bracket")
+        #expect(b.metadata?.taskCounts.total == 3, "one open, two checked, zero from the prose bracket")
     }
 
     @Test("a tab whose file has vanished keeps its last known badge instead of crashing")

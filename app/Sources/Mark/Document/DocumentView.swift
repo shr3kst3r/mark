@@ -542,6 +542,24 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         return (result as? Bool) ?? false
     }
 
+    /// Scroll to a task, reporting whether the page holds it.
+    ///
+    /// `byteOffset` is the marker's `data-mk-start` and is tried first; `index`
+    /// is its `data-mk-idx` and is the fallback. Two identities because they
+    /// fail differently, and the reasoning is in
+    /// `2026-08-28-tabbed-document-pane`: an index renumbers when the task set
+    /// grows, and the pane can be a moment ahead of the rendered page.
+    ///
+    /// Routed through `shell.js`'s `scrollToTask`, which forces the background
+    /// fill first for the reason ``scrollToAnchor(_:)`` does. `false` means the
+    /// page really does not hold that task.
+    public func scrollToTask(index: Int, byteOffset: Int) async throws -> Bool {
+        let result = try await call(
+            "return window.mark.scrollToTask(index, start);",
+            arguments: ["index": index, "start": byteOffset])
+        return (result as? Bool) ?? false
+    }
+
     // MARK: - Finding
 
     /// Find every occurrence of `text`, highlight them all, and go to one.

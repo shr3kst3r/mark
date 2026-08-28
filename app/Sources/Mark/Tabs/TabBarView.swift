@@ -824,7 +824,7 @@ public final class TabItemView: NSView {
     /// ``TaskCounts``' — rather than two.
     public override func accessibilityValueDescription() -> String? {
         guard let tab else { return nil }
-        guard let counts = tab.metadata?.tasks, counts.active > 0 else { return "no tasks" }
+        guard let counts = tab.metadata?.taskCounts, counts.active > 0 else { return "no tasks" }
         return "\(counts.outstanding) of \(counts.active) tasks outstanding"
     }
 

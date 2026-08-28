@@ -551,13 +551,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "Show Editor",
             action: #selector(MainWindowController.toggleEditorPane(_:)), keyEquivalent: "e"
         ).keyEquivalentModifierMask = [.command, .option]
-        // The sidebar's lower half. A toggle rather than a preference because
-        // it is a thing you want for a long document and not for a short one,
-        // and ⌃⌘S — which hides the whole sidebar — is too coarse to be the
+        // The sidebar's lower half, and which of its two tabs is showing
+        // (`2026-08-28-tabbed-document-pane`). A toggle rather than a preference
+        // because it is a thing you want for a long document and not for a short
+        // one, and ⌃⌘S — which hides the whole sidebar — is too coarse to be the
         // only answer.
+        //
+        // One rule for both items: show the pane on this tab, or hide the pane
+        // if this tab is already the one showing. So ⌃⌘T behaves exactly as it
+        // always has for a reader who never presses ⌃⌘Y, and the pair reads as a
+        // choice rather than as two independent toggles.
         viewMenu.addItem(
             withTitle: "Show Table of Contents",
             action: #selector(MainWindowController.toggleTableOfContents(_:)), keyEquivalent: "t"
+        ).keyEquivalentModifierMask = [.command, .control]
+        viewMenu.addItem(
+            withTitle: "Show Tasks",
+            action: #selector(MainWindowController.toggleTaskList(_:)), keyEquivalent: "y"
         ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 

@@ -1,14 +1,20 @@
 import AppKit
 import Foundation
 
-/// The sidebar, split: the directory tree on top, the front document's table of
-/// contents underneath.
+/// The sidebar, split: the directory tree on top, the front document's pane
+/// underneath.
 ///
 /// ADR-4 makes the shared sidebar the reason `mark` is one window rather than N
 /// native tabs — *"the sidebar shows the project tree, not a per-document
 /// outline"*. This adds the per-document outline **without** taking that back:
 /// there is still one sidebar, in one window, and the outline half follows the
 /// front document exactly the way the tree half already follows it.
+///
+/// The lower half is a ``DocumentPaneController`` — the outline or the tasks,
+/// chosen by a control in its own header (`2026-08-28-tabbed-document-pane`).
+/// That changes nothing here: the split, the divider's autosave, the minimum
+/// heights and the collapse behaviour all belong to the geometry, and the
+/// geometry did not change when the lower half gained a second thing to show.
 ///
 /// A plain `NSSplitView` inside a plain `NSViewController`, and deliberately
 /// **not** a nested `NSSplitViewController`. `toggleSidebar(_:)` is dispatched
@@ -23,10 +29,16 @@ public final class SidebarPaneController: NSViewController {
     /// means by "the sidebar".
     public let tree: TreeViewController
 
-    /// The front document's headings.
-    public let contents: TableOfContentsViewController
+    /// The front document's pane: headings or tasks.
+    public let documentPane: DocumentPaneController
 
-    /// How tall the contents pane is when it has never been dragged.
+    /// The front document's headings — the pane's Contents tab.
+    public var contents: TableOfContentsViewController { documentPane.contents }
+
+    /// The front document's tasks — the pane's Tasks tab.
+    public var taskList: TaskListViewController { documentPane.taskList }
+
+    /// How tall the document pane is when it has never been dragged.
     public static let defaultContentsHeight: CGFloat = 220
 
     /// Neither half may be squeezed below this. Two rows and a header.
@@ -38,12 +50,12 @@ public final class SidebarPaneController: NSViewController {
     /// applied on first layout and never again.
     private var didPlaceDivider = false
 
-    public init(tree: TreeViewController, contents: TableOfContentsViewController) {
+    public init(tree: TreeViewController, documentPane: DocumentPaneController) {
         self.tree = tree
-        self.contents = contents
+        self.documentPane = documentPane
         super.init(nibName: nil, bundle: nil)
         addChild(tree)
-        addChild(contents)
+        addChild(documentPane)
     }
 
     @available(*, unavailable)
@@ -61,7 +73,7 @@ public final class SidebarPaneController: NSViewController {
         // one for every project they open.
         splitView.autosaveName = "dev.mark.SidebarSplit"
         splitView.addSubview(tree.view)
-        splitView.addSubview(contents.view)
+        splitView.addSubview(documentPane.view)
         splitView.delegate = self
         self.splitView = splitView
         view = splitView
@@ -72,7 +84,7 @@ public final class SidebarPaneController: NSViewController {
         placeDividerIfNeeded()
     }
 
-    /// Give the contents pane its default share, once.
+    /// Give the document pane its default share, once.
     ///
     /// Skipped entirely when `autosaveName` has already restored a position —
     /// which is what the height check is: a restored divider leaves the lower
@@ -82,9 +94,9 @@ public final class SidebarPaneController: NSViewController {
     private func placeDividerIfNeeded() {
         guard !didPlaceDivider, splitView.bounds.height > 0 else { return }
         didPlaceDivider = true
-        guard !splitView.isSubviewCollapsed(contents.view) else { return }
+        guard !splitView.isSubviewCollapsed(documentPane.view) else { return }
         let height = splitView.bounds.height
-        let existing = contents.view.frame.height
+        let existing = documentPane.view.frame.height
         // An even 50/50 split is `NSSplitView`'s answer when nothing was
         // restored, and it is the wrong one here: the tree is the pane you
         // scroll and the outline is the pane you glance at.
@@ -93,25 +105,30 @@ public final class SidebarPaneController: NSViewController {
         splitView.setPosition(height - wanted, ofDividerAt: 0)
     }
 
-    // MARK: - Showing and hiding the contents pane
+    // MARK: - Showing and hiding the document pane
 
-    public var isContentsVisible: Bool {
-        isViewLoaded && !splitView.isSubviewCollapsed(contents.view) && !contents.view.isHidden
+    public var isDocumentPaneVisible: Bool {
+        isViewLoaded && !splitView.isSubviewCollapsed(documentPane.view)
+            && !documentPane.view.isHidden
     }
 
-    /// Show or hide the outline half. The tree half is always on screen —
+    /// Show or hide the lower half. The tree half is always on screen —
     /// ⌃⌘S hides the whole sidebar, which is the coarse control.
-    public func setContentsVisible(_ visible: Bool) {
-        guard isViewLoaded, visible != isContentsVisible else { return }
-        contents.view.isHidden = !visible
-        if visible, contents.view.frame.height < Self.minimumPaneHeight {
+    ///
+    /// Visibility is the pane's, not a tab's: ⌃⌘T and ⌃⌘Y choose *which* tab is
+    /// on screen, and this says whether any of it is
+    /// (`2026-08-28-tabbed-document-pane`).
+    public func setDocumentPaneVisible(_ visible: Bool) {
+        guard isViewLoaded, visible != isDocumentPaneVisible else { return }
+        documentPane.view.isHidden = !visible
+        if visible, documentPane.view.frame.height < Self.minimumPaneHeight {
             let height = splitView.bounds.height
             let wanted = min(Self.defaultContentsHeight, max(Self.minimumPaneHeight, height * 0.4))
             splitView.setPosition(height - wanted, ofDividerAt: 0)
         }
         splitView.adjustSubviews()
         splitView.needsLayout = true
-        Log.tree.info("table of contents \(visible ? "shown" : "hidden")")
+        Log.tree.info("document pane \(visible ? "shown" : "hidden")")
     }
 }
 
@@ -132,13 +149,13 @@ extension SidebarPaneController: @MainActor NSSplitViewDelegate {
     }
 
     public func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
-        subview === contents.view
+        subview === documentPane.view
     }
 
     public func splitView(
         _ splitView: NSSplitView, shouldCollapseSubview subview: NSView,
         forDoubleClickOnDividerAt index: Int
     ) -> Bool {
-        subview === contents.view
+        subview === documentPane.view
     }
 }

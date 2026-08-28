@@ -177,9 +177,13 @@ struct TableOfContentsTests {
 @MainActor
 struct SidebarPaneTests {
 
-    @Test("the sidebar is the tree above the table of contents")
+    @Test("the sidebar is the tree above the document pane")
     func layout() throws {
-        let controller = MainWindowController(root: URL(fileURLWithPath: "/tmp"))
+        // Volatile preferences, because which tab is installed depends on the
+        // remembered one and this test is about the tree above it.
+        let preferences = VolatileDefaults()
+        let controller = MainWindowController(
+            root: URL(fileURLWithPath: "/tmp"), preferences: preferences.defaults)
         let split = try #require(controller.window?.contentViewController as? NSSplitViewController)
         // Still one sidebar item, still collapsible — ADR-4's window is
         // unchanged; only what is inside the sidebar is new.
@@ -191,7 +195,10 @@ struct SidebarPaneTests {
         #expect(!pane.isVertical, "the halves are stacked, not side by side")
         #expect(pane.subviews.count == 2)
         #expect(pane.subviews[0] === controller.sidebar.view)
-        #expect(pane.subviews[1] === controller.toc.view)
+        // The lower half is the tabbed pane, and the outline is a tab inside it
+        // (`2026-08-28-tabbed-document-pane`).
+        #expect(pane.subviews[1] === controller.documentPane.view)
+        #expect(controller.toc.view.superview === controller.documentPane.view)
     }
 
     /// A nested `NSSplitViewController` would swallow ⌃⌘S whenever the focus
@@ -213,18 +220,21 @@ struct SidebarPaneTests {
         return here + controller.children.flatMap { splitViewControllers(under: $0) }
     }
 
-    @Test("the table of contents can be hidden without hiding the tree")
+    @Test("the document pane can be hidden without hiding the tree")
     func toggling() {
-        let controller = MainWindowController(root: URL(fileURLWithPath: "/tmp"))
+        let preferences = VolatileDefaults()
+        let controller = MainWindowController(
+            root: URL(fileURLWithPath: "/tmp"), preferences: preferences.defaults)
         _ = controller.sidebarPane.view
-        #expect(controller.sidebarPane.isContentsVisible)
+        #expect(controller.sidebarPane.isDocumentPaneVisible)
+        #expect(controller.documentPane.mode == .contents)
 
         controller.toggleTableOfContents(nil)
-        #expect(!controller.sidebarPane.isContentsVisible)
+        #expect(!controller.sidebarPane.isDocumentPaneVisible)
         #expect(!controller.sidebar.view.isHidden)
 
         controller.toggleTableOfContents(nil)
-        #expect(controller.sidebarPane.isContentsVisible)
+        #expect(controller.sidebarPane.isDocumentPaneVisible)
     }
 
     @Test("opening a document fills the table of contents")

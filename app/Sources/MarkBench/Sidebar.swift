@@ -620,6 +620,127 @@ func runSidebarGates() async {
     await measureBadges()
     checkFilterAndReveal()
     checkPathBar()
+    await checkTaskPaneNavigation()
+}
+
+/// The document pane's Tasks tab, clicking through to a task in a real page.
+///
+/// `2026-08-28-tabbed-document-pane` puts one half of this feature in a
+/// `WKWebView`, which is where nothing in the test suite can follow it: a
+/// `scrollToTask` that resolves an element and scrolls nothing looks exactly
+/// like one that worked. So this gate reads the page's *own* answer to "where
+/// am I in the source" — `mark.sourceTop()`, the byte offset the editor pane
+/// already follows — and requires it to land inside the task the pane was asked
+/// to navigate to.
+///
+/// The last task is the one used, and the filler above it is the point: it is
+/// below the fold, so ADR-2's background fill has to have run for the element to
+/// exist at all.
+@MainActor
+func checkTaskPaneNavigation() async {
+    print("")
+    print("The Tasks tab, clicking through to a task in the page:")
+
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("mark-bench-taskpane-\(ProcessInfo.processInfo.processIdentifier)")
+    try? FileManager.default.removeItem(at: directory)
+    do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    } catch {
+        require(false, "task pane corpus: \(error)")
+        return
+    }
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var source = "# Tasks\n\n- [ ] the first one\n\n"
+    for index in 0..<600 {
+        source += "Paragraph \(index), filler so the last task is well below the fold.\n\n"
+    }
+    source += "- [?] the last one, blocked\n"
+    let url = directory.appendingPathComponent("tasks.md")
+    do {
+        try source.write(to: url, atomically: true, encoding: .utf8)
+    } catch {
+        require(false, "task pane corpus: \(error)")
+        return
+    }
+
+    // A throwaway preferences domain: the pane's tab is a real preference, and a
+    // benchmark that moved the developer's would be a benchmark with a side
+    // effect. Removed below.
+    let domain = "dev.mark.bench.\(ProcessInfo.processInfo.processIdentifier)"
+    let preferences = UserDefaults(suiteName: domain) ?? .standard
+    defer { UserDefaults().removePersistentDomain(forName: domain) }
+
+    let controller = MainWindowController(
+        root: directory,
+        session: Session(url: directory.appendingPathComponent("session.json"), debounce: 0.05),
+        preferences: preferences)
+    controller.window?.setContentSize(NSSize(width: 1200, height: 900))
+    controller.showWindow(activating: true)
+    defer {
+        controller.tabs.closeAll()
+        controller.window?.orderOut(nil)
+        controller.window?.close()
+    }
+
+    // `open(_:)` rather than `tabs.open(_:)`: the window's own path is what
+    // hydrates the tab into the focused group's container, and a tab with no
+    // web view would make this gate measure nothing.
+    controller.open(url)
+    guard let tab = controller.tabs.selected else {
+        require(false, "the window opened no tab")
+        return
+    }
+    await tab.documentView?.awaitReady()
+    await tab.documentView?.ensureFullyRendered()
+
+    // ⌃⌘Y, which is what fills the Tasks tab: the pane feeds only the tab on
+    // screen (see `MainWindowController.updateDocumentPane()` for the
+    // measurement behind that), so this gate has to open it the way a reader
+    // does.
+    controller.toggleTaskList(nil)
+    require(
+        controller.documentPaneIsShowing(.tasks), "⌃⌘Y put the Tasks tab on screen")
+
+    // Metadata is loaded off the main thread; when it lands, the funnel feeds
+    // the tab that is on screen, so waiting is all this has to do.
+    for _ in 0..<200 where controller.taskList.tasks.isEmpty {
+        try? await _Concurrency.Task.sleep(for: .milliseconds(25))
+    }
+    require(tab.documentView != nil, "the tab is hydrated, so there is a page to scroll")
+
+    let tasks = controller.taskList.tasks
+    line("tasks the pane lists", "\(tasks.count)")
+    line("summary", controller.taskList.summary?.replacingOccurrences(of: "\n", with: " · ") ?? "—")
+    require(tasks.count == 2, "the pane lists both tasks")
+    guard let last = tasks.last else { return }
+
+    // Exactly what a click on the row does.
+    controller.taskList.onSelect?(last)
+    // The scroll is one `evaluateJavaScript` round trip behind the click, and
+    // the page reports its position on a throttle.
+    try? await _Concurrency.Task.sleep(for: .milliseconds(600))
+
+    guard let view = tab.documentView else {
+        require(false, "the tab has no web view to have scrolled")
+        return
+    }
+    let sourceTop = PaintReport.double(try? await view.call("return window.mark.sourceTop();"))
+    let pageY = PaintReport.double(try? await view.call("return window.pageYOffset;"))
+    line("task byte span", "\(last.start)..\(last.end)")
+    line("page reports source byte", String(format: "%.0f", sourceTop))
+    line("page scrolled to", String(format: "%.0f pt", pageY))
+
+    require(pageY > 0, "the page scrolled somewhere")
+    // Within the task's own block rather than exactly at its marker: the
+    // element is centred in the viewport, so the top of the viewport is a
+    // little above it, and `sourceTop` interpolates through the block it lands
+    // in.
+    let slack = 2_000.0
+    require(
+        abs(sourceTop - Double(last.start)) < slack,
+        "the page landed within \(Int(slack)) bytes of the task the pane asked for")
 }
 
 /// The path bar at widths that do not fit, which is the case the first cut got

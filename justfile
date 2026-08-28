@@ -328,7 +328,11 @@ bench-app: build-rust
         echo "generating the class-vs-inline highlighting pair..."
         (cd bench/highlight-format && cargo run --release -q -- ../corpus/1mb.md ../corpus/format)
     fi
-    (cd app && swift build -c release {{swift_build_flags}} --product mark-bench --product mark)
+    # Two invocations, deliberately: `swift build` honours only the *last*
+    # `--product` on a command line, so `--product mark-bench --product mark`
+    # silently built only `mark` and the gate below died on a missing binary.
+    (cd app && swift build -c release {{swift_build_flags}} --product mark-bench)
+    (cd app && swift build -c release {{swift_build_flags}} --product mark)
     # Both gates run even if the first fails. A memory regression hiding the
     # session round trip would mean fixing one thing and discovering the next
     # only on the following run.

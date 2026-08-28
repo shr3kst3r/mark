@@ -54,11 +54,21 @@ public final class TOCNode {
     }
 }
 
-/// The sidebar's lower half: the selected document's headings, clickable.
+/// The document pane's Contents tab: the selected document's headings,
+/// clickable.
 ///
 /// The tree above it answers *"which file"*; this answers *"where in it"*, and
 /// the two are stacked rather than tabbed because moving between them is the
 /// normal reading loop rather than a mode switch.
+///
+/// That is still true, and it is **not** what
+/// `2026-08-28-tabbed-document-pane` changed. What it added is a second answer
+/// to *"where in it"* — the tasks — and headings-versus-tasks *is* a mode
+/// switch: a reader outlining a document is not simultaneously working its
+/// checklist. So the tree and this pane stay stacked, and this view is now one
+/// of two tabs inside the lower half. ``DocumentPaneController`` owns the header
+/// and the choice; this class is unchanged apart from no longer drawing a header
+/// of its own.
 ///
 /// Three properties this pane is written to keep, each of which is easy to lose
 /// by accident:
@@ -378,14 +388,17 @@ public final class TOCCellView: NSTableCellView {
     }
 }
 
-/// A section header, the outline view, and the empty-state label, stacked.
+/// The outline view and the empty-state label, stacked.
 ///
 /// Frame-based for the same reason ``SidebarContainerView`` is: two children
 /// and a subtraction.
+///
+/// **No header of its own.** It had one — a "Contents" label — until
+/// `2026-08-28-tabbed-document-pane` made this view one of two things the
+/// document pane can show; the header is now the pane's, because it holds the
+/// control that chooses between them.
 @MainActor
 public final class TableOfContentsContainerView: NSView {
-
-    public static let headerHeight: CGFloat = 22
 
     /// What to say instead of an outline, or `nil` to show the outline.
     public var emptyMessage: String? {
@@ -396,7 +409,6 @@ public final class TableOfContentsContainerView: NSView {
         }
     }
 
-    private let header = NSTextField(labelWithString: "Contents")
     private let emptyLabel = NSTextField(labelWithString: "")
     private let scrollView: NSScrollView
 
@@ -414,10 +426,6 @@ public final class TableOfContentsContainerView: NSView {
         backing.state = .followsWindowActiveState
         backing.autoresizingMask = [.width, .height]
         addSubview(backing)
-
-        header.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        header.textColor = .secondaryLabelColor
-        addSubview(header)
 
         emptyLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         emptyLabel.textColor = .tertiaryLabelColor
@@ -438,12 +446,8 @@ public final class TableOfContentsContainerView: NSView {
 
     public override func layout() {
         backing.frame = bounds
-        header.frame = NSRect(
-            x: 8, y: 3, width: max(0, bounds.width - 16), height: Self.headerHeight - 3)
-        let top = Self.headerHeight + 2
-        let body = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
-        scrollView.frame = body
-        emptyLabel.frame = NSRect(x: 8, y: top + 4, width: max(0, bounds.width - 16), height: 16)
+        scrollView.frame = bounds
+        emptyLabel.frame = NSRect(x: 8, y: 4, width: max(0, bounds.width - 16), height: 16)
         super.layout()
     }
 }

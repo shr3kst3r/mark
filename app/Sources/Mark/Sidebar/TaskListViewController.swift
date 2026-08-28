@@ -35,12 +35,15 @@ public final class TaskRowNode {
     /// be showing its source rather than its content.
     public var label: String { task.label.isEmpty ? task.text : task.label }
 
+    /// `!!` on its own — what a row too narrow for the date still has room for.
+    public var priorityMark: String? {
+        task.priority > 0 ? String(repeating: "!", count: min(task.priority, 3)) : nil
+    }
+
     /// `!!` and `@due(…)`, as the row's trailing text — or `nil` when the task
     /// carries neither.
     public var decoration: String? {
-        var parts: [String] = []
-        if task.priority > 0 { parts.append(String(repeating: "!", count: min(task.priority, 3))) }
-        if let due = task.due { parts.append(due) }
+        let parts = [priorityMark, task.due].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: "  ")
     }
 
@@ -387,6 +390,29 @@ extension TaskListViewController: NSOutlineViewDelegate {
 /// The marker is the document's own `[ ]` / `[/]` / `[x]` / `[-]` / `[?]` in a
 /// monospaced font, so five rows line up and the vocabulary is the one the file
 /// uses.
+///
+/// **One line per row, truncated at the tail**, like the outline tab's rows and
+/// for the same reason: the pane is a navigation control, and a row is a target
+/// to click rather than the text to read. The whole text — tokens included — is
+/// in the row's tooltip, and the document itself is one click away.
+///
+/// That is not a free choice, it is an invariant this cell has to defend, because
+/// the outline view is on fixed row heights (`usesAutomaticRowHeights = false`)
+/// and a row that wraps draws over its neighbours. **The truncation travels in
+/// the string, not on the field**: `NSTextField.lineBreakMode` is a property of
+/// the cell, and an attributed string carries its own paragraph style whose
+/// line-break mode is word wrapping. Assigning `attributedStringValue` — which
+/// this cell has to do, for the strikethrough and the per-state colour — throws
+/// the field's setting away, so the paragraph style goes in the attributes.
+///
+/// **Auto Layout, not `layout()`.** Three fields in a row is exactly the
+/// arithmetic a `layout()` override is usually the shorter answer to, and here it
+/// is the wrong one: `NSTableCellView` lays its own `textField` out, and this
+/// cell's title *is* its `textField` — assigned so the outline view's selection
+/// colouring and VoiceOver find it. Frames set by hand were moved back to the
+/// cell's left edge, on top of the marker, which is what made every row read
+/// `[W]rite the summary …` with the brackets around the first letters. Constraints are
+/// what `NSTableCellView` cooperates with.
 @MainActor
 public final class TaskCellView: NSTableCellView {
 
@@ -394,22 +420,102 @@ public final class TaskCellView: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let trailing = NSTextField(labelWithString: "")
 
+    /// The marker's column, wide enough for `[ ]` in the monospaced small
+    /// system font plus the gap to the text.
+    private static let markerColumn: CGFloat = 24
+
+    /// How much of the row the priority and due date may take before the title
+    /// stops giving way to them, as an absolute width and as a share of the row.
+    ///
+    /// Both, because a sidebar is dragged: 96 pt is what the decoration is worth
+    /// in a wide pane, and two fifths is what it is worth in a narrow one, where
+    /// `!!  2026-09-01` would otherwise leave `WEB…` where the task was.
+    private static let maximumTrailingWidth: CGFloat = 96
+    private static let maximumTrailingShare: CGFloat = 0.4
+
+    /// The gap between the title and the trailing text, and between the
+    /// trailing text and the row's right edge.
+    private static let gap: CGFloat = 6
+
+    /// One line, truncated — as a paragraph style, so it survives being handed
+    /// to `attributedStringValue`.
+    private static let oneLine: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        return style
+    }()
+
+    /// The marker's column, zero on a group row. A constraint rather than a
+    /// number in `layout()`, for the reason on this class.
+    private var markerWidth: NSLayoutConstraint!
+
+    /// What the priority and due date measured, capped at
+    /// ``maximumTrailingWidth`` and zero when the task carries neither.
+    private var trailingWidth: NSLayoutConstraint!
+
+    /// The row's decoration in full, and its priority alone — the two things the
+    /// row may show in the space it turns out to have. Kept because the choice
+    /// depends on a width, and a width is not known until layout.
+    private var decoration = ""
+    private var priority = ""
+
+    /// The three fields as laid out, in drawing order, for the tests and for
+    /// `mark-bench`: what a row *shows* and where, which is the half of this
+    /// cell that a model of it cannot check.
+    public var fields: [NSTextField] { [marker, title, trailing] }
+
     public init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
 
         marker.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         marker.alignment = .left
+        Self.makeSingleLine(marker)
         addSubview(marker)
 
-        title.lineBreakMode = .byTruncatingTail
+        Self.makeSingleLine(title)
+        // Lower than anything else in the row: the title is the one thing here
+        // that is allowed to lose width, because losing it is what truncating
+        // means. Without this a long task breaks the row's constraints instead.
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(title)
         textField = title
 
         trailing.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         trailing.textColor = .tertiaryLabelColor
         trailing.alignment = .right
+        Self.makeSingleLine(trailing)
         addSubview(trailing)
+
+        for field in [marker, title, trailing] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+        }
+        markerWidth = marker.widthAnchor.constraint(equalToConstant: Self.markerColumn)
+        trailingWidth = trailing.widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            marker.leadingAnchor.constraint(equalTo: leadingAnchor),
+            marker.centerYAnchor.constraint(equalTo: centerYAnchor),
+            markerWidth,
+
+            title.leadingAnchor.constraint(equalTo: marker.trailingAnchor),
+            title.trailingAnchor.constraint(
+                equalTo: trailing.leadingAnchor, constant: -Self.gap),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.gap),
+            trailing.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trailingWidth,
+        ])
+    }
+
+    /// Belt and braces on the field itself, for the strings this cell sets as
+    /// plain text: the paragraph style covers the attributed ones.
+    private static func makeSingleLine(_ field: NSTextField) {
+        field.lineBreakMode = .byTruncatingTail
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        field.cell?.wraps = false
+        field.cell?.isScrollable = false
     }
 
     @available(*, unavailable)
@@ -421,13 +527,18 @@ public final class TaskCellView: NSTableCellView {
     public func show(_ group: TaskGroupNode) {
         marker.stringValue = ""
         marker.isHidden = true
+        decoration = ""
+        priority = ""
         trailing.stringValue = ""
         title.attributedStringValue = NSAttributedString(
             string: group.title,
             attributes: [
                 .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
                 .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: Self.oneLine,
             ])
+        markerWidth.constant = 0
+        trailingWidth.constant = 0
         setAccessibilityLabel(
             "\(group.state.spoken), \(group.count) \(group.count == 1 ? "task" : "tasks")")
         needsLayout = true
@@ -439,11 +550,14 @@ public final class TaskCellView: NSTableCellView {
         marker.isHidden = false
         marker.stringValue = state.marker
         marker.textColor = state.isTerminal ? .tertiaryLabelColor : .secondaryLabelColor
-        trailing.stringValue = row.decoration ?? ""
+        decoration = row.decoration ?? ""
+        priority = row.priorityMark ?? ""
+        trailing.stringValue = decoration
 
         var attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize - 1),
             .foregroundColor: state.isTerminal ? NSColor.tertiaryLabelColor : NSColor.labelColor,
+            .paragraphStyle: Self.oneLine,
         ]
         // Struck through, as the preview draws it: cancelled is the one state
         // whose whole point is that the text no longer applies.
@@ -451,6 +565,9 @@ public final class TaskCellView: NSTableCellView {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
         title.attributedStringValue = NSAttributedString(string: row.label, attributes: attributes)
+
+        markerWidth.constant = Self.markerColumn
+        fitDecoration()
 
         // `spoken`, not the raw value, so VoiceOver says "in progress" rather
         // than "in-progress".
@@ -461,17 +578,46 @@ public final class TaskCellView: NSTableCellView {
     }
 
     public override func layout() {
-        let markerWidth: CGFloat = marker.isHidden ? 0 : 22
-        let trailingWidth =
-            trailing.stringValue.isEmpty
-            ? 0 : min(80, trailing.attributedStringValue.size().width + 4)
-        marker.frame = NSRect(x: 0, y: 0, width: markerWidth, height: bounds.height)
-        title.frame = NSRect(
-            x: markerWidth, y: 0,
-            width: max(0, bounds.width - markerWidth - trailingWidth), height: bounds.height)
-        trailing.frame = NSRect(
-            x: bounds.width - trailingWidth, y: 0, width: trailingWidth, height: bounds.height)
+        // The row's width is a thing only layout knows, and which of the
+        // decoration's two parts fit depends on it. Constants, not frames — see
+        // the note on this class for why the frames are the constraint engine's.
         super.layout()
+        fitDecoration()
+    }
+
+    /// Give the row as much of the decoration as it has room for: both parts,
+    /// the priority alone, or neither.
+    ///
+    /// The title is what the row is *for* and the decoration is a hint about it,
+    /// so the hint is what gives way — and it gives way by dropping the date
+    /// rather than by truncating it, because `2026-0…` is not a date. Nothing is
+    /// lost: the full text, tokens and all, is the row's tooltip, and the
+    /// document is one click away.
+    private func fitDecoration() {
+        let allowance = min(
+            Self.maximumTrailingWidth,
+            max(0, bounds.width - markerWidth.constant) * Self.maximumTrailingShare)
+        for candidate in [decoration, priority] where !candidate.isEmpty {
+            let width = ceil(Self.width(of: candidate, in: trailing)) + 1
+            guard width <= allowance else { continue }
+            showTrailing(candidate, width: width)
+            return
+        }
+        showTrailing("", width: 0)
+    }
+
+    /// Assigned only when it changes: `fitDecoration` runs from `layout`, and a
+    /// string or a constant set every pass would ask for another one.
+    private func showTrailing(_ text: String, width: CGFloat) {
+        if trailing.stringValue != text { trailing.stringValue = text }
+        if trailingWidth.constant != width { trailingWidth.constant = width }
+    }
+
+    /// `text` measured in `field`'s font — the field's own string is not
+    /// disturbed, because this is asked about a string it may not be showing.
+    private static func width(of text: String, in field: NSTextField) -> CGFloat {
+        let font = field.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        return NSAttributedString(string: text, attributes: [.font: font]).size().width
     }
 }
 
@@ -509,6 +655,12 @@ public final class TaskListContainerView: NSView {
     private let emptyLabel = NSTextField(labelWithString: "")
     private let scrollView: NSScrollView
 
+    /// The summary line and the list under it, as laid out — for the tests and
+    /// for `mark-bench`, which are where "the summary has room for its second
+    /// line" is checkable at all.
+    public var summaryField: NSTextField { summaryLabel }
+    public var listView: NSScrollView { scrollView }
+
     /// The sidebar's material, for the reason ``TableOfContentsContainerView``
     /// carries one: `mark-bench` hosts these views in a plain window, and a pane
     /// that only looks right inside an `NSSplitViewItem` is a pane whose
@@ -533,7 +685,12 @@ public final class TaskListContainerView: NSView {
         summaryLabel.usesSingleLineMode = false
         summaryLabel.cell?.wraps = true
         summaryLabel.cell?.isScrollable = false
-        summaryLabel.maximumNumberOfLines = 2
+        // As many lines as the two it is given actually need. It was capped at
+        // two, which is a cap on *visual* lines: at a sidebar's real width the
+        // breakdown alone wraps past one, and the cap cut it off mid-word —
+        // silently, since ``summaryHeight(forWidth:)`` measured the wrapping it
+        // was not allowed to do and left a blank strip where the rest should be.
+        summaryLabel.maximumNumberOfLines = 0
         summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isHidden = true
         addSubview(summaryLabel)
@@ -556,14 +713,19 @@ public final class TaskListContainerView: NSView {
     public override var isFlipped: Bool { true }
 
     /// How tall the summary is, given the width it has to wrap in. Measured
-    /// rather than assumed: "4 of 5 outstanding" plus five states wraps to two
-    /// lines in a 260 pt sidebar and to one in a wide one.
+    /// rather than assumed: "4 of 5 outstanding" plus a five-state breakdown is
+    /// two lines of text and three or four lines of drawing in a narrow sidebar,
+    /// and one in a wide one.
+    ///
+    /// Measured through the *cell*, which is what will draw it: the string's own
+    /// `boundingRect` leaves out the couple of points the cell keeps around the
+    /// text, and a frame that short loses the last line entirely.
     private func summaryHeight(forWidth width: CGFloat) -> CGFloat {
         guard summary != nil else { return 0 }
         let available = max(0, width - 16)
-        let measured = summaryLabel.attributedStringValue.boundingRect(
-            with: NSSize(width: available, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        guard let cell = summaryLabel.cell else { return 0 }
+        let measured = cell.cellSize(
+            forBounds: NSRect(x: 0, y: 0, width: available, height: 10_000))
         return ceil(measured.height) + 8
     }
 

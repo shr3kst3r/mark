@@ -299,6 +299,143 @@ struct DocumentPaneTests {
         #expect(TaskRowNode(task(0, .open, "plain")).decoration == nil)
     }
 
+    // MARK: The cell, as laid out
+
+    /// A row 32 pt tall in a 260 pt sidebar — the outline view's own row height
+    /// and the width `dev.mark.SidebarSplit` restores.
+    private static func laidOutCell(
+        _ configure: (TaskCellView) -> Void, width: CGFloat = 260
+    ) -> (cell: TaskCellView, rects: [NSRect]) {
+        let cell = TaskCellView(identifier: NSUserInterfaceItemIdentifier("TaskCell"))
+        configure(cell)
+        cell.frame = NSRect(x: 0, y: 0, width: width, height: 32)
+        cell.layoutSubtreeIfNeeded()
+        // Alignment rects rather than frames: a label's frame carries a couple
+        // of points of bleed on each side that no one can see, and asserting on
+        // it would fail for a row that looks perfect.
+        return (cell, cell.fields.map { $0.alignmentRect(forFrame: $0.frame) })
+    }
+
+    /// The regression this whole cell exists to hold: the marker, the text and
+    /// the decoration in three columns, none of them over another and none of
+    /// them outside the row. They overlapped because the frames were set in
+    /// `layout()`, where `NSTableCellView` puts its own `textField` back.
+    @Test("a row's marker, title and decoration sit side by side, inside the row")
+    func rowFieldsDoNotOverlap() {
+        let (_, rects) = Self.laidOutCell {
+            $0.show(
+                TaskRowNode(
+                    task(
+                        0, .open, "a task long enough that it has to be truncated in a sidebar",
+                        priority: 2, due: "2026-09-01")))
+        }
+        let (marker, title, trailing) = (rects[0], rects[1], rects[2])
+        #expect(marker.minX >= 0)
+        #expect(marker.maxX <= title.minX, "the marker is drawn over the first letters")
+        #expect(title.maxX <= trailing.minX, "the title runs under the due date")
+        #expect(trailing.maxX <= 260)
+        for rect in rects {
+            #expect(rect.minY >= 0 && rect.maxY <= 32, "\(rect) leaves the row")
+        }
+    }
+
+    /// One line, truncated at the tail. The paragraph style is the assertion
+    /// because it is the thing that was missing: `lineBreakMode` on the field is
+    /// discarded by `attributedStringValue`, and the row wrapped to two lines
+    /// and drew over the row below it.
+    @Test("a long task truncates on one line rather than wrapping")
+    func longTaskTruncatesRatherThanWrapping() throws {
+        let (cell, rects) = Self.laidOutCell {
+            $0.show(
+                TaskRowNode(
+                    task(0, .open, String(repeating: "an unreasonably long task ", count: 8))))
+        }
+        let title = cell.fields[1]
+        let style = try #require(
+            title.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+                as? NSParagraphStyle)
+        #expect(style.lineBreakMode == .byTruncatingTail)
+        #expect(title.maximumNumberOfLines == 1)
+        #expect(rects[1].height <= 20, "the title is taller than one line, so it wrapped")
+    }
+
+    /// Wrapping is just as wrong on a group heading, which is the same label
+    /// with a different string in it.
+    @Test("a group heading is one line too, and leaves the marker column out")
+    func groupHeadingIsOneLine() throws {
+        let (cell, rects) = Self.laidOutCell {
+            $0.show(TaskGroupNode(state: .inProgress, tasks: [task(0, .inProgress, "one")]))
+        }
+        let title = cell.fields[1]
+        let style = try #require(
+            title.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+                as? NSParagraphStyle)
+        #expect(style.lineBreakMode == .byTruncatingTail)
+        #expect(title.stringValue == "In progress (1)")
+        #expect(cell.fields[0].isHidden, "a group row has no marker")
+        #expect(rects[1].minX <= 2, "the heading is indented into the marker's column")
+    }
+
+    /// The decoration is a hint about the row and the title is the row, so a
+    /// narrow pane drops the date rather than shrinking `WEB-1890 …` to `WEB…`.
+    /// It drops it whole: `2026-0…` is not a date.
+    @Test("a narrow row keeps the priority and drops the due date")
+    func decorationGivesWayToTheTitle() {
+        let dated = TaskRowNode(
+            task(0, .open, "WEB-1890 - fix the duplicated navigation links", priority: 2,
+                due: "2026-09-01"))
+
+        let (wide, _) = Self.laidOutCell({ $0.show(dated) }, width: 340)
+        #expect(wide.fields[2].stringValue == "!!  2026-09-01")
+
+        let (narrow, _) = Self.laidOutCell({ $0.show(dated) }, width: 200)
+        #expect(narrow.fields[2].stringValue == "!!")
+
+        // Nothing to fall back to: a date with no priority leaves the row
+        // rather than taking two fifths of it. 150 pt is the sidebar dragged
+        // about as narrow as it goes.
+        let undated = TaskRowNode(
+            task(1, .open, "Chase the printer for the proof copies", due: "2026-08-30"))
+        let (bare, _) = Self.laidOutCell({ $0.show(undated) }, width: 150)
+        #expect(bare.fields[2].stringValue == "")
+        // …and the tooltip still has all of it, which is what makes the drop
+        // safe: `outlineView(_:toolTipFor:…)` answers with `task.text`.
+        #expect(undated.task.text.contains("printer"))
+    }
+
+    // MARK: The summary line, as laid out
+
+    /// The breakdown wraps past two lines in a narrow sidebar. It was capped at
+    /// two while the container reserved room for all of them, so the pane drew a
+    /// blank strip where the rest of the sentence should have been.
+    @Test("the summary line has room for every line it draws")
+    func summaryIsNotClipped() throws {
+        let pane = TaskListViewController()
+        let container = try #require(pane.view as? TaskListContainerView)
+        pane.show(
+            Self.sample, counts: TaskCounts(Self.sample),
+            for: URL(fileURLWithPath: "/tmp/a.md"))
+
+        for width in [180.0, 260.0, 420.0] {
+            container.frame = NSRect(x: 0, y: 0, width: width, height: 400)
+            container.layoutSubtreeIfNeeded()
+            let label = container.summaryField
+            let needed = try #require(
+                label.cell?.cellSize(
+                    forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: 10_000)
+                ).height)
+            #expect(
+                label.maximumNumberOfLines == 0,
+                "a cap on lines is a cap on the sentence")
+            #expect(
+                label.frame.height >= needed - 0.5,
+                "at \(width) pt the summary has \(label.frame.height) pt for \(needed) pt of text")
+            #expect(
+                container.listView.frame.minY >= label.frame.maxY,
+                "at \(width) pt the list starts inside the summary")
+        }
+    }
+
     // MARK: Empty states
 
     /// "No tasks in this document" and "no document open" are different facts,

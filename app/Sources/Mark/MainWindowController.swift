@@ -1266,6 +1266,16 @@ extension MainWindowController: TabHydrator {
             }
             self.tabBar.reload()
         }
+        // A link to a local file is the reader naming a document, so it opens
+        // like every other route in rather than replacing the page underneath
+        // the tab. `open(_:)` is the funnel: it records the opened-file
+        // history, sends the reader to the other group if the file is already
+        // showing there, and otherwise makes a tab — which is what relabels the
+        // tab bar, retitles the window, moves the sidebar, extends the watch
+        // set, and rebinds the editor pane to the new document's buffer.
+        view.onFollow = { [weak self] url in
+            self?.open(url)
+        }
         view.onScroll = { [weak self, weak tab] y in
             guard let self, let tab else { return }
             tab.scrollOffset = y

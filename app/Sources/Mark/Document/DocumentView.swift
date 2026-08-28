@@ -53,6 +53,19 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// Called when a document has been opened, so the window can retitle.
     public var onOpen: ((URL) -> Void)?
 
+    /// Called when a link in the document resolves to a local file, so the
+    /// window can open it the way every other route in opens a document.
+    ///
+    /// A link click is the reader naming a file, and it has to arrive at
+    /// ``MainWindowController/open(_:preview:)`` like the sidebar, ⌘T, a drop,
+    /// `mark open` and `mark://` do. Swapping the page in place instead — which
+    /// is what this view did, and can still do when nothing is wired here —
+    /// leaves the tab pointing at the previous file, and with it the tab bar's
+    /// label, the window title, the sidebar selection, the opened-file history,
+    /// the set of files being watched, and the buffer the editor pane is bound
+    /// to. The preview moves and the rest of the window does not.
+    public var onFollow: ((URL) -> Void)?
+
     /// Called once, when `shell.js` has installed `window.mark`. Nothing may
     /// be injected before this fires; `mark-bench` waits on it.
     public var onShellReady: (() -> Void)?
@@ -235,6 +248,7 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         onScroll = nil
         onSourceTop = nil
         onOpen = nil
+        onFollow = nil
         onShellReady = nil
         if let webView {
             webView.navigationDelegate = nil
@@ -1265,7 +1279,14 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         let target = URL(fileURLWithPath: href, relativeTo: base.deletingLastPathComponent())
             .standardizedFileURL
         if FileManager.default.fileExists(atPath: target.path) {
-            open(target)
+            // Unwired — `mark-bench`, or a view used on its own — this still
+            // navigates in place, which is all a view with no window around it
+            // can do.
+            if let onFollow {
+                onFollow(target)
+            } else {
+                open(target)
+            }
         } else {
             Log.render.info("link target does not exist: \(target.path, privacy: .public)")
         }

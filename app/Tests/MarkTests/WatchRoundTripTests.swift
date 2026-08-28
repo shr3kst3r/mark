@@ -202,8 +202,16 @@ struct WatchRoundTripTests {
         #expect(current.title == DocumentView.menuTitle(for: .inProgress))
         #expect(!current.isEnabled)
         #expect(menu.items.filter(\.isEnabled).count == 4)
-        // Page coordinates grow downwards, the view's upwards.
-        #expect(captured?.point.y == view.webView.bounds.height - 120)
+        // The menu has to open on the checkbox that asked for it, so the point
+        // must sit where the click did: 40 across, 120 down from the top edge
+        // of the web view. Stated as a distance from that edge rather than as a
+        // bare y, because which end of the view y counts from depends on
+        // `isFlipped` — and asserting the flip itself is what let the menu open
+        // mirrored about the middle of the view, hundreds of points low.
+        let point = try #require(captured?.point)
+        let topEdge = view.webView.isFlipped ? 0 : view.webView.bounds.height
+        #expect(abs(point.y - topEdge) == 120)
+        #expect(point.x == 40)
 
         // Picking "Cancelled" writes the one byte, from the state the page
         // reported rather than from anything re-queried.

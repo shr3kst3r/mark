@@ -1165,11 +1165,16 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         guard let webView else { return }
         let menu = stateMenu(for: toggle)
         // The page reports client coordinates, which grow downwards from the
-        // top of the viewport; `WKWebView` is an unflipped `NSView`, so y has
-        // to be turned over. Getting this wrong puts the menu at the other end
-        // of the window, which is the kind of bug a screenshot finds and a
-        // test does not.
-        let point = NSPoint(x: pagePoint.x, y: webView.bounds.height - pagePoint.y)
+        // top of the viewport. `WKWebView` answers `isFlipped` with `true`, so
+        // its own coordinates grow the same way and the point carries over
+        // unchanged — turning y over anyway mirrors the menu about the middle
+        // of the view, which is what put it a few hundred points below the
+        // checkbox that asked for it. The flip is kept for the unflipped case
+        // rather than assumed away, because this reads from the view instead
+        // of from a memory of what WebKit does.
+        let point = NSPoint(
+            x: pagePoint.x,
+            y: webView.isFlipped ? pagePoint.y : webView.bounds.height - pagePoint.y)
         Log.shell.debug(
             "state menu for task \(toggle.index) (\(toggle.rendered.rawValue, privacy: .public))")
         guard let present = presentMenu else {

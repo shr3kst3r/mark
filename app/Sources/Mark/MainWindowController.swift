@@ -371,6 +371,32 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         openInFocusedGroup(url, preview: preview)
     }
 
+    /// Show a document and put the reader at one of its headings.
+    ///
+    /// What a cross-file anchor link resolves to — `index.md#open` in a
+    /// document, and every item's link on the **Today** page
+    /// (`2026-08-31-today-page`). It is ``open(_:preview:)`` and then the path
+    /// `mark goto` takes, in that order, and the wait between them is
+    /// load-bearing: a tab that has just been made has no DOM yet, and
+    /// `scrollToAnchor` on it would report "no such heading" about a document
+    /// that has one.
+    ///
+    /// A heading that really is not there leaves the reader at the top of the
+    /// file, which is where they would have been without the fragment.
+    public func open(_ url: URL, scrollingTo anchor: String) {
+        let tab = openInFocusedGroup(url)
+        _Concurrency.Task { @MainActor in
+            guard let view = tab.documentView else { return }
+            await view.awaitReady()
+            let found = (try? await view.scrollToAnchor(anchor)) ?? false
+            if !found {
+                Log.app.info(
+                    "\(url.lastPathComponent, privacy: .public) has no anchor #\(anchor, privacy: .public)"
+                )
+            }
+        }
+    }
+
     /// Open `url` in the focused group — unless it is already open in the other
     /// one, in which case go there.
     ///
@@ -1280,6 +1306,11 @@ extension MainWindowController: TabHydrator {
         view.onFollow = { [weak self] url in
             self?.open(url)
         }
+        // A link that named a heading in another file. Same route in, plus the
+        // scroll — see ``open(_:scrollingTo:)``.
+        view.onFollowFragment = { [weak self] url, anchor in
+            self?.open(url, scrollingTo: anchor)
+        }
         view.onScroll = { [weak self, weak tab] y in
             guard let self, let tab else { return }
             tab.scrollOffset = y
@@ -1760,6 +1791,13 @@ extension MainWindowController: CommandTarget {
         // a very unhelpful shape — it looks like the theme half-applied.
         if let help = HelpWindowController.shared {
             await help.applyTheme(resolved, previous: previous)
+        }
+        // And the Today page, which is not a tab either
+        // (`2026-08-31-today-page`). Two windows now need this, which is the
+        // point at which "the loop cannot reach it" stops being a footnote
+        // about one window.
+        if let today = TodayWindowController.shared {
+            await today.applyTheme(resolved, previous: previous)
         }
         saveSessionSoon()
         return ThemeSummaryForCLI(

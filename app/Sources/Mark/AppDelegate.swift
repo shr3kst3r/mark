@@ -420,6 +420,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         fileMenu.addItem(
             withTitle: "History", action: #selector(showHistory(_:)), keyEquivalent: "y"
         ).target = self
+        // `2026-08-31-today-page`. Beside History because it is the same kind
+        // of thing — a window that is a way *in* to your documents rather than
+        // one of them.
+        //
+        // **⇧⌘T.** ⌘T is New Tab and ⌃⌘T is Show Table of Contents, so the
+        // shift slot on the obvious letter was free; `MenuBarTests` fails the
+        // build if that stops being true.
+        let todayItem = fileMenu.addItem(
+            withTitle: "Today", action: #selector(showToday(_:)), keyEquivalent: "T")
+        todayItem.keyEquivalentModifierMask = [.command, .shift]
+        todayItem.target = self
         fileMenu.addItem(
             withTitle: "Reload", action: #selector(MainWindowController.reloadDocument(_:)),
             keyEquivalent: "r")
@@ -776,6 +787,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
                 coordinator.keyController
                 ?? coordinator.makeWindow(root: url.deletingLastPathComponent())
             controller.open(url)
+            controller.showWindow(activating: true)
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// **File ▸ Today** — the day's work and every project's open items
+    /// (`2026-08-31-today-page`).
+    ///
+    /// The window is handed *where to start looking* and *the route in*, not
+    /// the coordinator — ``HistoryWindowController``'s arrangement, for the
+    /// same reasons. The starting point is the key window's sidebar root, which
+    /// is the answer to "how should the page find my journal": the sidebar is
+    /// already pointed at the notes you are working in, including which
+    /// worktree of them.
+    ///
+    /// With no window open — every one closed while the app kept running —
+    /// there is no sidebar to ask, so the search starts at the home directory
+    /// and will usually come back with the "no journal here" page. Opening a
+    /// document window first is the answer, and the page says so.
+    @objc func showToday(_ sender: Any?) {
+        guard let coordinator = windows else {
+            Log.app.error("File ▸ Today before the window coordinator exists")
+            NSSound.beep()
+            return
+        }
+        let start =
+            coordinator.keyController?.sidebar.root
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        TodayWindowController.show(startingFrom: start) { [weak coordinator] url, anchor in
+            guard let coordinator else { return }
+            let controller =
+                coordinator.keyController
+                ?? coordinator.makeWindow(root: url.deletingLastPathComponent())
+            if let anchor {
+                controller.open(url, scrollingTo: anchor)
+            } else {
+                controller.open(url)
+            }
             controller.showWindow(activating: true)
         }
         NSApplication.shared.activate(ignoringOtherApps: true)

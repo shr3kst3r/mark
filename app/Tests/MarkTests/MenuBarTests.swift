@@ -229,6 +229,30 @@ struct MenuBarTests {
         #expect(!item.title.hasSuffix("…"))
     }
 
+    /// `2026-08-31-today-page`. Beside History, because it is the same kind of
+    /// thing: a window that is a way *in* to your documents rather than one of
+    /// them.
+    ///
+    /// ⇧⌘T was free because ⌘T is New Tab and ⌃⌘T is Show Table of Contents.
+    /// `keyEquivalentsAreUnique` above is what guarantees it stays free.
+    @Test("File ▸ Today is under History, on ⇧⌘T")
+    func todayItem() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let file = try #require(menu.items.first { $0.submenu?.title == "File" }?.submenu)
+
+        let history = try #require(file.items.firstIndex { $0.title == "History" })
+        let today = try #require(file.items.firstIndex { $0.title == "Today" })
+        #expect(today == history + 1)
+
+        let item = file.items[today]
+        #expect(item.keyEquivalent == "T")
+        #expect(item.keyEquivalentModifierMask == [.command, .shift])
+        #expect(item.action == #selector(AppDelegate.showToday(_:)))
+        #expect(item.target === delegate)
+        #expect(!item.title.hasSuffix("…"))
+    }
+
     /// Last, because that is where macOS puts Help and where a reader looks
     /// for it. `installMainMenu(for:)` finds it by title rather than by
     /// position, so a menu appended after it would fail here and not in the

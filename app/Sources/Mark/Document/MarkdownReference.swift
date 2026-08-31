@@ -56,14 +56,22 @@ public enum MarkdownReference {
 /// It **refuses** rather than silently doing nothing, so the click takes the
 /// path every other refused write takes — logged with a reason, and followed by
 /// the reload that puts the box back where the file says it is.
+///
+/// The **Today** page uses it for a different reason with the same shape
+/// (`2026-08-31-today-page`): its checkboxes are copies of lines from other
+/// files, and the click would have to be routed back to whichever file each one
+/// came from. Hence the reason is supplied rather than baked in — a refusal
+/// whose log line names the wrong cause is barely better than no log line.
 public final class RefusingTaskWriter: TaskWriteTarget {
 
-    public init() {}
+    private let reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
 
     public func apply(_ toggle: TaskToggle, to url: URL) throws -> TaskWriteResult {
         throw TaskWriteRefusal.core(
-            function: "RefusingTaskWriter",
-            detail: "the markdown reference ships inside the app bundle and is never written to",
-            path: url.path)
+            function: "RefusingTaskWriter", detail: reason, path: url.path)
     }
 }

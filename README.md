@@ -298,6 +298,26 @@ and marked *missing*, because an unmounted volume is not a deletion. The window
 is a plain list — it holds no rendered page, so opening it never displaces a
 document from the memory budget.
 
+**Today, if your notes are a journal.** ⇧⌘T — or **File ▸ Today** — assembles
+one page out of your notes and renders it: the day's outstanding items from
+today's daily note, and then every project with its open ones. It looks for the
+directory the sidebar is rooted at, and every directory above it, until it finds
+one holding both a `daily/` and a `projects/` directory — so a worktree of your
+notes is its own journal, and a folder that is neither says so rather than
+showing an empty page. Today's items are read from
+`daily/<yyyy>/<MM>/<yyyy-MM-dd>.md`, in the file's own order and grouped by the
+file's own headings, keeping their nesting and their `@tags`, their priority and
+their state byte; a finished parent is kept for an unfinished child to hang from.
+Each project is `projects/<slug>/index.md`, with the `**Status:**` word from its
+header line, its own files' open items, and — because that is what
+`@proj(<slug>)` is for — the items tagged for it in today's daily. With no daily
+for today it shows the most recent one and says which day that is. Every item
+links back to the file and the section it came from. The checkboxes are copies,
+so clicking one is refused rather than guessed at: follow the link and tick it
+where it lives. The page re-reads itself when any file it was built from changes,
+and rebuilds when the window comes forward — which is how it notices a new
+project, and midnight.
+
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and
 accessibility are the system's rather than ours. The preview updates as you
@@ -485,6 +505,7 @@ core/    the document core: parsing, block identity, highlighting, tasks, tree,
 cli/     clap dispatch, terminal rendering, and the socket client
 app/     the Swift/AppKit shell
   Sources/Mark/         the window, sidebar, tabs, document view, IPC, editor
+  Sources/Mark/Today/   the Today page: journal layout, digest, markdown
   Sources/Mark/MarkCore.swift  the wrapper over the C ABI
   Resources/            shell.html, shell.js, shell.css — no third-party JS
   Sources/MarkBench/    the performance gates, run in a real window

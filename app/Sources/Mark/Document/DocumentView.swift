@@ -66,6 +66,19 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// to. The preview moves and the rest of the window does not.
     public var onFollow: ((URL) -> Void)?
 
+    /// The same, for a link that named a **heading in another file** —
+    /// `../projects/quarterly-report/index.md#open`.
+    ///
+    /// Separate from ``onFollow`` rather than an optional second argument on
+    /// it, so that every existing caller keeps the signature it was written
+    /// against and nothing has to decide what to do with an anchor it does not
+    /// handle. Left unset — which is every surface but the **Today** window —
+    /// such a link falls back to ``onFollow`` and simply opens the file at the
+    /// top, which is what it did before there was a fragment to lose.
+    ///
+    /// `2026-08-31-today-page`.
+    public var onFollowFragment: ((URL, String) -> Void)?
+
     /// Called once, when `shell.js` has installed `window.mark`. Nothing may
     /// be injected before this fires; `mark-bench` waits on it.
     public var onShellReady: (() -> Void)?
@@ -1276,20 +1289,49 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             return
         }
         guard let base = url else { return }
-        let target = URL(fileURLWithPath: href, relativeTo: base.deletingLastPathComponent())
+
+        // **Split before decoding.** The two transforms below are both
+        // required and both used to be missing, which is why the order is
+        // written down: `shell.js` reports `getAttribute("href")` verbatim and
+        // the renderer percent-encodes a destination on the way out, so
+        // `projects/my project/index.md` arrives here as
+        // `projects/my%20project/index.md` and was looked for under that
+        // literal name. Splitting first is what keeps a `%23` in a filename
+        // from becoming a fragment separator when it is decoded.
+        //
+        // A file whose name genuinely contains `#` cannot be linked, because
+        // the renderer does not encode it and there is nothing here to tell
+        // the two apart. That is markdown's ambiguity, not one introduced
+        // here.
+        let (path, fragment) = Self.split(href: href)
+        let decoded = path.removingPercentEncoding ?? path
+        let target = URL(fileURLWithPath: decoded, relativeTo: base.deletingLastPathComponent())
             .standardizedFileURL
-        if FileManager.default.fileExists(atPath: target.path) {
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            Log.render.info("link target does not exist: \(target.path, privacy: .public)")
+            return
+        }
+        if let fragment, let onFollowFragment {
+            onFollowFragment(target, fragment)
+        } else if let onFollow {
+            onFollow(target)
+        } else {
             // Unwired — `mark-bench`, or a view used on its own — this still
             // navigates in place, which is all a view with no window around it
-            // can do.
-            if let onFollow {
-                onFollow(target)
-            } else {
-                open(target)
-            }
-        } else {
-            Log.render.info("link target does not exist: \(target.path, privacy: .public)")
+            // can do. The anchor is dropped here for the same reason: there is
+            // nothing to ask to scroll after the open.
+            open(target)
         }
+    }
+
+    /// A link destination as its path and its heading anchor.
+    ///
+    /// The **first** `#` separates them, which is what a URL parser does. An
+    /// empty fragment (`file.md#`) is no fragment.
+    nonisolated static func split(href: String) -> (path: String, fragment: String?) {
+        guard let hash = href.firstIndex(of: "#") else { return (href, nil) }
+        let fragment = String(href[href.index(after: hash)...])
+        return (String(href[href.startIndex..<hash]), fragment.isEmpty ? nil : fragment)
     }
 
     // MARK: - WKNavigationDelegate

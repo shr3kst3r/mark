@@ -88,7 +88,8 @@ public final class HelpWindowController: NSWindowController, NSWindowDelegate,
         // The reference demonstrates task lists, so it has checkboxes in it.
         // See ``RefusingTaskWriter`` for why they are examples rather than
         // controls.
-        documentView.taskWriter = RefusingTaskWriter()
+        documentView.taskWriter = RefusingTaskWriter(
+            reason: "the markdown reference ships inside the app bundle and is never written to")
 
         finder = DocumentFinder(width: 780)
 

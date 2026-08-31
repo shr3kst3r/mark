@@ -4,12 +4,13 @@
 
 # ADR index
 
-15 active · 4 superseded
+16 active · 4 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-08-31-today-page](2026-08-31-today-page.md) | Show the day's work as a document mark assembles and renders, in a window with no file behind it | Proposed | app, render | — | 2026-08-31 |
 | [2026-08-28-tabbed-document-pane](2026-08-28-tabbed-document-pane.md) | Make the sidebar's lower half a tabbed document pane, and give the five task states somewhere to be read | Accepted | app, sidebar, tabs | — | 2026-08-28 |
 | [2026-08-28-git-differences-by-running-git](2026-08-28-git-differences-by-running-git.md) | Learn what changed by running `git --no-optional-locks` as a child process, and show it as rendered markdown rather than as patch text | Accepted | core, cli, app, render, sidebar | — | 2026-08-28 |
 | [2026-08-28-git-badges-ride-the-sidebar-poll](2026-08-28-git-badges-ride-the-sidebar-poll.md) | Refresh git badges on the sidebar's existing poll, one query per repository that owns a listed row, gated on that repository's own `index` and `HEAD` | Accepted | app, sidebar | — | 2026-08-28 |

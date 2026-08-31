@@ -6,14 +6,16 @@ import Testing
 
 /// The editor's change gutter.
 ///
-/// What is asserted here is the **mapping** — which lines get a bar, of what
-/// kind — and not the drawing. Geometry needs a window, and a view with no
-/// window reports a zero viewport, so a test that asserted on pixels here would
-/// be asserting on nothing. `mark-bench` has a window and owns that half.
+/// Two things are asserted here. The **mapping** — which lines get a bar, of
+/// what kind — because that is where one off-by-one lives: the core reports
+/// zero-based half-open line ranges, the gutter draws zero-based lines, and a
+/// removal has no line of its own at all. And **where the bars land**, because
+/// that is where the other one lives: the editor soft-wraps, so the rows the
+/// gutter walks are not the lines the diff counts.
 ///
-/// The mapping is worth its own tests because it is where an off-by-one lives:
-/// the core reports zero-based half-open line ranges, the gutter draws
-/// zero-based lines, and a removal has no line of its own at all.
+/// Neither needs a window — a scroll view given a frame reports a viewport, and
+/// what is checked is arithmetic against the layout, not pixels. The drawing
+/// itself, and its cost under scrolling, stay `mark-bench`'s half.
 @Suite("The editor's change gutter")
 @MainActor
 struct ChangeRulerTests {
@@ -181,6 +183,110 @@ struct ChangeRulerTests {
         #expect(ruler.marksForTesting[0] == nil)
         #expect(ruler.marksForTesting[2] == nil)
         #expect(ruler.marksForTesting[3] == nil)
+    }
+
+    // MARK: - Where the bars land
+
+    /// A text view laid out the way ``EditorPane`` lays one out — soft
+    /// wrapping, the same top inset — narrow enough that `text`'s long lines
+    /// have to wrap.
+    private func wrappingPane(_ text: String) -> (NSScrollView, NSTextView) {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 180, height: 400))
+        let textView = NSTextView(usingTextLayoutManager: true)
+        textView.frame = NSRect(x: 0, y: 0, width: 180, height: 400)
+        textView.textContainerInset = NSSize(width: 8, height: 10)
+        // ``EditorPane`` gets its wrapping width from the text view, which
+        // needs a live window to settle. Pinning the width instead wraps the
+        // same way and wraps deterministically, which is what is under test.
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: 160, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.string = text
+        scrollView.documentView = textView
+        if let layout = textView.textLayoutManager {
+            layout.ensureLayout(for: layout.documentRange)
+        }
+        return (scrollView, textView)
+    }
+
+    /// The laid-out fragment holding `line`, asked of the layout rather than
+    /// worked out from a line height — which is the only way this stays an
+    /// independent check of what the gutter computed.
+    private func fragment(
+        forLine line: Int, in textView: NSTextView
+    ) -> NSTextLayoutFragment? {
+        guard let layout = textView.textLayoutManager,
+            let content = layout.textContentManager
+        else { return nil }
+        let offset = textView.string
+            .components(separatedBy: "\n")[..<line]
+            .reduce(0) { $0 + ($1 as NSString).length + 1 }
+        guard
+            let location = content.location(
+                content.documentRange.location, offsetBy: offset)
+        else { return nil }
+        return layout.textLayoutFragment(for: location)
+    }
+
+    /// Where the top of `line` sits in the gutter's coordinates: the layout's
+    /// own y, shifted by the inset the text sits under.
+    private func topOfLine(_ line: Int, in textView: NSTextView) -> CGFloat? {
+        guard let fragment = fragment(forLine: line, in: textView) else { return nil }
+        return fragment.layoutFragmentFrame.minY + textView.textContainerInset.height
+    }
+
+    /// The bug this is here for: the gutter walked *visual rows* and counted
+    /// each as a line, so in a soft-wrapping editor every wrapped row pushed
+    /// every bar below it one line further down the document.
+    @Test("a wrapped line does not shift the bars under it")
+    func wrappingDoesNotShiftTheBars() throws {
+        let long = String(repeating: "wrap ", count: 40)
+        let text = "alpha\n\(long)\ncharlie\ndelta\n"
+        let (scrollView, textView) = wrappingPane(text)
+        let ruler = ChangeRuler(scrollView: scrollView)
+        ruler.clientView = textView
+
+        // The long line must actually wrap, or this test proves nothing.
+        let wrapped = try #require(fragment(forLine: 1, in: textView))
+        #expect(
+            wrapped.textLineFragments.count > 1,
+            "the fixture must wrap for this test to mean anything")
+
+        ruler.show(diff([hunk(old: (2, 3), new: (2, 3), kind: .changed)]))
+        let bars = ruler.barsForTesting
+        #expect(bars.count == 1, "one unwrapped line, one bar")
+        let bar = try #require(bars.first)
+        #expect(bar.kind == .changed)
+        let expected = try #require(topOfLine(2, in: textView))
+        #expect(
+            abs(bar.rect.minY - expected) < 1,
+            "the bar should sit on `charlie` at \(expected), not at \(bar.rect.minY)")
+    }
+
+    /// The other half of counting rows rather than lines: a changed line that
+    /// wraps is one line, and every row of it is that line.
+    @Test("a wrapped line is marked down its whole height")
+    func aWrappedLineIsMarkedThroughout() throws {
+        let long = String(repeating: "wrap ", count: 40)
+        let text = "alpha\n\(long)\ncharlie\n"
+        let (scrollView, textView) = wrappingPane(text)
+        let ruler = ChangeRuler(scrollView: scrollView)
+        ruler.clientView = textView
+
+        ruler.show(diff([hunk(old: (1, 2), new: (1, 2), kind: .added)]))
+        let bars = ruler.barsForTesting
+        #expect(bars.count > 1, "every row of the wrapped line gets a bar")
+        #expect(bars.allSatisfy { $0.kind == .added })
+        // Contiguous: the bars cover the line rather than dotting it.
+        let top = try #require(bars.map(\.rect.minY).min())
+        let bottom = try #require(bars.map(\.rect.maxY).max())
+        let lineTop = try #require(topOfLine(1, in: textView))
+        let nextTop = try #require(topOfLine(2, in: textView))
+        #expect(top >= lineTop - 1)
+        #expect(bottom <= nextTop + 1)
     }
 
     @Test("every colour is distinct, so the three kinds are tellable apart")

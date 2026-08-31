@@ -95,13 +95,32 @@ public final class ChangeRuler: NSRulerView {
     public var isEmpty: Bool { marks.isEmpty }
 
     /// The line-to-kind mapping, for tests.
-    ///
-    /// Exposed because the *mapping* is the testable half — the drawing needs a
-    /// window, and a view without one reports a zero viewport, so a pixel
-    /// assertion here would assert on nothing. `mark-bench` has a window.
     var marksForTesting: [Int: LineHunkKind] { marks }
 
+    /// The bars that would be drawn, top to bottom, for tests.
+    ///
+    /// Colour and vertical position only. The drawing itself needs a window and
+    /// stays `mark-bench`'s half; what a unit test can hold onto is the
+    /// arithmetic that decides which line a bar lands against.
+    var barsForTesting: [(kind: LineHunkKind, rect: NSRect)] {
+        var bars: [(kind: LineHunkKind, rect: NSRect)] = []
+        enumerateBars { bars.append((kind: $0, rect: $1)) }
+        return bars
+    }
+
     public override func drawHashMarksAndLabels(in rect: NSRect) {
+        enumerateBars { kind, bar in
+            Self.color(for: kind).setFill()
+            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+        }
+    }
+
+    /// Every bar the margin would draw right now, in this view's coordinates.
+    ///
+    /// Split out from the drawing so the geometry can be asserted on without a
+    /// window: what goes wrong here is *which line* a bar lands against, and
+    /// that is arithmetic, not pixels.
+    private func enumerateBars(_ body: (LineHunkKind, NSRect) -> Void) {
         guard !marks.isEmpty,
             let textView = clientView as? NSTextView,
             let layoutManager = textView.textLayoutManager,
@@ -116,9 +135,13 @@ public final class ChangeRuler: NSRulerView {
         // forward from the first visible fragment instead: TextKit hands them
         // over in order, and the only thing needed up front is the line number
         // of the first one.
+        //
+        // `visible` is in the text view's coordinates and the layout is in the
+        // container's, which the top inset separates. Asking at the wrong one
+        // lands a fragment too far down and the topmost row loses its bar.
         guard
             let firstVisible = layoutManager.textLayoutFragment(
-                for: CGPoint(x: 0, y: visible.minY))
+                for: CGPoint(x: 0, y: max(0, visible.minY - inset)))
         else { return }
         var line = lineNumber(
             of: firstVisible.rangeInElement.location, in: contentManager, textView: textView)
@@ -133,15 +156,39 @@ public final class ChangeRuler: NSRulerView {
                     dx: 0, dy: frame.minY)
                 if let kind = marks[line] {
                     let y = lineFrame.minY + inset - visible.minY
-                    let bar = NSRect(
-                        x: 2.5, y: y, width: 3,
-                        height: max(2, lineFrame.height - 1))
-                    Self.color(for: kind).setFill()
-                    NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+                    body(
+                        kind,
+                        NSRect(
+                            x: 2.5, y: y, width: 3,
+                            height: max(2, lineFrame.height - 1)))
                 }
-                line += 1
+                // A *visual* row, not a line: the editor soft-wraps, so one
+                // line of the document can be several of these. Only a row
+                // that ends at a real break moves the count on — a wrapped
+                // row keeps it, which is also what puts a bar against every
+                // row of a long changed line rather than just its first.
+                if Self.endsLine(lineFragment) { line += 1 }
             }
             return true
+        }
+    }
+
+    /// Whether this visual row ends its line of the document, rather than
+    /// being broken off it by soft wrapping.
+    ///
+    /// Only the row's last character is looked at, which is the whole check: a
+    /// row is broken *at* a line break, so a break can only ever be the last
+    /// thing on one. The final row of a document that does not end in a
+    /// newline reports `false` and nothing follows it to be shifted.
+    private static func endsLine(_ lineFragment: NSTextLineFragment) -> Bool {
+        let text = lineFragment.attributedString.string as NSString
+        let range = lineFragment.characterRange
+        guard range.length > 0, NSMaxRange(range) <= text.length else { return false }
+        switch text.character(at: NSMaxRange(range) - 1) {
+        // Line feed, carriage return, and Unicode's own line and paragraph
+        // separators — the set `String.enumerateLines` breaks on.
+        case 0x0A, 0x0D, 0x2028, 0x2029: return true
+        default: return false
         }
     }
 

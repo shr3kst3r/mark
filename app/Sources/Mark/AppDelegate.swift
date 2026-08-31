@@ -615,6 +615,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         viewMenu.addItem(themeItem)
         viewMenu.addItem(.separator())
 
+        // The editor's whitespace marks: a dot for a space, an arrow across a
+        // tab, and a different mark for the three kinds of blank that usually
+        // arrived by accident. Beside the theme rather than beside the sidebar
+        // toggles below, because like the theme it changes how a *document*
+        // looks rather than which panes are around it — and like them it is a
+        // checkmark item, because it is app-wide and persisted.
+        //
+        // ⌥⌘I was free; the collision test in `MenuBarTests` is what says so.
+        viewMenu.addItem(
+            withTitle: "Show Invisibles",
+            action: #selector(MainWindowController.toggleInvisibles(_:)), keyEquivalent: "i"
+        ).keyEquivalentModifierMask = [.command, .option]
+        viewMenu.addItem(.separator())
+
         // M8's sidebar toggles. Both are `NSMenuItem`s with a checkmark rather
         // than a preference pane, because both are things a reader flips for
         // one folder and flips back — and both are persisted, so the state has

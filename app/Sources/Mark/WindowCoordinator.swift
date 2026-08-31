@@ -200,6 +200,9 @@ public final class WindowCoordinator {
         // system. Both fields sit on `SessionState` rather than
         // `SessionWindow` for that reason.
         state.themeAppearance = ThemeController.shared.appearance.rawValue
+        // App-wide for the same reason again: the editor's whitespace marks are
+        // one choice about how source looks, not one per window.
+        state.editorInvisibles = Invisibles.isShowing
         // App-wide for the same reason, and written even when empty so that
         // clearing the history is a change the file records rather than one an
         // absent key leaves ambiguous.
@@ -227,6 +230,9 @@ public final class WindowCoordinator {
         ThemeController.shared.restore(
             named: state.theme,
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
+        // Before the windows too, so the first editor to come up already draws
+        // the marks rather than drawing itself twice.
+        Invisibles.restore(state.editorInvisibles)
         // Before the windows, so that a file named on the command line — which
         // opens as those windows come up — is recorded on *top* of the restored
         // history rather than underneath it.

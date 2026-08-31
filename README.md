@@ -312,6 +312,20 @@ the diff — and nothing is written until you answer. The pane starts hidden: a
 document opens read-only until you ask to edit it, and the app remembers that
 you asked.
 
+**Every space, and which kind.** The editor draws a mark for each blank it
+holds: a faint dot in the middle of a space, an arrow across the full width of a
+tab, and — in the theme's warning colour, because these are the ones that
+usually arrived by accident — a ring for a no-break space, a diamond for an en
+quad or an ideographic space, and an upright bar for a zero-width character that
+even the caret cannot find. That is how a paragraph that renders wrongly for no
+visible reason stops being a mystery: markdown's indentation rules count spaces,
+and U+00A0 is not one. Two trailing spaces — a hard line break — are two dots
+you can see. Line endings get nothing, deliberately: a pilcrow on every line is
+the invasive version of this. ⌥⌘I turns the marks off; the choice is app-wide
+and remembered, like the theme, and nothing is written into the document — the
+marks are drawn over the text rather than substituted into it, so copying a line
+out of the pane copies the spaces you had.
+
 **Making one.** ⇧⌘N names a new document in a save panel, creates it, and opens
 it with the editor already focused — there is no untitled buffer to lose,
 because mark never holds a document that has no file. A name with no markdown

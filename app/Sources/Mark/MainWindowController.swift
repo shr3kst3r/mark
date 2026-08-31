@@ -1050,6 +1050,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // Which half of the theme is pinned, for the same reason and with the
         // same scope: pinning is one choice for the app, not one per window.
         state.themeAppearance = ThemeController.shared.appearance.rawValue
+        // The editor's whitespace marks, with the same scope for the same
+        // reason — see ``SessionState/editorInvisibles``.
+        state.editorInvisibles = Invisibles.isShowing
         return state
     }
 
@@ -1096,6 +1099,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         ThemeController.shared.restore(
             named: state.theme,
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
+        Invisibles.restore(state.editorInvisibles)
         guard let window = state.effectiveWindows.first else { return }
         restore(window, sidebarRoot: sidebarRoot)
     }
@@ -2336,6 +2340,18 @@ extension MainWindowController: NSMenuItemValidation {
         sidebar.listingOptions.showsHidden.toggle()
     }
 
+    /// ⌥⌘I — the editor's whitespace marks, on or off.
+    ///
+    /// App-wide rather than per window, and it does not go through this
+    /// controller's editor: ``Invisibles/isShowing`` posts, and every open
+    /// editor repaints. A menu item reaches the focused window through the
+    /// responder chain, and a second window still dotting its spaces would read
+    /// as the toggle half-working.
+    @objc public func toggleInvisibles(_ sender: Any?) {
+        Invisibles.isShowing.toggle()
+        saveSessionSoon()
+    }
+
     /// The Sort By submenu, dispatched by `tag` in ``TreeSort/allCases`` order.
     @objc public func sortSidebar(_ sender: Any?) {
         guard let item = sender as? NSMenuItem,
@@ -2513,6 +2529,12 @@ extension MainWindowController: NSMenuItemValidation {
             return true
         case #selector(toggleShowsHiddenFiles(_:)):
             item.state = sidebar.listingOptions.showsHidden ? .on : .off
+            return true
+        case #selector(toggleInvisibles(_:)):
+            // Enabled with the editor hidden, like `Show Changes` is with no
+            // repository: it is a setting the next editor to open will honour,
+            // and greying it out would say the setting does not exist.
+            item.state = Invisibles.isShowing ? .on : .off
             return true
         case #selector(sortSidebar(_:)):
             item.state =

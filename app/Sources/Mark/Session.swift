@@ -374,6 +374,20 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// nothing is written, and a tab is still clean until the user types.
     public var editorVisible: Bool?
 
+    /// Whether the editor draws a mark for every space, tab and stranger.
+    ///
+    /// **Top-level, beside ``theme``, rather than on ``SessionWindow``**, for
+    /// the reason the theme is: it is one choice about how source looks, not one
+    /// per window, and two editors disagreeing about whether a space is visible
+    /// is not a state anyone means to be in.
+    ///
+    /// Optional and additive like every field added since M8, so
+    /// ``currentVersion`` does not move. Absent — every session file written
+    /// before the marks existed — means the default, which is *on*: the feature
+    /// is "show me what is there", and a first launch that hid it would need
+    /// explaining.
+    public var editorInvisibles: Bool?
+
     /// Every window, in creation order
     /// (`2026-08-26-multiple-windows-and-split-panes`).
     ///
@@ -442,6 +456,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         theme: String? = nil,
         themeAppearance: String? = nil,
         editorVisible: Bool? = nil,
+        editorInvisibles: Bool? = nil,
         windows: [SessionWindow]? = nil,
         history: [SessionHistoryEntry]? = nil
     ) {
@@ -455,6 +470,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.theme = theme
         self.themeAppearance = themeAppearance
         self.editorVisible = editorVisible
+        self.editorInvisibles = editorInvisibles
         self.windows = windows
         self.history = history
     }

@@ -89,6 +89,14 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// without an observer keeping it aligned.
     private let ruler: ChangeRuler
 
+    /// The whitespace marks, drawn over the text. A subview of the text view,
+    /// so it scrolls with the document for the same reason the ruler does.
+    ///
+    /// Not `private`: `InvisiblesTests` draws it into a bitmap, which is the
+    /// only way to assert on a draw that needs a laid-out text container and
+    /// has no window to be laid out in.
+    let invisibles: InvisiblesOverlay
+
     /// `HEAD`'s bytes for the bound buffer's file, and the oid they came from.
     ///
     /// Cached because the read costs ~7 ms and cannot change while the oid does
@@ -168,6 +176,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         textView = NSTextView(usingTextLayoutManager: true)
         scrollView = NSScrollView(frame: frame)
         ruler = ChangeRuler(scrollView: scrollView)
+        invisibles = InvisiblesOverlay(textView: textView)
         super.init(frame: frame)
 
         Self.configure(textView)
@@ -206,6 +215,17 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             selector: #selector(visibleRegionChanged),
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
+        )
+        // Over the glyphs, and inside the text view so it scrolls with them.
+        // Newly exposed strips are drawn by AppKit as they arrive; everything
+        // that moves a mark without moving the viewport — a keystroke, a
+        // re-highlight, a theme — repaints it explicitly.
+        textView.addSubview(invisibles)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(invisiblesSettingChanged),
+            name: Invisibles.didChangeNotification,
+            object: nil
         )
         applyThemeColours()
     }
@@ -323,6 +343,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             in: NSRange(location: 0, length: storage?.length ?? 0), with: text)
         storage?.setAttributes(Self.baseAttributes, range: NSRange(location: 0, length: (text as NSString).length))
         storage?.endEditing()
+        invisibles.needsDisplay = true
     }
 
     // MARK: - NSTextViewDelegate
@@ -395,6 +416,11 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         }
         lastKeystrokeSeconds = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000_000
         scheduleHighlight()
+        // Not on the throttle: a space you have just typed must get its dot on
+        // the same frame as its cell, or the marks lag the caret. One
+        // viewport-bounded draw is affordable at typing cadence; the parse the
+        // throttle protects is not.
+        invisibles.needsDisplay = true
     }
 
     /// The escape hatch: take the text view's whole contents and replace the
@@ -418,6 +444,21 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     @objc private func visibleRegionChanged() {
         applyHighlight()
     }
+
+    /// The app-wide switch moved. Every open editor gets this, which is the
+    /// point of it being a notification.
+    @objc private func invisiblesSettingChanged() {
+        invisibles.needsDisplay = true
+    }
+
+    /// Whether this pane is drawing whitespace marks, and how many the last
+    /// draw put on screen — for the tests and for `mark-bench`, which has the
+    /// window a pixel assertion needs.
+    public var invisibleMarksDrawn: Int { invisibles.lastDrawnCount }
+
+    /// What the last whitespace-mark draw cost, in seconds. On the typing path,
+    /// so `mark-bench` can see it alongside ``lastKeystrokeSeconds``.
+    public var lastInvisiblesDrawSeconds: Double { invisibles.lastDrawSeconds }
 
     // MARK: - Highlighting
 
@@ -594,6 +635,10 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             storage.addAttributes(Self.attributes(for: entry.kind, level: entry.level), range: clipped)
         }
         storage.endEditing()
+        // The marks are positioned from the laid-out text, and this pass has
+        // just changed a heading's font size and a code block's background.
+        // Repainting them here covers scrolling and re-parsing in one place.
+        invisibles.needsDisplay = true
     }
 
     /// The character range on screen, plus a margin so a small scroll does not
@@ -786,6 +831,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             .backgroundColor: theme.editorColor(of: "selection", fallback: .selectedTextBackgroundColor)
         ]
         scrollView.backgroundColor = theme.backgroundColor
+        // The marks are drawn in the theme's `muted` and `warning` slots, so
+        // they change with it rather than with the appearance alone.
+        invisibles.needsDisplay = true
         needsDisplay = true
     }
 

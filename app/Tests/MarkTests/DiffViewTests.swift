@@ -332,6 +332,42 @@ struct DiffViewTests {
         #expect(guarded as? String == "old")
     }
 
+    /// The same refusal in the other direction: the preview cannot be steered
+    /// by a source position while it is showing a diff.
+    ///
+    /// The blocks in a diff carry two documents' offsets, so one byte offset
+    /// does not name one place — and the editor beside it is bound to the file
+    /// on disk, which is only one of them. Scrolling to the old side would send
+    /// the reader to a paragraph the working tree does not have.
+    ///
+    /// Refused in the page as well as in ``DocumentView/follow(sourceByte:)``,
+    /// because the two guards fail differently: the Swift one saves a process
+    /// hop, and this one is what makes the answer true for anything that calls
+    /// `scrollToSource` — the bench gate included.
+    @Test("a source position cannot scroll a diff")
+    func aDiffRefusesToBeScrolledBySourcePosition() async throws {
+        guard
+            let harness = try await Harness(
+                committed: "# Notes\n\nremoved paragraph\n",
+                working: "# Notes\n\nreplacement paragraph\n")
+        else {
+            print("skipped: no usable git")
+            return
+        }
+
+        // The same document, before and after — so the refusal is the diff and
+        // not something about this fixture.
+        let ordinary = try await harness.view.call(
+            "return window.mark.scrollToSource(0);")
+        #expect((ordinary as? Bool) == true)
+
+        _ = await harness.view.toggleDiff()
+        let refused = try await harness.view.call(
+            "return window.mark.scrollToSource(0);")
+        #expect((refused as? Bool) == false, "the diff let itself be scrolled by a byte offset")
+        #expect(harness.view.isShowingDiff, "and it should still be showing the diff")
+    }
+
     // MARK: - Interaction with the rest of the app
 
     /// A file change while the diff is up must recompute the diff, not patch it.

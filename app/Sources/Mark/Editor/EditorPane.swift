@@ -47,6 +47,38 @@ enum SourceOffsets {
         }
         return result
     }
+
+    /// The inverse: the UTF-8 byte offset of a UTF-16 offset.
+    ///
+    /// One offset rather than a sorted run, because there is only ever one —
+    /// the editor has one viewport top, and it is reported at most once per
+    /// throttle window. That is why this walks from the start each time instead
+    /// of carrying a cursor: the run-of-offsets shape above exists to make 60
+    /// visible blocks affordable at typing cadence, and there is nothing here
+    /// to amortise.
+    ///
+    /// An offset landing inside a surrogate pair rounds **down** to the scalar
+    /// that contains it. A byte offset that split a character would be one the
+    /// core could not use, and the character the reader is looking at is the
+    /// one that starts before the viewport edge, not the one after it.
+    static func byte(ofUTF16 utf16Offset: Int, in text: String) -> Int {
+        let utf8Length = text.utf8.count
+        let utf16Length = text.utf16.count
+        let target = min(max(0, utf16Offset), utf16Length)
+        // The same fast path, and the same common case: an all-ASCII document
+        // is the same numbers in both systems.
+        if utf8Length == utf16Length { return target }
+
+        var byteCursor = 0
+        var utf16Cursor = 0
+        for scalar in text.unicodeScalars {
+            let width = UTF16.width(scalar)
+            if utf16Cursor + width > target { break }
+            byteCursor += UTF8.width(scalar)
+            utf16Cursor += width
+        }
+        return min(byteCursor, utf8Length)
+    }
 }
 
 /// The third pane: a plain-text markdown editor.
@@ -117,6 +149,61 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// Editor scroll position and selection per buffer, restored on rebind so
     /// switching tabs and coming back does not put the caret at the top.
     private var places: [ObjectIdentifier: (selection: NSRange, scroll: CGFloat)] = [:]
+
+    /// Called with the source position at the top of this pane's viewport — a
+    /// UTF-8 byte offset — each time the **reader** moves the pane.
+    ///
+    /// The mirror of ``DocumentView/onSourceTop``, and deliberately the same
+    /// name: both mean "the top of my viewport, in the core's coordinates", and
+    /// the sync is those two callbacks pointed at each other.
+    ///
+    /// "The reader" is the whole of it. A pane that reported every scroll would
+    /// report the ones it made itself following the preview, and the two panes
+    /// would chase each other for as long as the rounding kept changing the
+    /// answer. See ``isMovingItself``.
+    public var onSourceTop: ((Int) -> Void)?
+
+    /// Set while the pane is scrolling itself for a reason that is not the
+    /// reader: following the preview, or restoring a remembered place on
+    /// rebind. Nothing is reported out of it.
+    ///
+    /// A flag rather than a comparison against the last position, because the
+    /// two are not distinguishable after the fact — the pane ends up at the
+    /// same coordinate whether the reader put it there or the preview did, and
+    /// only the code that moved it knows which.
+    private var isMovingItself = false
+
+    /// Where the pane last put *itself*, or `nil` if it never has.
+    ///
+    /// The flag above covers the moment of the move, and it is not enough: the
+    /// bounds change that arrives while a scroll is being made is only the
+    /// first of them. The ones that follow are the settling — TextKit laying
+    /// out what the move exposed, the highlight pass writing attributes into
+    /// it, the text view resizing under both — and they arrive turns of the run
+    /// loop later, long after any synchronous flag has been cleared.
+    ///
+    /// So the rule for those is positional: a bounds change that leaves the
+    /// pane at the coordinate the pane itself chose is the document settling
+    /// under a still viewport, and the reader has not gone anywhere. It is a
+    /// coordinate and not a byte offset on purpose — the byte at the top *does*
+    /// move when text above it reflows, and that is exactly the case this must
+    /// stay quiet about.
+    private var selfPositioned: CGFloat?
+
+    /// How often, at most, the pane tells the preview where it is.
+    ///
+    /// The page's own number, from `reportScroll` in `shell.js`, and the same
+    /// on purpose: each direction of the sync costs one process hop per report,
+    /// and a pane reporting per frame would put 120 of them a second between
+    /// the reader's trackpad and a `WKWebView` trying to keep up. Trailing
+    /// edge, so a fling reports where it *ended* rather than where it passed.
+    public static let sourceReportThrottle: TimeInterval = 0.120
+    private var sourceReport: DispatchWorkItem?
+
+    /// The last offset handed to ``onSourceTop``, so a scroll that does not
+    /// change which byte is at the top costs nothing. Reset to "none" on
+    /// rebind, where the same number means a different document.
+    private var lastReportedSourceByte: Int?
 
     /// The most recent parse of the buffer, in UTF-16 coordinates. Recomputed
     /// off the main actor and applied to the visible range only.
@@ -331,6 +418,16 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             showGutter(nil)
             return
         }
+        // A different document: the same byte offset means something else now,
+        // and everything below — the text going in, the clip view landing back
+        // at the top, the remembered place being restored over it — is this
+        // pane remembering rather than the reader going anywhere. Set before
+        // the text, because replacing it moves the clip view too.
+        lastReportedSourceByte = nil
+        sourceReport?.cancel()
+        sourceReport = nil
+        isMovingItself = true
+        defer { isMovingItself = false }
         textView.isEditable = true
         replaceText(with: buffer.text)
         if let place = places[ObjectIdentifier(buffer)] {
@@ -342,6 +439,10 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             textView.setSelectedRange(selection)
             scroll(to: place.scroll)
         }
+        // Whether a place was restored or the new document simply starts at the
+        // top, this is where the pane has put itself — and everything the
+        // rebind is about to provoke happens at that coordinate.
+        selfPositioned = scrollOffset
         scheduleHighlight(immediately: true)
     }
 
@@ -483,6 +584,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     @objc private func visibleRegionChanged() {
         applyHighlight()
+        reportSourceTopSoon()
         // The marks are a *layer* over the glyphs, and that is literal: the
         // text view and the overlay each have their own backing layer —
         // checked, both `layer` are non-nil the first time the overlay draws.
@@ -861,6 +963,16 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// common case for a fling that ends inside one long block.
     public func follow(previewByte byte: Int) {
         guard let buffer, byte >= 0 else { return }
+        // This pane is about to move because the preview moved. Reporting that
+        // back would be the pane telling the preview what the preview just told
+        // it — harmless on the first hop and an argument about rounding on the
+        // next, so the report is suppressed and the position is recorded as
+        // already sent.
+        isMovingItself = true
+        defer { isMovingItself = false }
+        sourceReport?.cancel()
+        sourceReport = nil
+        lastReportedSourceByte = byte
         // Measure, move, measure again — up to three times, and stopping as
         // soon as the answer stops moving.
         //
@@ -940,6 +1052,103 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         return y + textView.textContainerOrigin.y
     }
 
+    // MARK: - Leading the preview
+
+    /// The other direction: tell whoever is listening where this pane's
+    /// viewport top is, in the source.
+    ///
+    /// Trailing-edge throttled, because the notification behind it fires on
+    /// every frame of every scroll and the consumer is a process hop away. The
+    /// window's is 120 ms — the page's own — so a fling reports four or five
+    /// times on the way rather than a hundred, and always once at the end.
+    private func reportSourceTopSoon() {
+        guard onSourceTop != nil, !isMovingItself, sourceReport == nil else { return }
+        // Still where the pane put itself: the document moved, the viewport did
+        // not, and nobody needs telling. See ``selfPositioned``.
+        if let placed = selfPositioned, abs(scrollOffset - placed) < 0.5 { return }
+        let work = DispatchWorkItem { [weak self] in self?.reportSourceTop() }
+        sourceReport = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.sourceReportThrottle, execute: work)
+    }
+
+    /// Fire the pending report now rather than at the end of the throttle
+    /// window, and say whether there was one to fire.
+    ///
+    /// The tests' seam, and it exists because of a limitation they have already
+    /// documented twice: a test window is never on screen, so AppKit never runs
+    /// the viewport layout pass that gives the text view its real height — and
+    /// a scroll position set on a clip view over a document that does not yet
+    /// know how tall it is is constrained back to zero on the next turn of the
+    /// run loop. Waiting out 120 ms of real time therefore measures the
+    /// harness rather than the pane.
+    ///
+    /// The return value carries the half that matters: `false` means no report
+    /// was ever *scheduled*, which is what the suppression tests assert.
+    @discardableResult
+    func flushSourceReport() -> Bool {
+        guard let work = sourceReport else { return false }
+        work.cancel()
+        sourceReport = nil
+        reportSourceTop()
+        return true
+    }
+
+    private func reportSourceTop() {
+        sourceReport = nil
+        guard !isMovingItself, let byte = sourceTopByte else { return }
+        // Scrolling inside one long block — a code fence, a wrapped table —
+        // resolves to the same byte for many frames, and the preview is already
+        // there.
+        guard byte != lastReportedSourceByte else { return }
+        lastReportedSourceByte = byte
+        // The reader has left wherever the pane parked it, so the parked
+        // coordinate has nothing left to say. Kept any longer it would silence
+        // a genuine scroll that happened to come back to the same pixel.
+        selfPositioned = nil
+        onSourceTop?(byte)
+    }
+
+    /// Where the top of this pane's viewport is in the source, as a UTF-8 byte
+    /// offset, or `nil` if TextKit cannot say.
+    ///
+    /// The exact inverse of ``sourceY(ofByte:in:)``, down to the line fragment:
+    /// that walks a byte offset out to a coordinate, this walks a coordinate
+    /// back to a byte offset, and both stop at the *line* inside a paragraph
+    /// rather than at the paragraph. A paragraph is one layout fragment however
+    /// many screen lines it wraps to, so stopping at the fragment would report
+    /// the same offset for a whole screenful of a long paragraph and then jump
+    /// — the stepping the page avoids by interpolating through a block's span,
+    /// avoided here by reading the line.
+    ///
+    /// `nil`, never zero, when it cannot be resolved. The page holds the same
+    /// distinction at `blockStart`, and for the same reason: "I do not know"
+    /// and "the top of the file" would otherwise be the same message, and the
+    /// preview would be yanked to line 1 by every document that could not be
+    /// mapped.
+    public var sourceTopByte: Int? {
+        guard let buffer,
+            let layoutManager = textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager
+        else { return nil }
+        // Rubber-banding puts the clip view above the top of the document, and
+        // a negative y resolves to no fragment at all.
+        let y = max(0, scrollOffset - textView.textContainerOrigin.y)
+        guard let fragment = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: y))
+        else { return nil }
+        let fragmentStart = contentManager.offset(
+            from: contentManager.documentRange.location, to: fragment.rangeInElement.location)
+        var index = fragmentStart
+        let within = y - fragment.layoutFragmentFrame.minY
+        for line in fragment.textLineFragments {
+            // Line fragments ascend, so the last one starting at or above the
+            // viewport top is the one the reader is looking at.
+            guard line.typographicBounds.minY <= within else { break }
+            index = fragmentStart + line.characterRange.location
+        }
+        return SourceOffsets.byte(ofUTF16: index, in: buffer.text)
+    }
+
     /// Where the pane is scrolled to, in the text view's coordinates.
     ///
     /// `public` for the same reason ``textView`` is: `mark-bench` asserts on it
@@ -950,6 +1159,11 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     private func scroll(to y: CGFloat) {
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
         scrollView.reflectScrolledClipView(scrollView.contentView)
+        // The one place the pane moves itself, so the one place that has to
+        // record it. Read back rather than assumed: the clip view constrains to
+        // the document's height, so where it *went* and where it was *sent* are
+        // not always the same number.
+        selfPositioned = scrollOffset
     }
 
     // MARK: - Appearance

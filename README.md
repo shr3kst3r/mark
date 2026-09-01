@@ -321,16 +321,17 @@ project, and midnight.
 **Editing.** ⌥⌘E opens the third pane on the selected document. It is a real
 `NSTextView`, so undo, Find & Replace, spellcheck, text substitution, and
 accessibility are the system's rather than ours. The preview updates as you
-type, one block at a time. Scrolling the preview scrolls the editor with it, to
-the same line: the page reports which block is under the top of its viewport and
-the pane goes to the bytes that block was rendered from, so a diagram that is
-one line of source and half a screen of picture does not put the two panes out
-of step. Autosave writes 800 ms after you stop, atomically, through any symlink
-to the real file. If something else writes the file while you have unsaved
-changes, autosave pauses and you are asked — keep mine, take theirs, or show me
-the diff — and nothing is written until you answer. The pane starts hidden: a
-document opens read-only until you ask to edit it, and the app remembers that
-you asked.
+type, one block at a time. The two panes scroll together, in both directions
+and to the same line: whichever one you move says which source bytes are under
+the top of its viewport, and the other goes there. Bytes rather than a scroll
+percentage, so a diagram that is one line of source and half a screen of picture
+does not put the two panes out of step — and whichever pane is following stays
+quiet about the move, so they never chase each other. Autosave writes 800 ms
+after you stop, atomically, through any symlink to the real file. If something
+else writes the file while you have unsaved changes, autosave pauses and you are
+asked — keep mine, take theirs, or show me the diff — and nothing is written
+until you answer. The pane starts hidden: a document opens read-only until you
+ask to edit it, and the app remembers that you asked.
 
 **Every space, and which kind.** The editor draws a mark for each blank it
 holds: a faint dot in the middle of a space, an arrow across the full width of a

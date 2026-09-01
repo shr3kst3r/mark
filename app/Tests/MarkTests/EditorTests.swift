@@ -573,6 +573,45 @@ struct EditorPaneTests {
         #expect(SourceOffsets.utf16(of: [bytes + 99], in: mixed) == [8])
     }
 
+    /// And back, which is the direction the preview follows the editor in.
+    ///
+    /// Getting *this* one wrong shifts the preview after the first non-ASCII
+    /// character, and in the same silent way: the pane reports a position it
+    /// believes, and the page scrolls to a different paragraph.
+    @Test("UTF-16 offsets convert back to byte offsets across multi-byte text")
+    func offsetsConvertBack() {
+        let ascii = "# Title\n\nbody\n"
+        for offset in [0, 7, 9] {
+            #expect(SourceOffsets.byte(ofUTF16: offset, in: ascii) == offset)
+        }
+
+        // The same string, read the other way: the pairs above are (byte,
+        // utf16), so these are (utf16, byte).
+        let mixed = "# é 🙂 x"
+        let bytes = Array(mixed.utf8).count
+        #expect(SourceOffsets.byte(ofUTF16: 0, in: mixed) == 0)
+        #expect(SourceOffsets.byte(ofUTF16: 2, in: mixed) == 2)
+        #expect(SourceOffsets.byte(ofUTF16: 3, in: mixed) == 4)
+        #expect(SourceOffsets.byte(ofUTF16: 4, in: mixed) == 5)
+        #expect(SourceOffsets.byte(ofUTF16: 8, in: mixed) == bytes)
+
+        // Every offset that is a character boundary survives the round trip,
+        // which is the property the two panes rest on.
+        let boundaries = [0, 2, 3, 4, 8]
+        #expect(
+            SourceOffsets.utf16(of: boundaries.map { SourceOffsets.byte(ofUTF16: $0, in: mixed) },
+                in: mixed) == boundaries)
+
+        // Inside the emoji's surrogate pair, which is not a character boundary
+        // and cannot be a byte offset: it resolves to the scalar that contains
+        // it rather than to a byte that would split it.
+        #expect(SourceOffsets.byte(ofUTF16: 5, in: mixed) == 5)
+
+        // Past the end clamps, the way the forward direction does.
+        #expect(SourceOffsets.byte(ofUTF16: 999, in: mixed) == bytes)
+        #expect(SourceOffsets.byte(ofUTF16: -7, in: mixed) == 0)
+    }
+
     /// Every mutation of the text storage has to reach the buffer, not just
     /// the ones a `shouldChangeText` hook would hear about. Typing, deleting,
     /// pasting and undoing all go through the storage, and each of them leaving

@@ -635,6 +635,154 @@ func measureEditorFollowingThePreview(_ harness: EditorBenchHarness) async {
     print("")
 }
 
+// MARK: - The preview following the editor
+
+/// The gate for the other direction: scroll the source, the rendered document
+/// comes with it.
+///
+/// Only measurable here, and more so than its mirror. Both ends are geometry —
+/// TextKit has to have laid the source out for the pane to say which line is at
+/// its top, and the page has to be laid out in a window for a block to have a
+/// rectangle — and the unit suite can drive each end but not the pair. What it
+/// cannot assert is the property the reader actually has: that the paragraph
+/// they scrolled the source to is the paragraph the preview is showing.
+@MainActor
+func measureThePreviewFollowingTheEditor(_ harness: EditorBenchHarness) async {
+    print("The preview following the editor:")
+
+    var source = ""
+    var starts: [Int] = []
+    for index in 0..<600 {
+        starts.append(source.utf8.count)
+        source += "Paragraph \(index) of the document.\n\n"
+    }
+    do {
+        try harness.write(source, to: "leading.md")
+    } catch {
+        require(false, "the lead document could not be written: \(error)")
+        return
+    }
+    guard let tab = await harness.open("leading.md"), let view = tab.documentView else {
+        require(false, "the lead document did not open")
+        return
+    }
+    harness.controller.setEditorVisible(true)
+    await view.ensureFullyRendered()
+    await harness.settle(milliseconds: 300)
+
+    let pane = harness.controller.editor
+
+    /// Which paragraph a byte offset is in.
+    func paragraph(containing byte: Int) -> Int {
+        var found = 0
+        for (index, start) in starts.enumerated() where start <= byte { found = index }
+        return found
+    }
+
+    /// The paragraph the *preview* is showing, read out of the DOM rather than
+    /// out of the mapping under test.
+    func previewTopParagraph() async -> Int? {
+        let text = try? await view.call(
+            """
+            var blocks = document.getElementById('mk-doc').children;
+            for (var i = 0; i < blocks.length; i++) {
+              if (blocks[i].getBoundingClientRect().bottom > 0) return blocks[i].textContent;
+            }
+            return '';
+            """)
+        guard let text = (text as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            text.hasPrefix("Paragraph ")
+        else { return nil }
+        return Int(text.dropFirst("Paragraph ".count).prefix { $0.isNumber })
+    }
+
+    /// Scroll the pane the way a hand on a trackpad does — the clip view moves
+    /// and the bounds change carries it from there. Not through the pane's own
+    /// scrolling, which is the path the *preview* drives and the one that stays
+    /// deliberately quiet.
+    func scrollPane(to y: CGFloat) {
+        guard let scrollView = pane.textView.enclosingScrollView else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    var leadLatency = Stat()
+    var worstDrift = 0
+
+    for target in [900.0, 4_500.0, 13_000.0, 1_800.0] as [CGFloat] {
+        let before = view.scrollOffset
+        let began = Date()
+        scrollPane(to: target)
+        // The pane reports on its own 120 ms throttle; this is what the reader
+        // waits before the page moves.
+        let moved = await waitUntilTrue(seconds: 3) { view.scrollOffset != before }
+        let elapsed = Date().timeIntervalSince(began) * 1000
+        guard moved else {
+            require(false, "the preview did not follow a source scroll to \(Int(target)) pt")
+            continue
+        }
+        leadLatency.add(elapsed)
+        await harness.settle(milliseconds: 200)
+
+        // Both sides read once everything has settled, and the pane's side read
+        // *here* rather than straight after the scroll. TextKit 2 estimates the
+        // height of what it has not laid out, so the line the pane believes is
+        // at its top a millisecond after a jump is not always the line that is
+        // there once the layout is real — and the question this gate asks is
+        // what the reader ends up looking at, in both panes, when the scrolling
+        // stops.
+        guard let reported = pane.sourceTopByte else {
+            require(false, "the pane could not say where it is at \(Int(target)) pt")
+            continue
+        }
+        let expected = paragraph(containing: reported)
+        let shown = await previewTopParagraph()
+        let drift = shown.map { abs($0 - expected) } ?? 999
+        worstDrift = max(worstDrift, drift)
+        line(
+            "editor at \(Int(target)) pt",
+            "source byte \(reported) (paragraph \(expected)); preview shows "
+                + (shown.map(String.init) ?? "nothing") + "; \(String(format: "%.0f", elapsed)) ms"
+        )
+        require(
+            drift <= 1,
+            "the preview is showing paragraph \(shown.map(String.init) ?? "nothing") "
+                + "where the editor is showing \(expected)")
+    }
+
+    // And the two directions pointed at each other must not chase each other.
+    // Each pane stays quiet about the scroll the other one caused it to make;
+    // without that, one flick of the trackpad has the panes converging on a
+    // position neither of them was asked for, over as many hops as the rounding
+    // keeps changing the answer.
+    scrollPane(to: 7_000)
+    _ = await waitUntilTrue(seconds: 3) { view.scrollOffset > 0 }
+    await harness.settle(milliseconds: 600)
+    let restingPage = view.scrollOffset
+    let restingPane = pane.scrollOffset
+    await harness.settle(milliseconds: 800)
+    line(
+        "left alone for 800 ms",
+        "preview \(Int(restingPage)) → \(Int(view.scrollOffset)) pt, "
+            + "editor \(Int(restingPane)) → \(Int(pane.scrollOffset)) pt")
+    require(
+        view.scrollOffset == restingPage && pane.scrollOffset == restingPane,
+        "neither pane moves once the reader stops")
+
+    row("lead latency", leadLatency, unit: "ms")
+    line("worst paragraph drift", "\(worstDrift)")
+    // The pane throttles its reports to 120 ms, the same as the page throttles
+    // its own — so this is the number to watch if leading ever feels behind,
+    // and it should sit alongside the follow latency above rather than beyond
+    // it.
+    require(
+        leadLatency.median <= 400,
+        "the preview follows within 400 ms (the pane reports every 120 ms)")
+
+    harness.controller.tabs.close(tab)
+    print("")
+}
+
 // MARK: - Entry point
 
 @MainActor
@@ -659,6 +807,8 @@ func runEditorGates(corpus: URL) async {
     await measureContinuousTyping(harness, corpus: source)
 
     await measureEditorFollowingThePreview(harness)
+
+    await measureThePreviewFollowingTheEditor(harness)
 
     // A small document for the picture: a megabyte of generated corpus makes an
     // unreadable screenshot, and what the snapshot is evidence *of* is the

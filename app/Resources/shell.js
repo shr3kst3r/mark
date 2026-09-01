@@ -712,6 +712,27 @@
   };
 
   /*
+   * The byte offset a block was rendered from, or `null` if this block cannot
+   * say — which is a real answer and not a zero.
+   *
+   * Two blocks cannot: an error card (`mk-error`), which carries no span at
+   * all, and a block taken from the old side of a diff, whose offsets are into
+   * a version of the file that is not on disk. Scrolling either pane to one
+   * would put it somewhere in a document that no longer exists — or past the
+   * end of a file that has since shrunk.
+   *
+   * Shared by both directions of the editor sync on purpose: the mapping is one
+   * mapping, and two copies of it would be free to disagree about exactly the
+   * documents where it matters.
+   */
+  function blockStart(block) {
+    if (!block.hasAttribute("data-mk-start")) return null;
+    if (block.getAttribute("data-mk-side") === "old") return null;
+    var start = Number(block.getAttribute("data-mk-start"));
+    return isFinite(start) && start >= 0 ? start : null;
+  }
+
+  /*
    * Where the top of the viewport is in the *source*, as a UTF-8 byte offset,
    * or `null` if this document cannot say.
    *
@@ -752,18 +773,12 @@
       }
     }
     var block = blocks[found];
-    /* An error page (`mk-error`) is a child of the container and carries no
-     * span. Reporting nothing is right: `Number(null)` is 0, and syncing the
-     * editor to the top of the document would be worse than not syncing it. */
-    if (!block.hasAttribute("data-mk-start")) return null;
-    /* A block taken from the old document carries the old document's offsets,
-     * so scrolling the editor to one would put the caret in the wrong place —
-     * or past the end of a file that has since shrunk. Reporting nothing is the
-     * same answer an error card gets, and for the same reason. */
-    if (block.getAttribute("data-mk-side") === "old") return null;
-    var start = Number(block.getAttribute("data-mk-start"));
+    /* Nothing, not zero, for a block that cannot be mapped: `Number(null)` is
+     * 0, and syncing the editor to the top of the document would be worse than
+     * not syncing it at all. See `blockStart`. */
+    var start = blockStart(block);
+    if (start === null) return null;
     var end = Number(block.getAttribute("data-mk-end"));
-    if (!isFinite(start) || start < 0) return null;
     if (!isFinite(end) || end < start) end = start;
     var rect = block.getBoundingClientRect();
     var into = rect.height > 0 ? -rect.top / rect.height : 0;
@@ -775,6 +790,82 @@
   /* Exposed for the bench gate, which asserts on the mapping itself and not
    * only on where the editor ended up. */
   mark.sourceTop = sourceTop;
+
+  /*
+   * Put the source byte offset `byte` at the top of the viewport: the mirror of
+   * `sourceTop`, and the half of the sync the editor drives.
+   *
+   * Reads the same two attributes `sourceTop` reads, in the same order, and
+   * interpolates through the block's byte span the same way — so a byte the
+   * page has just reported, sent straight back, lands where it came from. That
+   * round trip is the property the test asserts on, and it is what keeps the
+   * two directions from disagreeing about where the middle of a long code fence
+   * is.
+   *
+   * **Never forces the background fill.** `scrollToAnchor` and `scrollToTask`
+   * do, because they are commands: the reader named a place and it must be
+   * found. This is a follow — it runs while a hand is on the trackpad, and
+   * stalling that scroll to lay out the rest of a 1 MB document is the one
+   * thing it must not do. A byte past the painted prefix therefore lands at the
+   * bottom of what has painted, and the editor's next report (120 ms later, at
+   * the latest) lands properly once the fill has caught up.
+   *
+   * Returns false where `sourceTop` returns null, and for the same reasons: an
+   * error page carries no spans, and an old-side block carries the *previous*
+   * document's, so a diff view cannot be steered by source position at all.
+   */
+  mark.scrollToSource = function (byte) {
+    var blocks = container.children;
+    var count = blocks.length;
+    if (!count || !isFinite(byte) || byte < 0) return false;
+
+    /* Binary search, for `sourceTop`'s reason: this runs on every report from
+     * the editor, and a linear walk of a 1 MB document's blocks would run
+     * thousands of times a second. Block starts ascend because the core emits
+     * blocks in document order — the one document where they do not is the diff
+     * view, and `blockStart` refuses that outright rather than binary-searching
+     * a sequence that is not sorted. */
+    var low = 0;
+    var high = count - 1;
+    /* The first block, for a byte that sits above every start — the front
+     * matter of the document, where the editor is before its first scroll. */
+    var found = 0;
+    while (low <= high) {
+      var mid = (low + high) >> 1;
+      var probe = blockStart(blocks[mid]);
+      if (probe === null) return false;
+      if (probe <= byte) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    var block = blocks[found];
+    var start = blockStart(block);
+    if (start === null) return false;
+    var end = Number(block.getAttribute("data-mk-end"));
+    if (!isFinite(end) || end < start) end = start;
+    var rect = block.getBoundingClientRect();
+    var into = end > start ? (byte - start) / (end - start) : 0;
+    if (!(into > 0)) into = 0;
+    if (into > 1) into = 1;
+
+    var target = window.pageYOffset + rect.top + into * rect.height;
+    var reachable = document.documentElement.scrollHeight - window.innerHeight;
+    if (target > reachable) target = reachable;
+    if (target < 0) target = 0;
+    /* Under a pixel is the common case for an editor scrolling inside one long
+     * block, and moving for it would cost a report to no purpose. */
+    if (Math.abs(target - window.pageYOffset) < 1) return true;
+    /* The page moved because the *editor* moved, not because the reader moved
+     * the page. Saying so is what stops the next report bouncing this position
+     * back at the pane that sent it. */
+    heldPlace = true;
+    window.scrollTo(0, target);
+    return true;
+  };
 
   mark.scrollPosition = function () {
     /* NOT document.body.scrollTop: that returns 0 in WKWebView. */
@@ -1079,8 +1170,9 @@
     return null;
   }
 
-  /* Set when the page moved itself to keep the reader still, and read by the
-   * next scroll report. See `reportScroll`. */
+  /* Set when the page moved itself rather than the reader moving it — holding
+   * the reader's place across a re-render, or following the editor pane — and
+   * read by the next scroll report. See `reportScroll`. */
   var heldPlace = false;
 
   function restoreAnchor(anchor) {
@@ -1412,12 +1504,15 @@
      * it. Absent on a document that cannot be mapped; never zero as a stand-in
      * for absent.
      *
-     * Absent, too, on a re-render that held the reader's place: that moved
-     * `pageYOffset` without the reader going anywhere — the same block is under
-     * the same pixel. The offset still has to be reported, because dehydration
+     * Absent, too, on a scroll the page made itself rather than the reader
+     * making it — a re-render that held the reader's place, or `scrollToSource`
+     * following the editor pane. Both move `pageYOffset` without the reader
+     * going anywhere. The offset still has to be reported, because dehydration
      * and the session file are about pixels, but the source position must not
-     * be, or typing above the viewport would drag an editor the reader had
-     * scrolled somewhere else back to whatever line the preview is showing. */
+     * be: on the first, typing above the viewport would drag an editor the
+     * reader had scrolled somewhere else back to whatever line the preview is
+     * showing; on the second, the page would answer the pane's own position
+     * back at it, and the two would spend a scroll arguing about rounding. */
     var source = held ? null : sourceTop();
     if (source === null) {
       post({ kind: "scroll", y: y });

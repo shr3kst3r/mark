@@ -55,6 +55,44 @@ final class EditorHarness {
         view.scriptBridge(ScriptBridge(), didReceive: .scroll(y: y, source: source))
     }
 
+    /// Scroll the editor pane the way a hand on a trackpad does: move the clip
+    /// view and let the bounds-change notification carry it from there.
+    ///
+    /// Deliberately *not* ``EditorPane/scroll(to:)``, which is the path the
+    /// preview drives and the one that suppresses the report. The whole
+    /// question these tests ask is whether the pane can tell those two apart.
+    func scrollEditor(to y: CGFloat) {
+        let pane = controller.editor
+        guard let scrollView = pane.textView.enclosingScrollView else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// The text of the first block the page is showing at or below its viewport
+    /// top — the preview's answer to "which paragraph am I on", read out of the
+    /// DOM rather than out of the mapping under test.
+    func previewTopBlock(in tab: DocumentTab) async throws -> String {
+        guard let view = tab.documentView else { return "" }
+        let text = try await view.call(
+            """
+            var blocks = document.getElementById('mk-doc').children;
+            for (var i = 0; i < blocks.length; i++) {
+              if (blocks[i].getBoundingClientRect().bottom > 0) {
+                return blocks[i].textContent;
+              }
+            }
+            return '';
+            """)
+        return ((text as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Where the page is, in its own pixels.
+    func previewOffset(in tab: DocumentTab) async throws -> Double {
+        guard let view = tab.documentView else { return 0 }
+        let y = try await view.call("return window.mark.scrollPosition().y;")
+        return (y as? Double) ?? 0
+    }
+
     /// Type, through the real text view and its delegate.
     func type(_ text: String, at location: Int) {
         let view = controller.editor.textView
@@ -628,5 +666,224 @@ struct EditorRoundTripTests {
             pane.highlightWrites > painted,
             "text scrolled into view for the first time was never highlighted")
     }
-}
 
+    // MARK: - The preview follows the editor
+
+    /// The reverse mapping on its own: scroll the pane, and see what it says it
+    /// is showing.
+    ///
+    /// Flushed rather than waited out. A test window is never on screen, so the
+    /// text view never gets the viewport layout pass that would give it its
+    /// real height, and a clip view scrolled over a document that does not know
+    /// how tall it is snaps back to zero within a turn of the run loop — so
+    /// sleeping through the pane's 120 ms throttle would assert on the harness
+    /// rather than on the pane. See ``EditorPane/flushSourceReport()``.
+    @Test("scrolling the editor reports the line it is showing")
+    func theEditorReportsWhereItIs() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+
+        var reported: [Int] = []
+        pane.onSourceTop = { reported.append($0) }
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.scrollEditor(to: try #require(pane.sourceY(ofByte: target, in: source)))
+        #expect(pane.flushSourceReport(), "the pane scheduled no report for a reader's scroll")
+        #expect(reported == [target])
+
+        // And back up, so this is leading rather than a one-way jump.
+        let earlier = (source as NSString).range(of: "Paragraph 40 of the document.").location
+        harness.scrollEditor(to: try #require(pane.sourceY(ofByte: earlier, in: source)))
+        #expect(pane.flushSourceReport())
+        #expect(reported == [target, earlier])
+    }
+
+    /// The two directions are now pointed at each other, and what keeps that
+    /// from being a loop is that each pane stays quiet about the scroll the
+    /// *other* one caused it to make.
+    ///
+    /// Not "the report was the same number, so nothing happened": a report is
+    /// never scheduled at all. The distinction is the whole design — the two
+    /// panes round through different geometry, so a suppression that relied on
+    /// the numbers matching would leak exactly where the mapping is least
+    /// exact.
+    @Test("the editor reports nothing for a scroll the preview caused")
+    func followingThePreviewIsNotReported() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+
+        var reported: [Int] = []
+        pane.onSourceTop = { reported.append($0) }
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.reportScroll(4_000, source: target, on: tab)
+        #expect(pane.scrollOffset > 0, "the editor did not follow the preview at all")
+        #expect(!pane.flushSourceReport(), "the pane reported the scroll the preview caused")
+        #expect(reported.isEmpty)
+    }
+
+    /// Rebinding is the pane remembering, not the reader scrolling.
+    ///
+    /// Switching tabs restores the incoming document's caret and scroll
+    /// position, and reopening the pane restores the one it already had.
+    /// Reporting either would push a preview — which has its own remembered
+    /// place — to wherever the pane happened to land. The case that bites is
+    /// the pane being *reopened*: the reader closed it, read on in the
+    /// preview, and reopening the source must not throw the page back to
+    /// wherever the source was left.
+    ///
+    /// Bound directly, with nothing awaited in between, and that is the point
+    /// rather than a shortcut. A test window never gets AppKit's viewport
+    /// layout pass, so the text view never learns its real height and the clip
+    /// view is constrained back towards zero on the next turn of the run loop
+    /// — a move the pane is right to report and the harness is wrong to make.
+    /// Everything asserted here happens inside ``EditorPane/bind(_:)``.
+    @Test("rebinding the editor reports nothing")
+    func rebindingIsNotReported() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let first = try await harness.open(source, named: "first.md")
+        let firstBuffer = try harness.edit(first)
+        let pane = harness.controller.editor
+        let second = try await harness.open(source, named: "second.md")
+        let secondBuffer = try harness.edit(second)
+
+        // Leave the source half way down, so the rebinds below have a place to
+        // restore rather than landing at the top either way.
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.scrollEditor(to: try #require(pane.sourceY(ofByte: target, in: source)))
+        #expect(pane.flushSourceReport())
+
+        var reported: [Int] = []
+        pane.onSourceTop = { reported.append($0) }
+
+        pane.bind(firstBuffer)
+        #expect(!pane.flushSourceReport(), "binding the editor to another document reported")
+        pane.bind(secondBuffer)
+        #expect(!pane.flushSourceReport(), "restoring the editor's remembered place reported")
+        #expect(reported.isEmpty)
+    }
+
+    /// One editor pane, and a window can have two documents open. The pane
+    /// leads the one it is bound to and leaves the other alone — the mirror of
+    /// ``theEditorFollowsOnlyItsOwnDocument()``, and the same guard read the
+    /// other way round.
+    ///
+    /// Asserted on the pages, because that is where the guard's failure would
+    /// show: the byte offset is one number and it means two different places in
+    /// two different documents.
+    @Test("scrolling the editor leaves a document it is not bound to alone")
+    func theEditorLeadsOnlyItsOwnDocument() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let first = try await harness.open(source, named: "first.md")
+        let second = try await harness.open(source, named: "second.md")
+        _ = try harness.edit(second)
+        let pane = harness.controller.editor
+        #expect(pane.buffer === second.buffer)
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        harness.scrollEditor(to: try #require(pane.sourceY(ofByte: target, in: source)))
+        #expect(pane.flushSourceReport())
+
+        let moved = await harness.waitUntil("the bound document's preview to follow") {
+            ((try? await harness.previewOffset(in: second)) ?? 0) > 0
+        }
+        #expect(moved)
+        #expect(
+            try await harness.previewOffset(in: first) == 0,
+            "the editor scrolled a document it is not bound to")
+    }
+
+    /// The page's half of the mapping, on its own and with real geometry: a
+    /// byte offset in, that byte at the top of the viewport.
+    ///
+    /// The round trip is the assertion that matters. `sourceTop` and
+    /// `scrollToSource` are inverses — the same block, the same span, the same
+    /// interpolation, read in opposite directions — and if they ever stop being
+    /// inverses the two panes drift apart by a little on every scroll instead
+    /// of failing outright.
+    @Test("the page puts a source byte at the top of its viewport, and back")
+    func thePageScrollsToASourceByte() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        let view = try #require(tab.documentView)
+
+        let target = (source as NSString).range(of: "Paragraph 200 of the document.").location
+        let landed = try await view.call(
+            "return window.mark.scrollToSource(byte);", arguments: ["byte": target])
+        #expect((landed as? Bool) == true)
+        #expect(try await harness.previewTopBlock(in: tab) == "Paragraph 200 of the document.")
+
+        // The byte the page reports where it has just been sent is the byte it
+        // was sent to. That is the round trip, and it is asserted in bytes
+        // rather than in pixels because bytes are what crosses between the
+        // panes: a block is taller than it has bytes in it, so a position that
+        // survives as an integer offset can still land a pixel or so off, and
+        // the pixel is the one that does not matter.
+        let landedAt = try await view.call("return window.mark.sourceTop();")
+        #expect(landedAt as? Int == target)
+
+        // The same round trip starting from a scroll the page made on its own,
+        // so this is the mapping and not one call agreeing with itself.
+        _ = try await view.call("return window.mark.scrollTo(y);", arguments: ["y": 5_000.0])
+        let reported = try await view.call("return window.mark.sourceTop();")
+        let byte = try #require(reported as? Int)
+        _ = try await view.call(
+            "return window.mark.scrollToSource(byte);", arguments: ["byte": byte])
+        #expect(
+            try await view.call("return window.mark.sourceTop();") as? Int == byte,
+            "the two halves of the mapping are not inverses")
+
+        // A byte past the end of the document lands at the end of it rather
+        // than nowhere: the reader scrolling their source to the last line
+        // should see the last block, not a page that refused to move.
+        _ = try await view.call("return window.mark.scrollTo(y);", arguments: ["y": 0.0])
+        let past = try await view.call(
+            "return window.mark.scrollToSource(byte);", arguments: ["byte": source.utf8.count + 1])
+        #expect((past as? Bool) == true)
+        #expect(try await harness.previewOffset(in: tab) > 0)
+
+        // And a position that is not one is refused rather than rounded to the
+        // top of the file.
+        let negative = try await view.call(
+            "return window.mark.scrollToSource(byte);", arguments: ["byte": -1])
+        #expect((negative as? Bool) == false)
+    }
+
+    /// The anti-loop property from the preview's side, end to end and through
+    /// both hops: the page really scrolls, really reports, the pane really
+    /// follows — and then nothing more happens.
+    ///
+    /// Without the suppression in ``EditorPane/follow(previewByte:)`` the
+    /// pane's arrival is reported straight back, and the page moves a second
+    /// time to the position it just sent, rounded through two mappings.
+    @Test("the preview does not move again once the editor has followed it")
+    func followingThePreviewDoesNotBounceBack() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        let view = try #require(tab.documentView)
+
+        _ = try await view.call("return window.mark.scrollTo(y);", arguments: ["y": 4_000.0])
+        #expect(
+            await harness.waitUntil("the editor to follow the preview") { pane.scrollOffset > 0 })
+
+        // Long enough for the pane's 120 ms report and the page's 120 ms one
+        // after it — the two hops a bounce would have to make.
+        let settled = try await harness.previewOffset(in: tab)
+        try? await _Concurrency.Task.sleep(for: .milliseconds(600))
+        #expect(
+            try await harness.previewOffset(in: tab) == settled,
+            "the preview moved again after the editor followed it")
+    }
+}

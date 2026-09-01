@@ -610,6 +610,47 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         return (result as? Bool) ?? false
     }
 
+    /// A follow is in flight, and the offset that arrived while it was.
+    ///
+    /// One call at a time, because `callAsyncJavaScript` completions are not
+    /// ordered against each other: two overlapping follows can land in the
+    /// order they were *not* sent, and the reader sees the page jump back to
+    /// where they have already scrolled past. Coalesced rather than queued —
+    /// only the newest position is worth going to.
+    private var isFollowingSource = false
+    private var pendingFollowByte: Int?
+
+    /// Put the source byte offset `byte` at the top of the viewport: the
+    /// preview following the editor pane.
+    ///
+    /// The mirror of ``EditorPane/follow(previewByte:)``, and the same contract
+    /// — a position, pushed, with no answer expected. Fire and forget on
+    /// purpose: the pane must not wait on a round trip to the page to finish
+    /// the frame the reader is scrolling.
+    ///
+    /// **Not while showing a diff.** The blocks there carry two documents'
+    /// offsets, so a byte offset does not name one place; the page refuses such
+    /// a document too, and this saves the hop. It is the same refusal
+    /// `sourceTop` makes in the other direction.
+    public func follow(sourceByte byte: Int) {
+        guard byte >= 0, isShellReady, !isShowingDiff else { return }
+        guard !isFollowingSource else {
+            pendingFollowByte = byte
+            return
+        }
+        isFollowingSource = true
+        _Concurrency.Task { @MainActor [weak self] in
+            _ = try? await self?.call(
+                "return window.mark.scrollToSource(byte);", arguments: ["byte": byte])
+            guard let self else { return }
+            self.isFollowingSource = false
+            if let next = self.pendingFollowByte {
+                self.pendingFollowByte = nil
+                self.follow(sourceByte: next)
+            }
+        }
+    }
+
     // MARK: - Finding
 
     /// Find every occurrence of `text`, highlight them all, and go to one.

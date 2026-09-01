@@ -304,6 +304,23 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar.gitBadges.dirtySource = { [weak self] url in
             self?.tab(for: url)?.authoritativeSource
         }
+        // The preview follows the editor: scrolling the source scrolls the
+        // rendered document beside it to the same place. The other half of
+        // ``wire(_:to:)``'s `onSourceTop`, wired here rather than there because
+        // there is one editor pane for the window's whole life, where a
+        // ``DocumentView`` is made, moved between windows, and torn down.
+        //
+        // The guard is the binding, exactly as it is in the other direction:
+        // the pane shows one buffer, so the document it may scroll is the one
+        // whose buffer that is. A split, a tab switch, or a view adopted from
+        // another window cannot make that answer stale, because it is asked
+        // fresh every time rather than cached at bind.
+        editor.onSourceTop = { [weak self] byte in
+            guard let self, self.isEditorVisible, let buffer = self.editor.buffer else { return }
+            guard let tab = self.groups.allTabs.first(where: { $0.buffer === buffer })
+            else { return }
+            tab.documentView?.follow(sourceByte: byte)
+        }
         body.onDrop = { [weak self] urls in
             self?.sidebar.handleDrop(urls) ?? false
         }

@@ -560,4 +560,73 @@ struct EditorRoundTripTests {
             visible.location > 0,
             "the pass would start at the top of a document the reader is at the bottom of")
     }
+
+    /// `2026-08-31`: the editor shook, and the marks were left behind.
+    ///
+    /// Reported as three symptoms of one fault — the source pane jumping up
+    /// and down while scrolling or typing, scrolling that would not stay
+    /// smooth, and a stippled band of whitespace dots standing in blank space
+    /// below the last line.
+    ///
+    /// ``EditorPane/applyHighlight()`` runs on every clip-view bounds change,
+    /// which is every frame of every scroll, and it used to re-run the whole
+    /// wipe-and-repaint each time. Its attributes are not cosmetic: a heading
+    /// is 19-point where the body is 13. So every frame invalidated layout,
+    /// every relayout resized the `isVerticallyResizable` text view, and
+    /// resizing the document view posted the bounds change that started it —
+    /// a loop with the reader's document inside it. Measured in the app on the
+    /// 7.9 KB file it was reported against: one `goto` produced two passes
+    /// 7 ms apart, and across the run the document view's height walked
+    /// 4,083 → 4,040 → 4,024 → 4,004 → 3,907 points, at one point standing 153
+    /// points taller than the text it held.
+    ///
+    /// The assertion is on ``EditorPane/highlightWrites`` rather than on the
+    /// height, and for the same reason the test above asserts on a range: a
+    /// test window is never on screen, so AppKit never runs the viewport
+    /// layout pass that would resize the view. What is asserted is the cause —
+    /// a scroll across text that is already painted must not touch the storage.
+    @Test("scrolling the editor over painted text does not repaint it")
+    func scrollingDoesNotRewriteTheAttributes() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(400)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        let parsed = await harness.waitUntil("the editor to parse its buffer") {
+            pane.highlightPasses > 0
+        }
+        #expect(parsed)
+
+        let layoutManager = try #require(pane.textView.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+        layoutManager.ensureLayout(for: contentManager.documentRange)
+
+        // One scroll to settle the painted span, and to prove the pass still
+        // happens at all — a highlight that never runs would pass the
+        // assertion below for the wrong reason.
+        let first = (source as NSString).range(of: "Paragraph 20 of the document.").location
+        harness.reportScroll(400, source: first, on: tab)
+        let painted = pane.highlightWrites
+        #expect(painted > 0, "the editor never painted anything to begin with")
+
+        // Now the reader scrolls about inside what is already painted. Every
+        // one of these posts a bounds change; none of them exposes new text.
+        for paragraph in [21, 22, 21, 20, 23, 20] {
+            let target = (source as NSString)
+                .range(of: "Paragraph \(paragraph) of the document.").location
+            harness.reportScroll(Double(400 + paragraph), source: target, on: tab)
+        }
+        #expect(
+            pane.highlightWrites == painted,
+            "scrolling over painted text rewrote the storage \(pane.highlightWrites - painted) more times")
+
+        // And new text still gets painted when it comes into view, so the
+        // coverage check is not simply switching the highlighting off.
+        let far = (source as NSString).range(of: "Paragraph 380 of the document.").location
+        harness.reportScroll(20_000, source: far, on: tab)
+        #expect(
+            pane.highlightWrites > painted,
+            "text scrolled into view for the first time was never highlighted")
+    }
 }
+

@@ -198,6 +198,15 @@ public final class ChangeRuler: NSRulerView {
     /// scan from the start of the document, and that is the one place a scan is
     /// affordable: one pass over the text before the viewport, against a draw
     /// that would otherwise be O(document × fragments).
+    ///
+    /// The scan reads the text through one 4 KB buffer rather than taking a
+    /// `substring(to:)`. This is on the scroll path — `drawHashMarksAndLabels`
+    /// runs every frame — and the substring version allocated and copied a
+    /// fresh `NSString` of everything above the viewport on each of them,
+    /// which on a large document scrolled near its end is a megabyte of
+    /// malloc-and-copy per frame for a number that fits in an `Int`. The pass
+    /// is still `O(document)`; what it no longer is, is `O(document)` bytes of
+    /// allocation.
     private func lineNumber(
         of location: NSTextLocation, in contentManager: NSTextContentManager,
         textView: NSTextView
@@ -205,9 +214,16 @@ public final class ChangeRuler: NSRulerView {
         let offset = contentManager.offset(from: contentManager.documentRange.location, to: location)
         guard offset > 0 else { return 0 }
         let text = textView.string as NSString
-        let upto = text.substring(to: min(offset, text.length))
+        let end = min(offset, text.length)
         var count = 0
-        for character in upto.utf16 where character == 10 { count += 1 }
+        var start = 0
+        var chunk = [unichar](repeating: 0, count: 4_096)
+        while start < end {
+            let length = min(chunk.count, end - start)
+            text.getCharacters(&chunk, range: NSRange(location: start, length: length))
+            for index in 0..<length where chunk[index] == 10 { count += 1 }
+            start += length
+        }
         return count
     }
 

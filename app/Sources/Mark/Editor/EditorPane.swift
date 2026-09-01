@@ -120,7 +120,26 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     /// The most recent parse of the buffer, in UTF-16 coordinates. Recomputed
     /// off the main actor and applied to the visible range only.
-    private var highlightRanges: [(range: NSRange, kind: String, level: Int?)] = []
+    ///
+    /// Assigning it drops ``highlightedRange``, because a new parse is exactly
+    /// the event that makes the attributes already in the storage wrong.
+    private var highlightRanges: [(range: NSRange, kind: String, level: Int?)] = [] {
+        didSet { highlightedRange = NSRange(location: 0, length: 0) }
+    }
+
+    /// The span of the text storage already carrying ``highlightRanges``.
+    ///
+    /// The whole reason ``applyHighlight()`` can run on every scroll frame
+    /// without re-laying out the document each time; see the comment there.
+    private var highlightedRange = NSRange(location: 0, length: 0)
+
+    /// Set while ``applyHighlight()`` is writing attributes, so the bounds
+    /// change its own relayout provokes does not re-enter it.
+    private var isHighlighting = false
+
+    /// How far past the viewport, in points, the highlight reaches, so a small
+    /// scroll does not reveal unpainted text before the next pass.
+    private static let highlightPadding: CGFloat = 2_000
 
     /// Bumped on every edit and every rebind, so a highlight computed for text
     /// that has since changed is dropped instead of applied to the wrong bytes.
@@ -153,6 +172,17 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// highlight pass took, end to end, and how many have run.
     public private(set) var lastHighlightSeconds: Double = 0
     public private(set) var highlightPasses = 0
+
+    /// How many times ``applyHighlight()`` has actually written attributes
+    /// into the text storage — as opposed to being called and finding the
+    /// screen already painted.
+    ///
+    /// Separate from ``highlightPasses``, which counts *parses*. This counts
+    /// **layout invalidations**, and it is the number the scroll behaviour
+    /// lives or dies by: every one of these re-lays out text and can resize
+    /// the document view under the reader, and this used to tick once or twice
+    /// per frame of every scroll.
+    public private(set) var highlightWrites = 0
 
     /// What the last keystroke cost the main thread, in seconds: the splice
     /// into the buffer and the bookkeeping around it, but not the parse, which
@@ -217,10 +247,17 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             object: scrollView.contentView
         )
         // Over the glyphs, and inside the text view so it scrolls with them.
-        // Newly exposed strips are drawn by AppKit as they arrive; everything
-        // that moves a mark without moving the viewport — a keystroke, a
-        // re-highlight, a theme — repaints it explicitly.
+        // The overlay is repainted explicitly rather than left to AppKit: see
+        // ``visibleRegionChanged()`` for why its own backing layer makes that
+        // necessary.
         textView.addSubview(invisibles)
+        textView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(textViewFrameChanged),
+            name: NSView.frameDidChangeNotification,
+            object: textView
+        )
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(invisiblesSettingChanged),
@@ -343,6 +380,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             in: NSRange(location: 0, length: storage?.length ?? 0), with: text)
         storage?.setAttributes(Self.baseAttributes, range: NSRange(location: 0, length: (text as NSString).length))
         storage?.endEditing()
+        // Every attribute in the storage has just been flattened back to the
+        // body font, so nothing is painted any more.
+        highlightedRange = NSRange(location: 0, length: 0)
         invisibles.needsDisplay = true
     }
 
@@ -443,6 +483,26 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     @objc private func visibleRegionChanged() {
         applyHighlight()
+        // The marks are a *layer* over the glyphs, and that is literal: the
+        // text view and the overlay each have their own backing layer —
+        // checked, both `layer` are non-nil the first time the overlay draws.
+        // So the text view repainting itself does not invalidate the
+        // overlay's, and the previous frame's marks stay composited over text
+        // that has since moved. That is the stippled band in the report: dots
+        // standing where the lines used to be. Repainting here means that
+        // whatever moved, the marks are redrawn from the geometry they are
+        // actually over. It costs one viewport-bounded draw — 1.2 ms for a
+        // pathological screenful, see ``InvisiblesOverlay/lastDrawSeconds`` —
+        // against a frame that no longer spends anything re-laying out the
+        // document.
+        invisibles.needsDisplay = true
+    }
+
+    /// The text view resized: TextKit replaced an estimated height with a real
+    /// one, or the pane changed width and the text rewrapped. Either way every
+    /// mark below the change is somewhere else now.
+    @objc private func textViewFrameChanged() {
+        invisibles.needsDisplay = true
     }
 
     /// The app-wide switch moved. Every open editor gets this, which is the
@@ -613,28 +673,104 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         }
     }
 
-    /// Paint the blocks that intersect the visible rectangle, and only those.
+    /// Paint the blocks that intersect the visible rectangle, and only those —
+    /// and only the ones that are not painted already.
     ///
     /// The bound on the work is the viewport, not the document, which is what
     /// keeps a 1 MB file typeable. Blocks off screen are painted when they
     /// scroll into view.
+    ///
+    /// # Why ``highlightedRange`` exists
+    ///
+    /// This runs on every clip-view bounds change, which is **every frame of
+    /// every scroll**. Without the coverage check it re-ran the whole
+    /// wipe-and-repaint each time, and the attributes it writes are not
+    /// cosmetic: a heading is 19-point where the body is 13, and a code block
+    /// carries a background. An attribute edit with different metrics
+    /// invalidates layout, TextKit re-lays out, and `NSTextView` — which is
+    /// `isVerticallyResizable` — resizes itself to the new
+    /// `usageBoundsForTextContainer`. Resizing the document view changes the
+    /// clip view's bounds, which posts the notification that started this.
+    ///
+    /// Measured on the 7.9 KB document the bug was reported against: one
+    /// `goto` produced two passes 7 ms apart and the document view's height
+    /// walked 4083 → 4040 → 4024 → 4004 → 3907 points across them, at one
+    /// point standing 153 points taller than the text it contained — the blank
+    /// band below the last line in the report, with the whitespace marks left
+    /// stranded in it. The reader sees the document shift under the pointer
+    /// and the scroll stutter, because every frame of it is spent re-laying
+    /// out text that was already correct.
+    ///
+    /// So the span already carrying this parse's attributes is remembered, and
+    /// a scroll inside it does no storage edit at all. Only the newly exposed
+    /// slice is painted, which is the work the moving viewport actually
+    /// created. The span is cleared — and the next pass repaints in full —
+    /// whenever the attributes themselves stop being valid: a new parse, a
+    /// theme change, or a wholesale replacement of the text.
     private func applyHighlight() {
+        // Painting is what posts the bounds change that lands back here. The
+        // coverage check below already makes that re-entry a no-op, but not
+        // until it has re-read the layout mid-edit; this stops it at the door.
+        guard !isHighlighting else { return }
         guard let storage = textView.textStorage, !highlightRanges.isEmpty else { return }
         let length = storage.length
         guard length > 0 else { return }
+        // An edit can have shortened the storage since the last pass, so what
+        // was painted is only what is still there.
+        highlightedRange = NSIntersectionRange(
+            highlightedRange, NSRange(location: 0, length: length))
 
-        let visible = visibleCharacterRange(padding: 2_000, length: length)
+        let visible = visibleCharacterRange(padding: Self.highlightPadding, length: length)
         guard visible.length > 0 else { return }
+        // The common case while scrolling: everything on screen is painted, so
+        // there is nothing to do and nothing to invalidate.
+        let painted = highlightedRange
+        if painted.length > 0, NSIntersectionRange(visible, painted) == visible { return }
 
+        // Whether the two spans can be merged into one. Abutting counts:
+        // scrolling by a line leaves a gap that ends exactly where the painted
+        // span begins, and treating that as disjoint would throw the span away
+        // once a frame.
+        let adjoins =
+            painted.length > 0 && visible.location <= NSMaxRange(painted)
+            && painted.location <= NSMaxRange(visible)
+
+        // The gaps only. Two of them at most: the viewport can move off either
+        // end of what is painted, and a jump lands clear of it entirely.
+        var gaps: [NSRange] = []
+        if !adjoins {
+            gaps = [visible]
+        } else {
+            if visible.location < painted.location {
+                gaps.append(
+                    NSRange(location: visible.location, length: painted.location - visible.location))
+            }
+            if NSMaxRange(visible) > NSMaxRange(painted) {
+                gaps.append(
+                    NSRange(
+                        location: NSMaxRange(painted),
+                        length: NSMaxRange(visible) - NSMaxRange(painted)))
+            }
+        }
+
+        highlightWrites += 1
+        isHighlighting = true
         storage.beginEditing()
-        storage.setAttributes(Self.baseAttributes, range: visible)
-        for entry in highlightRanges {
-            guard NSIntersectionRange(entry.range, visible).length > 0 else { continue }
-            guard entry.range.location + entry.range.length <= length else { continue }
-            let clipped = NSIntersectionRange(entry.range, visible)
-            storage.addAttributes(Self.attributes(for: entry.kind, level: entry.level), range: clipped)
+        for gap in gaps {
+            storage.setAttributes(Self.baseAttributes, range: gap)
+            for entry in highlightRanges {
+                guard entry.range.location + entry.range.length <= length else { continue }
+                let clipped = NSIntersectionRange(entry.range, gap)
+                guard clipped.length > 0 else { continue }
+                storage.addAttributes(
+                    Self.attributes(for: entry.kind, level: entry.level), range: clipped)
+            }
         }
         storage.endEditing()
+        isHighlighting = false
+        // Contiguous by construction: a gap always abuts the painted span, and
+        // a viewport that landed clear of it replaces it outright.
+        highlightedRange = adjoins ? NSUnionRange(visible, painted) : visible
         // The marks are positioned from the laid-out text, and this pass has
         // just changed a heading's font size and a code block's background.
         // Repainting them here covers scrolling and re-parsing in one place.
@@ -846,7 +982,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     public func themeChanged() {
         applyThemeColours()
         // Attributes carry resolved colours, so they are repainted rather than
-        // re-derived.
+        // re-derived — and every one of them is now stale, which is what makes
+        // this a full repaint rather than the incremental pass a scroll gets.
+        highlightedRange = NSRange(location: 0, length: 0)
         applyHighlight()
     }
 

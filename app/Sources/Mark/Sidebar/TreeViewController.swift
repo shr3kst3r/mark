@@ -535,16 +535,54 @@ public final class TreeViewController: NSViewController {
     /// whatever else the app is doing. A refresh half a second late is a
     /// refresh; a timer that insists on waking a sleeping CPU every two
     /// seconds is a battery complaint.
+    ///
+    /// It earns more than it did: since the visibility check moved to
+    /// ``pollTick()``, the timer also runs for a sidebar nobody is looking at,
+    /// and those ticks return without a syscall. This is what keeps them from
+    /// being a wakeup of their own.
     public static let pollTolerance: TimeInterval = 0.5
 
     private var pollTimer: Timer?
 
-    /// Whether the tree is on screen and worth polling.
+    /// Whether the timer is alive. The window's business, and the tests'.
+    var isPolling: Bool { pollTimer != nil }
+
+    /// What ``shouldPoll`` is allowed to ask about the window.
+    ///
+    /// A seam, because the real answer needs a window on screen and a window
+    /// on top of it: this gate was the one part of the refresh with no test,
+    /// and untested is how it came to hold a listing frozen for the life of a
+    /// window. ``PollVisibility/forced(_:)`` is for ``SidebarPollTests`` and
+    /// nothing else.
+    enum PollVisibility {
+        /// Ask the window. What the app always uses.
+        case automatic
+        /// Answer without one.
+        case forced(Bool)
+    }
+
+    var pollVisibility: PollVisibility = .automatic
+
+    /// Whether a tick is worth doing any work for.
     ///
     /// Three ways it can fail to be: the view is not in a window, the split
     /// view has collapsed the sidebar, or the window is fully covered by
     /// another one — which is also what the app being hidden looks like.
+    ///
+    /// **Asked on every tick, and it is the only gate.** It used to also decide
+    /// whether the timer existed, which made a missed transition permanent: a
+    /// window that was covered at the moment its sidebar appeared started with
+    /// no timer, and the only thing that could ever start one was an occlusion
+    /// notification that had already been and gone. Bringing such a window to
+    /// the front produced no further change to notice, so its tree stopped
+    /// refreshing until ⌘R — silently, because a listing that is merely old
+    /// looks exactly like a listing that is right. Gating the work rather than
+    /// the timer costs one wakeup every ``pollInterval`` for a sidebar nobody
+    /// is looking at — a couple of property reads and no syscall at all — and
+    /// in exchange a missed notification costs one interval instead of the
+    /// window's whole lifetime.
     private var shouldPoll: Bool {
+        if case .forced(let visible) = pollVisibility { return visible }
         guard isViewLoaded, !view.isHiddenOrHasHiddenAncestor else { return false }
         guard let window = view.window else { return false }
         return window.occlusionState.contains(.visible)
@@ -552,38 +590,71 @@ public final class TreeViewController: NSViewController {
 
     public override func viewDidAppear() {
         super.viewDidAppear()
-        if let window = view.window {
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(pollingConditionsChanged),
-                name: NSWindow.didChangeOcclusionStateNotification,
-                object: window)
-        }
+        observePollingConditions()
+        // Unconditional: the view is in a window, so the sidebar has a
+        // lifetime, and ``shouldPoll`` decides tick by tick whether that
+        // lifetime is currently worth spending a `stat` on.
+        startPolling()
         // Whatever changed on disk while the window was closed or covered is
         // news now, so the first check happens immediately rather than one
         // interval from now.
-        updatePolling()
         pollForChanges()
     }
 
     public override func viewDidDisappear() {
         super.viewDidDisappear()
-        NotificationCenter.default.removeObserver(
-            self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        stopObservingPollingConditions()
         stopPolling()
     }
 
+    /// The moments a covered sidebar is most likely to be looked at next.
+    ///
+    /// These only bring the catch-up *forward* — the tick would find the same
+    /// thing within ``pollInterval`` anyway — which is exactly the property
+    /// this list needs to have, because no list of AppKit notifications is
+    /// ever provably complete.
+    private func observePollingConditions() {
+        // `viewDidAppear` can run more than once for one controller — a
+        // collapsed sidebar being reopened, an app unhidden — so old
+        // registrations go first rather than accumulating.
+        stopObservingPollingConditions()
+        let center = NotificationCenter.default
+        if let window = view.window {
+            for name: NSNotification.Name in [
+                NSWindow.didChangeOcclusionStateNotification,
+                NSWindow.didBecomeKeyNotification,
+                NSWindow.didDeminiaturizeNotification,
+            ] {
+                center.addObserver(
+                    self, selector: #selector(pollingConditionsChanged),
+                    name: name, object: window)
+            }
+        }
+        // No object: the app coming forward is not any one window's news, and
+        // this is the one that fires when the whole app was hidden.
+        center.addObserver(
+            self, selector: #selector(pollingConditionsChanged),
+            name: NSApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    private func stopObservingPollingConditions() {
+        let center = NotificationCenter.default
+        for name: NSNotification.Name in [
+            NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didDeminiaturizeNotification,
+            NSApplication.didBecomeActiveNotification,
+        ] {
+            center.removeObserver(self, name: name, object: nil)
+        }
+    }
+
     @objc private func pollingConditionsChanged() {
-        let wasPolling = pollTimer != nil
-        updatePolling()
         // Uncovering the window is exactly the moment the listing is most
         // likely to be stale, and waiting a further two seconds to say so is
         // the delay the reader would notice.
-        if !wasPolling, pollTimer != nil { pollForChanges() }
-    }
-
-    private func updatePolling() {
-        if shouldPoll { startPolling() } else { stopPolling() }
+        guard shouldPoll else { return }
+        pollForChanges()
     }
 
     private func startPolling() {
@@ -649,7 +720,9 @@ public final class TreeViewController: NSViewController {
         return true
     }
 
-    private func pollTick() {
+    /// One tick of the timer, and the only place visibility is consulted.
+    /// Internal so ``SidebarPollTests`` can drive the gate without a window.
+    func pollTick() {
         guard shouldPoll else { return }
         pollForChanges()
     }

@@ -7,11 +7,15 @@ import Testing
 /// The background refresh: a sidebar left open while something else writes to
 /// the directory it is showing.
 ///
-/// Every test here drives ``TreeViewController/pollForChanges()`` directly
+/// Most tests here drive ``TreeViewController/pollForChanges()`` directly
 /// rather than waiting on the timer, because what is under test is what a poll
 /// *does* — and because a test that waits two seconds per assertion is a test
-/// people stop running. The timer's own lifecycle needs a window on screen and
-/// is left to the app.
+/// people stop running. The lifecycle tests at the end drive
+/// ``TreeViewController/pollTick()`` instead, which is the same thing plus the
+/// visibility gate; that gate used to also decide whether the timer existed,
+/// and *"the timer's lifecycle needs a window on screen and is left to the
+/// app"* is what this comment said while a covered window's tree quietly
+/// stopped refreshing for good.
 ///
 /// The gate the whole feature is written against is ``quietPollReadsNothing``:
 /// a poll that finds nothing must cost one `stat` per expanded directory and
@@ -284,5 +288,63 @@ struct SidebarPollTests {
         #expect(names.contains("later.png"))
         // `*.log` is `.gitignore`d, and the toggles do not override that.
         #expect(!names.contains("later.log"), "got \(names)")
+    }
+
+    // MARK: - The lifecycle
+
+    /// **The regression.** A sidebar whose window is covered at the moment it
+    /// appears must still hold a timer, and that timer must be what carries it
+    /// back to the disk once the window is looked at.
+    ///
+    /// Both halves are the bug. The tick has always had this gate; what it did
+    /// not have was a tick — `updatePolling()` saw a covered window at
+    /// `viewDidAppear` and left no timer at all, and the only thing that could
+    /// ever make one was an occlusion notification that had already been and
+    /// gone. So this test uncovers the window and tells the controller
+    /// **nothing**, which is exactly the delivery the sidebar cannot depend on.
+    @Test("a sidebar that appeared while covered still catches up when shown")
+    func coveredAtAppearanceStillCatchesUp() throws {
+        let fixture = try SidebarFixture()
+        let (controller, _) = make(fixture)
+        controller.pollVisibility = .forced(false)
+        controller.viewDidAppear()
+        #expect(controller.isPolling, "a covered appearance left no timer to recover with")
+
+        try "# fresh\n".write(to: fixture.url("fresh.md"), atomically: true, encoding: .utf8)
+
+        controller.pollTick()
+        #expect(
+            !visibleNames(controller).contains("fresh.md"),
+            "a covered sidebar did the work anyway")
+
+        // The window is uncovered. Nothing tells the controller so.
+        controller.pollVisibility = .forced(true)
+        controller.pollTick()
+        #expect(visibleNames(controller).contains("fresh.md"), "got \(visibleNames(controller))")
+
+        controller.viewDidDisappear()
+        #expect(!controller.isPolling, "the timer outlived the view")
+    }
+
+    /// The other half of the bargain: keeping the timer alive while nobody is
+    /// looking must not turn into a background walk. A tick that finds the
+    /// sidebar hidden reads nothing at all — not even a `stat`.
+    @Test("a tick with the sidebar hidden reads nothing")
+    func aHiddenTickReadsNothing() async throws {
+        let fixture = try SidebarFixture()
+        let (controller, lister) = make(fixture)
+        let docs = try #require(node(controller, named: "docs"))
+        controller.outlineView.expandItem(docs)
+        await settle(controller)
+        controller.pollVisibility = .forced(false)
+        controller.viewDidAppear()
+
+        try "# fresh\n".write(to: fixture.url("docs/fresh.md"), atomically: true, encoding: .utf8)
+
+        lister.reset()
+        controller.pollTick()
+        controller.pollTick()
+        #expect(lister.count == 0, "a hidden tick read \(lister.listings)")
+        controller.viewDidDisappear()
     }
 }

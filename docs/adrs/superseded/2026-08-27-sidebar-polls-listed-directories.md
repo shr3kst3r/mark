@@ -1,8 +1,8 @@
 ---
 id: 2026-08-27-sidebar-polls-listed-directories
-status: Accepted
+status: Superseded
 supersedes: null
-superseded-by: null
+superseded-by: 2026-09-01-sidebar-poll-gates-the-tick-not-the-timer
 components: [app, sidebar]
 ticket: null
 date: 2026-08-27

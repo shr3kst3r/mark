@@ -4,17 +4,17 @@
 
 # ADR index
 
-16 active · 4 superseded
+16 active · 5 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-09-01-sidebar-poll-gates-the-tick-not-the-timer](2026-09-01-sidebar-poll-gates-the-tick-not-the-timer.md) | The sidebar poll's visibility check gates each tick's work, not the timer's existence | Accepted | app, sidebar | — | 2026-09-01 |
 | [2026-08-31-today-page](2026-08-31-today-page.md) | Show the day's work as a document mark assembles and renders, in a window with no file behind it | Proposed | app, render | — | 2026-08-31 |
 | [2026-08-28-tabbed-document-pane](2026-08-28-tabbed-document-pane.md) | Make the sidebar's lower half a tabbed document pane, and give the five task states somewhere to be read | Accepted | app, sidebar, tabs | — | 2026-08-28 |
 | [2026-08-28-git-differences-by-running-git](2026-08-28-git-differences-by-running-git.md) | Learn what changed by running `git --no-optional-locks` as a child process, and show it as rendered markdown rather than as patch text | Accepted | core, cli, app, render, sidebar | — | 2026-08-28 |
 | [2026-08-28-git-badges-ride-the-sidebar-poll](2026-08-28-git-badges-ride-the-sidebar-poll.md) | Refresh git badges on the sidebar's existing poll, one query per repository that owns a listed row, gated on that repository's own `index` and `HEAD` | Accepted | app, sidebar | — | 2026-08-28 |
-| [2026-08-27-sidebar-polls-listed-directories](2026-08-27-sidebar-polls-listed-directories.md) | Refresh the sidebar by polling the directories it has already listed, gated on each one's own mtime | Accepted | app, sidebar | — | 2026-08-27 |
 | [2026-08-27-inline-task-metadata](2026-08-27-inline-task-metadata.md) | Carry task metadata as TaskPaper-style `@tag` and `@key(value)` tokens in the item's own text, parsed in the core and never compared against a clock at render time | Accepted | core, render, cli, app | — | 2026-08-27 |
 | [2026-08-27-five-task-states](2026-08-27-five-task-states.md) | Recognise five one-byte task states, and draw every checkbox ourselves so the fifth one is possible | Accepted | core, render, cli, app | — | 2026-08-27 |
 | [2026-08-26-opened-file-history](2026-08-26-opened-file-history.md) | Remember which files were deliberately opened, application-wide, and show them in a window that holds no web view | Accepted | app, tabs, sidebar, ipc | — | 2026-08-26 |
@@ -34,6 +34,7 @@ forward whatever the chain concluded.
 
 | ADR | Title | Superseded by | Date |
 | --- | --- | --- | --- |
+| [2026-08-27-sidebar-polls-listed-directories](superseded/2026-08-27-sidebar-polls-listed-directories.md) | Refresh the sidebar by polling the directories it has already listed, gated on each one's own mtime | [2026-09-01-sidebar-poll-gates-the-tick-not-the-timer](2026-09-01-sidebar-poll-gates-the-tick-not-the-timer.md) | 2026-08-27 |
 | [2026-08-26-multiple-windows-and-split-panes](superseded/2026-08-26-multiple-windows-and-split-panes.md) | Allow more than one window and two documents on screen at once, with residency budgeted across the whole app rather than per window | [2026-08-26-editor-groups-per-pane-tab-bars](2026-08-26-editor-groups-per-pane-tab-bars.md) | 2026-08-26 |
 | [2026-08-24-tab-residency-and-memory-model](superseded/2026-08-24-tab-residency-and-memory-model.md) | Keep one window and a custom tab bar, but hold only 3 web views resident — a tab costs ~52 MB, not ~1.2 MB | [2026-08-26-multiple-windows-and-split-panes](superseded/2026-08-26-multiple-windows-and-split-panes.md) | 2026-08-24 |
 | [2026-08-24-single-window-custom-tab-bar](superseded/2026-08-24-single-window-custom-tab-bar.md) | Use one window with a custom tab bar and N resident web views, not native NSWindow tabbing | [2026-08-24-tab-residency-and-memory-model](superseded/2026-08-24-tab-residency-and-memory-model.md) | 2026-08-24 |

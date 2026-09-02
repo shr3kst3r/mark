@@ -59,7 +59,11 @@ public final class ChangeRuler: NSRulerView {
         return Self.thickness + CGFloat(digits) * 7 + 6
     }
 
-    /// The highest line number the document has, for sizing the margin.
+    /// The highest line number drawn so far, for sizing the margin.
+    ///
+    /// What has been *drawn*, not what the document holds: the draw walks the
+    /// visible fragments only and never the document, so this is the widest
+    /// number the margin has actually had to fit. Monotonic, so it settles.
     private var lastLine = 1
 
     /// The type numbers are drawn in. Monospaced digits, so the column does not
@@ -205,7 +209,24 @@ public final class ChangeRuler: NSRulerView {
             }
             return true
         }
-        lastLine = max(lastLine, line + 1)
+        guard line + 1 > lastLine else { return }
+        lastLine = line + 1
+        guard numberedThickness() != ruleThickness else { return }
+        // Sized from the numbers that have been drawn, so scrolling past 999
+        // into 1000 is where the margin finds out it needs another digit —
+        // and without this, the number that taught it was already clipped and
+        // every one after it stayed clipped.
+        //
+        // Next turn of the run loop rather than here: changing the thickness
+        // re-lays-out the scroll view, and doing that from inside
+        // `drawHashMarksAndLabels` is re-entrant. One frame late is invisible
+        // — successive screenfuls overlap, so the number that widens the
+        // margin still fits the width sized for the one before it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.showsLineNumbers else { return }
+            self.ruleThickness = self.numberedThickness()
+            self.needsDisplay = true
+        }
     }
 
     /// Every bar the margin would draw right now, in this view's coordinates.

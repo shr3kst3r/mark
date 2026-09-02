@@ -50,6 +50,44 @@ struct LineNumbersTests {
         #expect(pane("one\n").showsLineNumbers)
     }
 
+    // ---- the strip the numbers are drawn in --------------------------------
+
+    /// The margin used to appear and disappear with the git change bars alone,
+    /// so with numbers switched on, whether an editor numbered its lines came
+    /// down to whether that file happened to differ from `HEAD` — numbers in
+    /// one tab and none in the next, from a setting that is app-wide.
+    @Test("a clean document still shows the margin when numbers are on")
+    func aCleanDocumentIsStillNumbered() {
+        LineNumbers.isShowing = true
+        defer { LineNumbers.isShowing = false }
+
+        // A temp file with no git repository behind it: no bars, ever.
+        let pane = pane("one\ntwo\nthree\n")
+        #expect(pane.showsLineNumbers)
+        #expect(pane.isGutterVisible, "the numbers have nowhere to be drawn")
+    }
+
+    @Test("a clean document with numbers off shows no margin at all")
+    func aCleanDocumentWithoutNumbersHasNoMargin() {
+        LineNumbers.isShowing = false
+        // An empty 8-point strip beside every clean document is chrome that
+        // says nothing — the reason the margin hides in the first place.
+        #expect(!pane("one\ntwo\n").isGutterVisible)
+    }
+
+    @Test("toggling the setting on opens the margin of an already-open editor")
+    func togglingOnOpensTheMargin() {
+        LineNumbers.isShowing = false
+        defer { LineNumbers.isShowing = false }
+
+        let pane = pane("one\ntwo\n")
+        #expect(!pane.isGutterVisible)
+        LineNumbers.isShowing = true
+        #expect(pane.isGutterVisible)
+        LineNumbers.isShowing = false
+        #expect(!pane.isGutterVisible, "a clean document goes back to no margin")
+    }
+
     @Test("the margin widens for numbers and narrows again")
     func theMarginResizes() {
         let ruler = ChangeRuler(scrollView: NSScrollView())

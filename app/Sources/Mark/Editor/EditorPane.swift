@@ -328,7 +328,8 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         scrollView.verticalRulerView = ruler
         scrollView.hasVerticalRuler = true
         // Off until there is something to draw: an empty 8-point strip beside
-        // every clean document is chrome that says nothing.
+        // every clean document is chrome that says nothing. See
+        // ``updateRulerVisibility()`` for what turns it back on.
         scrollView.rulersVisible = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
@@ -396,6 +397,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             object: nil
         )
         ruler.showsLineNumbers = LineNumbers.isShowing
+        updateRulerVisibility()
         applyThemeColours()
     }
 
@@ -736,10 +738,17 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         statusBar.stringValue = (try? MarkCore.wordCount(source: source))?.summary ?? ""
     }
 
+    /// Whether the margin strip is on screen, for the tests. Not the same
+    /// question as whether the ruler has marks: numbers put it there too.
+    var isGutterVisible: Bool { scrollView.rulersVisible }
+
     /// Whether the margin draws line numbers beside the change bars.
     public var showsLineNumbers: Bool {
         get { ruler.showsLineNumbers }
-        set { ruler.showsLineNumbers = newValue }
+        set {
+            ruler.showsLineNumbers = newValue
+            updateRulerVisibility()
+        }
     }
 
     /// Put the caret on `line` (1-based) and scroll it into view.
@@ -872,6 +881,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// The app-wide switch moved. Every open editor gets this.
     @objc private func lineNumbersSettingChanged() {
         ruler.showsLineNumbers = LineNumbers.isShowing
+        updateRulerVisibility()
     }
 
     /// ⌘+ / ⌘− / ⌘0, from any window.
@@ -957,9 +967,23 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     private func showGutter(_ diff: LineDiff?) {
         ruler.show(diff)
-        // The strip appears and disappears with the bars, so a clean document
-        // looks exactly as it did before this feature existed.
-        scrollView.rulersVisible = !ruler.isEmpty
+        updateRulerVisibility()
+    }
+
+    /// Show the margin when it has something in it, and only then.
+    ///
+    /// Two independent reasons for it to be there — a change bar, or a line
+    /// number — and the bug was treating the first as the only one. Tied to
+    /// the bars alone, the strip stayed hidden beside every *clean* document,
+    /// so with numbers switched on, whether an editor numbered its lines came
+    /// down to whether that file happened to differ from git `HEAD`: numbers
+    /// in one tab and none in the next, from a setting that is app-wide.
+    ///
+    /// Both conditions live here rather than at the three call sites that used
+    /// to set `rulersVisible` themselves, because that is how one of them came
+    /// to disagree with the others.
+    private func updateRulerVisibility() {
+        scrollView.rulersVisible = ruler.showsLineNumbers || !ruler.isEmpty
     }
 
     /// What the gutter is currently showing, for the tests and for `mark-bench`.

@@ -45,13 +45,21 @@ public enum MarkCore {
     /// - Throws: ``CoreError`` when the theme does not exist or is missing a
     ///   slot. The core refuses rather than substituting the default, because
     ///   the failure it is guarding against is a page of invisible text.
+    /// - Parameter standalone: wrap the result in a complete `<html>` document
+    ///   with both palettes inline, instead of the bare `mk-blk` fragments the
+    ///   shell injects. `File ▸ Export as HTML…` passes `true`, and takes the
+    ///   same code path `mark render --html` does — so an exported document and
+    ///   a piped one cannot disagree.
     public static func renderHTML(
-        source: String, prefixBlocks: Int = 0, theme: String? = nil
+        source: String, prefixBlocks: Int = 0, theme: String? = nil, standalone: Bool = false
     ) throws -> String {
         precondition(prefixBlocks >= 0, "prefixBlocks is a count, not an index")
+        let flags: Int32 = standalone ? MARK_RENDER_STANDALONE : 0
         return try string(function: "mark_render_html") {
             withOptionalCString(theme) { themePointer in
-                source.withCString { mark_render_html($0, size_t(prefixBlocks), themePointer) }
+                source.withCString {
+                    mark_render_html($0, size_t(prefixBlocks), themePointer, flags)
+                }
             }
         }
     }
@@ -143,6 +151,101 @@ public enum MarkCore {
         }
     }
 
+    /// Every link and image in a document, with local destinations resolved
+    /// against `base` and `stat`ed.
+    ///
+    /// The shell asks for `images: true` and nothing else. That answer is the
+    /// allowlist ``DocumentAssetSchemeHandler`` serves from, and populating it
+    /// from the core — rather than letting the handler resolve whatever path a
+    /// page asks for — is what keeps it an allowlist instead of a file server
+    /// aimed at the reader's home directory.
+    ///
+    /// - Parameter base: the directory holding the document. `nil` skips
+    ///   resolution entirely, which is what a caller with no file on disk (an
+    ///   unsaved buffer, the Today page) wants: `path` and `exists` come back
+    ///   `nil`, which is a different answer from "checked and missing".
+    public static func links(
+        source: String,
+        base: String? = nil,
+        images: Bool = false,
+        brokenOnly: Bool = false
+    ) throws -> [Reference] {
+        var flags: Int32 = 0
+        if images { flags |= MARK_LINKS_IMAGES }
+        if brokenOnly { flags |= MARK_LINKS_BROKEN }
+        let json = try string(function: "mark_links_json") {
+            source.withCString { source in
+                guard let base else { return mark_links_json(source, nil, flags) }
+                return base.withCString { mark_links_json(source, $0, flags) }
+            }
+        }
+        return try decode([Reference].self, from: json, function: "mark_links_json")
+    }
+
+    /// Search a file, or every markdown file below a directory.
+    ///
+    /// The engine is the core's, not `NSRegularExpression`'s, and that is the
+    /// point: Rust's `regex` and ICU disagree about `\d`, `(?i)`, lookaround,
+    /// and `$` under multi-line, so a second implementation here would mean
+    /// `mark grep` and this search box answering the same pattern differently
+    /// (`2026-09-01-search-in-the-core`).
+    ///
+    /// **Call this off the main actor.** It opens every markdown file below
+    /// `root`.
+    ///
+    /// - Parameter limit: cap on hits, across all files. The window passes one
+    ///   because it searches on every keystroke; 0 means no cap.
+    public static func search(
+        root: String,
+        pattern: String,
+        depth: Int = 0,
+        limit: Int = 0,
+        ignoreCase: Bool = false,
+        hidden: Bool = false
+    ) throws -> SearchResults {
+        var flags: Int32 = 0
+        if ignoreCase { flags |= MARK_SEARCH_IGNORE_CASE }
+        if hidden { flags |= MARK_SEARCH_HIDDEN }
+        let json = try string(function: "mark_search_json") {
+            root.withCString { root in
+                pattern.withCString { pattern in
+                    mark_search_json(root, pattern, size_t(depth), size_t(limit), flags)
+                }
+            }
+        }
+        return try decode(SearchResults.self, from: json, function: "mark_search_json")
+    }
+
+    /// Every reference below `root` that points at `target`.
+    ///
+    /// **Call this off the main actor.** It parses every markdown file below
+    /// `root`.
+    public static func backlinks(root: String, target: String, depth: Int = 0) throws
+        -> [Backlink]
+    {
+        let json = try string(function: "mark_backlinks_json") {
+            root.withCString { root in
+                target.withCString { target in
+                    mark_backlinks_json(root, target, size_t(max(0, depth)))
+                }
+            }
+        }
+        return try decode([Backlink].self, from: json, function: "mark_backlinks_json")
+    }
+
+    /// How long a document is, in the units a writer cares about.
+    ///
+    /// The counting is the core's because it needs the parser: frontmatter,
+    /// fenced and inline code, math, diagrams, an image's alt text and a link's
+    /// URL are none of them prose, and a whitespace split in Swift would count
+    /// all of them. `mark stats` gets the same answer.
+    public static func wordCount(source: String) throws -> WordCount {
+        let json = try string(function: "mark_wordcount_json") {
+            source.withCString { mark_wordcount_json($0) }
+        }
+        return try decode(WordCount.self, from: json, function: "mark_wordcount_json")
+    }
+
     /// One directory level.
     ///
     /// `depth` is clamped to at least 1 by the core; there is no unlimited
@@ -150,6 +253,8 @@ public enum MarkCore {
     /// 608k files (research §2.8) and an eager descent there is a multi-second
     /// hang.
     ///
+    /// - Parameter depth: 0 means the whole tree, 1 means this directory only.
+    ///   The sidebar always passes 1 — see below; `Open Quickly` passes 0.
     /// - Parameter withStats: opens every markdown file for its title and task
     ///   counts. Off by default: it is a read of every file in the directory.
     /// - Parameter options: the sidebar's two "show me more" toggles. Before M7
@@ -164,7 +269,12 @@ public enum MarkCore {
     ) throws -> [TreeEntry] {
         let json = try string(function: "mark_tree_json") {
             directory.withCString {
-                mark_tree_json($0, size_t(max(1, depth)), withStats ? 1 : 0, options.coreFlags)
+                // `max(0, …)` and not `max(1, …)`: 0 is a *meaning* — the
+                // whole tree — and clamping it to 1 quietly turned `Open
+                // Quickly`'s recursive walk into a listing of one directory.
+                // Negatives are still clamped, since `size_t(-1)` is a walk
+                // that never ends.
+                mark_tree_json($0, size_t(max(0, depth)), withStats ? 1 : 0, options.coreFlags)
             }
         }
         return try decode([TreeEntry].self, from: json, function: "mark_tree_json")
@@ -886,6 +996,179 @@ public struct Heading: Decodable, Equatable, Sendable {
     public let end: Int
     public let line: Int
     public let block: String
+}
+
+/// One document pointing at another: `{path, line, offset, text, heading, …}`.
+public struct Backlink: Decodable, Equatable, Sendable, Identifiable {
+    public let path: String
+    public let line: Int
+    /// Byte offset of the reference — what the preview scrolls to.
+    public let offset: Int
+    /// The link's own text: what the *other* document calls this one, which is
+    /// more useful in a list than repeating the filename you are looking at.
+    public let text: String
+    /// The `>`-joined headings the reference sits under.
+    public let heading: String
+    /// A `#fragment`, when the reference points at a section rather than the
+    /// whole document.
+    public let fragment: String?
+    /// `link` or `image`.
+    public let kind: Reference.Kind
+
+    public var id: String { "\(path):\(offset)" }
+}
+
+/// How long a document is: `{words, characters, lines, reading_minutes, …}`.
+public struct WordCount: Decodable, Equatable, Sendable {
+    public let words: Int
+    public let characters: Int
+    public let charactersNoSpaces: Int
+    public let lines: Int
+    public let blocks: Int
+    public let headings: Int
+    public let codeBytes: Int
+    /// Rounded up, and never zero for a document with any prose in it — "0 min"
+    /// reads as a failure rather than as "quick".
+    public let readingMinutes: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case words, characters, lines, blocks, headings
+        case charactersNoSpaces = "characters_no_spaces"
+        case codeBytes = "code_bytes"
+        case readingMinutes = "reading_minutes"
+    }
+
+    /// The one-line form the editor's status bar shows.
+    ///
+    /// Words first because it is what people look for, and the reading time
+    /// last because it is the derived one. Grouping separators on the counts,
+    /// since a five-figure word count with no comma is unreadable at 11pt.
+    public var summary: String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        func number(_ value: Int) -> String {
+            formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+        }
+        var parts = [
+            words == 1 ? "1 word" : "\(number(words)) words",
+            "\(number(characters)) characters",
+            lines == 1 ? "1 line" : "\(number(lines)) lines",
+        ]
+        if readingMinutes > 0 { parts.append("~\(readingMinutes) min read") }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
+/// What a search found.
+public struct SearchResults: Decodable, Equatable, Sendable {
+    public let matches: [SearchMatch]
+    /// The limit was reached and there are more.
+    ///
+    /// Reported by the core rather than inferred from `matches.count == limit`,
+    /// which is ambiguous when a tree holds exactly that many — and the window
+    /// puts "showing the first 200" in front of the reader.
+    public let truncated: Bool
+    /// Files opened. The number that says whether a slow search is the walk or
+    /// the pattern.
+    public let files: Int
+}
+
+/// One hit: `{path, line, offset, column, heading, anchor?, text}`.
+public struct SearchMatch: Decodable, Equatable, Sendable, Identifiable {
+    public let path: String
+    /// 1-based, as every editor counts them.
+    public let line: Int
+    /// Byte offset in the file — what the preview scrolls to. A line number
+    /// alone would not be enough.
+    public let offset: Int
+    public let column: Span
+    /// Enclosing headings, `>`-joined. Empty above the first heading.
+    public let heading: String
+    public let anchor: String?
+    /// The whole line the hit sits on.
+    public let text: String
+
+    /// Stable within one result set: two hits never share a file *and* an
+    /// offset.
+    public var id: String { "\(path):\(offset)" }
+
+    /// The hit's span within ``text``, so the row can embolden it without
+    /// re-running a regex that might disagree with the one that found it.
+    public struct Span: Decodable, Equatable, Sendable {
+        public let start: Int
+        public let end: Int
+    }
+
+    /// ``text`` with the matched range picked out, ready for a table cell.
+    @MainActor
+    public func styled(font: NSFont, highlight: NSColor) -> NSAttributedString {
+        let attributed = NSMutableAttributedString(
+            string: text, attributes: [.font: font])
+        // The core reports UTF-8 byte offsets and `NSAttributedString` wants
+        // UTF-16 ones. Converting through `String.Index` is what keeps an
+        // emoji, or any non-ASCII text, from shifting the highlight.
+        let utf8 = Array(text.utf8)
+        guard column.start >= 0, column.end <= utf8.count, column.start < column.end,
+            let from = String.Index(
+                text.utf8.index(text.utf8.startIndex, offsetBy: column.start), within: text),
+            let to = String.Index(
+                text.utf8.index(text.utf8.startIndex, offsetBy: column.end), within: text)
+        else { return attributed }
+
+        let range = NSRange(from..<to, in: text)
+        attributed.addAttributes(
+            [
+                .backgroundColor: highlight,
+                .font: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask),
+            ], range: range)
+        return attributed
+    }
+}
+
+/// One link or image: `{kind, span, dest, text, title, target, path?, exists?}`.
+public struct Reference: Decodable, Equatable, Sendable {
+    /// `link` or `image`.
+    public let kind: Kind
+    public let span: Span
+    /// The destination exactly as the document wrote it, still percent-encoded.
+    public let dest: String
+    /// The link text, or the image's alt.
+    public let text: String
+    public let title: String
+    public let target: Target
+    /// The resolved absolute path, for a local destination that was checked.
+    public let path: String?
+    /// Whether the target is there. `nil` is **not checked** — an external URL,
+    /// a fragment, or a call that passed no base — and reading it as `false`
+    /// is how a working link gets reported broken.
+    public let exists: Bool?
+
+    public enum Kind: String, Decodable, Sendable {
+        case link
+        case image
+    }
+
+    /// The construct's byte span in the source, brackets included.
+    public struct Span: Decodable, Equatable, Sendable {
+        public let start: Int
+        public let end: Int
+    }
+
+    /// The core's tagged `Destination`. Only the discriminant and the local
+    /// path are decoded: nothing in the app needs the parsed fragment, and a
+    /// model that decodes fields nobody reads is a model that breaks when the
+    /// core adds one.
+    public struct Target: Decodable, Equatable, Sendable {
+        public let kind: Kind
+        /// Present for `.local` only.
+        public let path: String?
+
+        public enum Kind: String, Decodable, Sendable {
+            case fragment
+            case external
+            case local
+        }
+    }
 }
 
 /// One directory entry: `{path, name, is_dir, depth, title?, tasks?}`.

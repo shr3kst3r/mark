@@ -118,6 +118,7 @@ fn a_user_theme_loads_without_a_rebuild() {
             c("```rust\nfn f() {}\n```\n").as_ptr(),
             0,
             c("mine").as_ptr(),
+            0,
         )
     })
     .unwrap_or_else(|| panic!("rendering in a user theme failed: {}", error()));
@@ -154,7 +155,7 @@ fn a_missing_slot_is_a_named_error_not_invisible_text() {
     // And the render path refuses too, rather than falling back to a theme the
     // user did not ask for and painting text they cannot see.
     assert!(
-        unsafe { mark_render_html(c("# hi\n").as_ptr(), 0, c("holed").as_ptr()) }.is_null(),
+        unsafe { mark_render_html(c("# hi\n").as_ptr(), 0, c("holed").as_ptr(), 0) }.is_null(),
         "rendering in a broken theme produced a document"
     );
     assert!(error().contains("base0D"));
@@ -191,7 +192,7 @@ fn a_user_file_shadows_a_shipped_theme_of_the_same_name() {
         "default-dark",
         "name = \"default-dark\"\nkind = \"nonsense\"\n",
     );
-    let html = take(unsafe { mark_render_html(c("# hi\n").as_ptr(), 0, std::ptr::null()) });
+    let html = take(unsafe { mark_render_html(c("# hi\n").as_ptr(), 0, std::ptr::null(), 0) });
     assert!(
         html.is_some(),
         "the default theme was breakable: {}",

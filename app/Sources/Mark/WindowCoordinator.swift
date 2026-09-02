@@ -131,6 +131,52 @@ public final class WindowCoordinator {
         saveSoon()
     }
 
+    // MARK: - Recently closed
+
+    /// Documents that were closed, most recent first.
+    ///
+    /// Application-wide rather than per window, for the same reason the
+    /// residency budget is (`2026-08-26-editor-groups-per-pane-tab-bars`): a
+    /// tab closed in one window and a window closed entirely are the same loss
+    /// to the reader, and a per-window stack would lose the second case
+    /// completely.
+    ///
+    /// URLs and nothing else. Restoring scroll position too was considered and
+    /// dropped: the session file already carries scroll for tabs that are
+    /// *open*, and a stack that also remembered where you were would have to
+    /// invalidate itself when the file changed on disk. Reopening at the top of
+    /// the document is honest and needs no invalidation.
+    public private(set) var recentlyClosed: [URL] = []
+
+    /// How many closes are remembered. Ten is more than anyone walks back
+    /// through and small enough that the list is not a record of the session.
+    public static let recentlyClosedLimit = 10
+
+    /// Remember a document that was just closed.
+    public func rememberClosed(_ url: URL) {
+        // Deduplicated, so opening and closing the same file four times leaves
+        // one entry rather than four identical ones to press ⌥⌘T through.
+        recentlyClosed.removeAll { $0 == url }
+        recentlyClosed.insert(url, at: 0)
+        if recentlyClosed.count > Self.recentlyClosedLimit {
+            recentlyClosed.removeLast(recentlyClosed.count - Self.recentlyClosedLimit)
+        }
+    }
+
+    /// The most recently closed document that is still on disk, removing
+    /// anything that is not.
+    ///
+    /// Checked at the point of *use* rather than of closing, because a file can
+    /// go away in between — and a ⌥⌘T that opens an error is worse than one
+    /// that reaches past a file someone deleted.
+    public func takeMostRecentlyClosed() -> URL? {
+        while let candidate = recentlyClosed.first {
+            recentlyClosed.removeFirst()
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
     /// Write every window's dirty buffers. The quit path.
     @discardableResult
     public func flushDirtyBuffers() -> Int {
@@ -203,6 +249,8 @@ public final class WindowCoordinator {
         // App-wide for the same reason again: the editor's whitespace marks are
         // one choice about how source looks, not one per window.
         state.editorInvisibles = Invisibles.isShowing
+        state.textZoom = TextZoom.persistedScale
+        state.editorLineNumbers = LineNumbers.isShowing ? true : nil
         // App-wide for the same reason, and written even when empty so that
         // clearing the history is a change the file records rather than one an
         // absent key leaves ambiguous.
@@ -233,6 +281,8 @@ public final class WindowCoordinator {
         // Before the windows too, so the first editor to come up already draws
         // the marks rather than drawing itself twice.
         Invisibles.restore(state.editorInvisibles)
+        TextZoom.restore(state.textZoom)
+        LineNumbers.restore(state.editorLineNumbers)
         // Before the windows, so that a file named on the command line — which
         // opens as those windows come up — is recorded on *top* of the restored
         // history rather than underneath it.

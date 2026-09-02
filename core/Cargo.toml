@@ -19,6 +19,12 @@ ignore = "0.4"
 # exposes either. Already in the tree — `mark-cli` has depended on it since M4.
 libc = "0.2"
 pulldown-cmark.workspace = true
+# `mark grep`'s engine, and the window's. It lives here rather than in the CLI
+# so both get one regex dialect: ADR-1's whole argument for a shared core is
+# that there is no second implementation to drift, and `NSRegularExpression` in
+# Swift is a different dialect for `\d`, `(?i)`, and lookaround. Already in the
+# tree — `mark-cli` has depended on it since M1.
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 

@@ -270,10 +270,22 @@ public enum WebViewFactory {
     /// registered once, for the life of the process.
     static let router = ScriptMessageRouter()
 
+    /// Serves each document's own images to the web view showing it. One
+    /// instance for the same reason the router is one: ADR-4 requires a single
+    /// shared `WKWebViewConfiguration`, and a scheme handler is registered on
+    /// the configuration rather than on a web view, so it keeps its own
+    /// per-view state.
+    public static let documentAssets = DocumentAssetSchemeHandler()
+
     /// Built once, lazily, on first use.
     public static let configuration: WKWebViewConfiguration = {
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(ShellSchemeHandler(), forURLScheme: ShellAssets.scheme)
+        // The second scheme: the shell's own three files come from the handler
+        // above, and a *document's* pictures from this one. Kept apart on
+        // purpose — see ``DocumentAssetSchemeHandler``.
+        configuration.setURLSchemeHandler(
+            documentAssets, forURLScheme: DocumentAssetSchemeHandler.scheme)
         configuration.suppressesIncrementalRendering = false
         if #available(macOS 14.0, *) {
             // The documents this renders are the user's own files, but they can

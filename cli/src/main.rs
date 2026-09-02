@@ -49,11 +49,14 @@ use clap::{Args, Parser, Subcommand};
 use mark_core::diff;
 use mark_core::git::{self, GitError};
 use mark_core::lines;
+use mark_core::links;
 use mark_core::parse::Document;
 use mark_core::render::{RenderOptions, render};
+use mark_core::search;
 use mark_core::tasks::{self, Action, TaskError};
 use mark_core::theme::{self, ThemeError};
 use mark_core::tree::{self, TreeError};
+use mark_core::wordcount;
 use serde::Serialize;
 
 use crate::client::{Client, IpcError};
@@ -79,7 +82,7 @@ const EXIT_LOCKED: u8 = 6;
 
 /// Depth limit for the recursive commands. Deep enough for any real notes tree
 /// and bounded, because a large source tree (`~/src`) holds 608k files (research 2.8).
-const DEFAULT_RECURSIVE_DEPTH: usize = 64;
+use mark_core::tree::DEFAULT_RECURSIVE_DEPTH;
 
 #[derive(Parser)]
 #[command(
@@ -158,6 +161,46 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Write the contents list **into** the document, between
+        /// `<!-- toc -->` and `<!-- /toc -->`.
+        ///
+        /// Both markers must already be there. This will not guess where a
+        /// contents list belongs, and it never writes anything outside them —
+        /// so running it again replaces what it wrote and touches nothing else.
+        /// The markers are HTML comments, which mark's renderer drops, so they
+        /// are invisible in the rendered page either way.
+        #[arg(long)]
+        insert: bool,
+        /// Shallowest heading level to list. `2` skips the document's title.
+        #[arg(long, default_value_t = 2, value_name = "N")]
+        min_level: u8,
+        /// Deepest heading level to list.
+        #[arg(long, default_value_t = 3, value_name = "N")]
+        max_level: u8,
+    },
+    /// Block until a file or directory changes, then say what changed.
+    ///
+    /// For the shell loop an agent actually writes:
+    ///
+    ///     while mark watch notes/; do just build; done
+    ///
+    /// Polls, rather than using FSEvents, for the reason
+    /// `2026-08-27-sidebar-polls-listed-directories` gives for the sidebar: a
+    /// `stat` per watched file is cheap, bounded, and has no callback to leak.
+    Watch {
+        /// File or directory. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Keep going instead of exiting at the first change, printing one line
+        /// per change until interrupted.
+        #[arg(long)]
+        follow: bool,
+        /// Seconds between polls.
+        #[arg(long, default_value_t = 1.0, value_name = "SECONDS")]
+        interval: f64,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
+        depth: usize,
     },
     /// List every task in a file or directory.
     Tasks {
@@ -273,6 +316,37 @@ enum Command {
         /// Case-insensitive matching.
         #[arg(short = 'i', long)]
         ignore_case: bool,
+        #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
+        depth: usize,
+    },
+    /// Every link and image, and whether its target is there.
+    ///
+    /// A **file** reports its own references; a **directory** walks it, which
+    /// is the shape the interesting question takes — "which of my notes point
+    /// at something that is no longer there".
+    ///
+    /// External URLs are reported but never fetched: a checker that makes HTTP
+    /// requests is a different tool with different failure modes. `--broken`
+    /// therefore means "a local path that is missing", and an unreachable
+    /// website is not one.
+    Links {
+        /// File or directory. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Turn the question around: report what points **at** this file,
+        /// searching `path` for references to it.
+        ///
+        /// Matching is on the resolved path, so a link written from a sibling
+        /// directory counts. A document never links to itself.
+        #[arg(long, value_name = "FILE")]
+        to: Option<PathBuf>,
+        /// Only references whose local target is missing.
+        #[arg(long)]
+        broken: bool,
+        /// Only `![alt](…)` images, leaving links out.
+        #[arg(long)]
+        images: bool,
+        #[arg(long)]
+        json: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
         depth: usize,
     },
@@ -679,6 +753,14 @@ impl Output {
         self.0.write_fmt(args).map_err(CliError::Output)
     }
 
+    /// Flush without giving the handle up.
+    ///
+    /// `mark watch` needs this: a watcher whose output only appears when it
+    /// exits is one nobody can pipe into anything.
+    fn flush(&mut self) -> Result<(), CliError> {
+        self.0.flush().map_err(CliError::Output)
+    }
+
     /// Flush before reporting success, so a failed write is an error rather
     /// than output that quietly never arrived.
     fn finish(mut self) -> Result<(), CliError> {
@@ -763,7 +845,26 @@ fn run(command: &Command) -> Result<(), CliError> {
             *tracked,
             theme.as_deref(),
         ),
-        Command::Toc { file, json } => cmd_toc(file, *json),
+        Command::Toc {
+            file,
+            json,
+            insert,
+            min_level,
+            max_level,
+        } => {
+            if *insert {
+                cmd_toc_insert(file, *min_level, *max_level)
+            } else {
+                cmd_toc(file, *json)
+            }
+        }
+        Command::Watch {
+            path,
+            follow,
+            interval,
+            json,
+            depth,
+        } => cmd_watch(path.as_deref(), *follow, *interval, *json, *depth),
         Command::Tasks {
             path,
             open,
@@ -830,6 +931,17 @@ fn run(command: &Command) -> Result<(), CliError> {
             ignore_case,
             depth,
         } => cmd_grep(pattern, path.as_deref(), *json, *ignore_case, *depth),
+        Command::Links {
+            path,
+            to,
+            broken,
+            images,
+            json,
+            depth,
+        } => match to {
+            Some(target) => cmd_backlinks(path.as_deref(), target, *json, *depth),
+            None => cmd_links(path.as_deref(), *broken, *images, *json, *depth),
+        },
         Command::Stats { file, json } => cmd_stats(file, *json),
         Command::Doctor { json } => cmd_doctor(*json),
         Command::Open { file, tab, json } => cmd_open(file, *tab, *json),
@@ -1500,6 +1612,156 @@ struct TocEntry<'a> {
     end: usize,
     line: usize,
     block: String,
+}
+
+/// The markers `--insert` writes between.
+const TOC_OPEN: &str = "<!-- toc -->";
+const TOC_CLOSE: &str = "<!-- /toc -->";
+
+/// `mark toc --insert` — maintain a contents list inside the document.
+///
+/// **Refuses when the markers are not there.** Guessing where a contents list
+/// belongs would be a write to somebody's document based on an assumption, and
+/// this whole crate's write path is built on the opposite instinct
+/// (`2026-08-25-flock-write-locking`). Adding two comment lines is a smaller
+/// ask than undoing a wrong insertion.
+///
+/// The write goes through `tasks::write_atomically`, which is the same locked,
+/// temp-file-plus-rename path `mark check` uses — so this cannot clobber a
+/// document a window holds unsaved changes to.
+fn cmd_toc_insert(path: &Path, min_level: u8, max_level: u8) -> Result<(), CliError> {
+    let source = read(path)?;
+
+    let (Some(open), Some(close)) = (source.find(TOC_OPEN), source.find(TOC_CLOSE)) else {
+        return Err(CliError::Usage(format!(
+            "{} has no {TOC_OPEN} … {TOC_CLOSE} markers. Add them where the contents list \
+             should go; they are HTML comments, so they do not render.",
+            path.display()
+        )));
+    };
+    if close < open {
+        return Err(CliError::Usage(format!(
+            "{} has {TOC_CLOSE} before {TOC_OPEN}",
+            path.display()
+        )));
+    }
+
+    let doc = Document::parse(&source);
+    let mut list = String::new();
+    for heading in doc.headings() {
+        if heading.level < min_level || heading.level > max_level {
+            continue;
+        }
+        let indent = "  ".repeat(usize::from(heading.level.saturating_sub(min_level)));
+        // The anchor the *renderer* generated, deduplicated exactly as the page
+        // does it — so a document with two "Notes" headings links to the right
+        // one rather than to whichever came first.
+        list.push_str(&format!(
+            "{indent}- [{}](#{})\n",
+            heading.text, heading.anchor
+        ));
+    }
+
+    let mut out = String::with_capacity(source.len() + list.len());
+    out.push_str(&source[..open + TOC_OPEN.len()]);
+    out.push('\n');
+    out.push_str(&list);
+    out.push_str(&source[close..]);
+
+    if out == source {
+        // Nothing to do is not a write. Rewriting an identical file would move
+        // its mtime and wake every watcher looking at it.
+        return Ok(());
+    }
+    tasks::write_atomically(path, &out).map_err(|error| CliError::Read {
+        path: path.to_path_buf(),
+        source: io::Error::other(error.to_string()),
+    })?;
+    Ok(())
+}
+
+/// One observed change.
+#[derive(Serialize)]
+struct Change {
+    path: PathBuf,
+    /// `created`, `modified`, or `removed`.
+    kind: &'static str,
+}
+
+/// `mark watch` — block until something changes.
+fn cmd_watch(
+    path: Option<&Path>,
+    follow: bool,
+    interval: f64,
+    json: bool,
+    depth: usize,
+) -> Result<(), CliError> {
+    let root = path.unwrap_or_else(|| Path::new("."));
+    // A floor, because a zero or negative interval is a busy loop on somebody's
+    // battery rather than a faster answer.
+    let interval = std::time::Duration::from_secs_f64(interval.max(0.05));
+
+    let snapshot =
+        || -> Result<std::collections::BTreeMap<PathBuf, std::time::SystemTime>, CliError> {
+            let mut seen = std::collections::BTreeMap::new();
+            for file in markdown_targets(root, depth)? {
+                let modified = fs::metadata(&file)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                seen.insert(file, modified);
+            }
+            Ok(seen)
+        };
+
+    let mut previous = snapshot()?;
+    let mut out = Output::new();
+    loop {
+        std::thread::sleep(interval);
+        let current = snapshot()?;
+
+        let mut changes: Vec<Change> = Vec::new();
+        for (file, modified) in &current {
+            match previous.get(file) {
+                None => changes.push(Change {
+                    path: file.clone(),
+                    kind: "created",
+                }),
+                Some(before) if before != modified => changes.push(Change {
+                    path: file.clone(),
+                    kind: "modified",
+                }),
+                Some(_) => {}
+            }
+        }
+        for file in previous.keys() {
+            if !current.contains_key(file) {
+                changes.push(Change {
+                    path: file.clone(),
+                    kind: "removed",
+                });
+            }
+        }
+        previous = current;
+        if changes.is_empty() {
+            continue;
+        }
+
+        for change in &changes {
+            if json {
+                let line = serde_json::to_string(change)
+                    .map_err(|error| CliError::Output(io::Error::other(error)))?;
+                emitln!(out, "{line}")?;
+            } else {
+                emitln!(out, "{} {}", change.kind, change.path.display())?;
+            }
+        }
+        // Flushed every round, not at the end: a watcher whose output only
+        // appears when it exits is a watcher nobody can pipe into anything.
+        out.flush()?;
+        if !follow {
+            return out.finish();
+        }
+    }
 }
 
 fn cmd_toc(path: &Path, json: bool) -> Result<(), CliError> {
@@ -2645,18 +2907,6 @@ fn cmd_ls(
     out.finish()
 }
 
-#[derive(Serialize)]
-struct Match {
-    path: PathBuf,
-    line: usize,
-    /// Nearest preceding heading, as a `>`-joined path. Empty above the first
-    /// heading.
-    heading: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    anchor: Option<String>,
-    text: String,
-}
-
 fn cmd_grep(
     pattern: &str,
     path: Option<&Path>,
@@ -2664,52 +2914,50 @@ fn cmd_grep(
     ignore_case: bool,
     depth: usize,
 ) -> Result<(), CliError> {
-    // Multi-line so `^` and `$` anchor to lines, which is what anyone typing a
-    // pattern into something called `grep` expects.
-    let regex = regex::RegexBuilder::new(pattern)
-        .case_insensitive(ignore_case)
-        .multi_line(true)
-        .build()
-        .map_err(|error| CliError::Pattern(Box::new(error)))?;
-
     let root = path.unwrap_or_else(|| Path::new("."));
-    let mut matches = Vec::new();
 
+    // The engine, the heading breadcrumb, and the line arithmetic all live in
+    // `mark_core::search` now. The window needs the same answer this gives, and
+    // ADR-1's argument for a shared core is that there is no second
+    // implementation to drift — `NSRegularExpression` in Swift would have been
+    // a different regex dialect for `\d`, `(?i)`, and lookaround.
     let started = Instant::now();
-    let targets = markdown_targets(root, depth)?;
+    let results = search::search(
+        root,
+        pattern,
+        &search::Options {
+            ignore_case,
+            max_depth: depth,
+            // No cap. A script piping to `wc -l` wants the truth; the window is
+            // the caller that passes a limit.
+            limit: 0,
+            ..search::Options::default()
+        },
+    )
+    .map_err(|error| match error {
+        search::SearchError::Pattern(error) => CliError::Pattern(Box::new(error)),
+        search::SearchError::Tree(error) => CliError::Tree(error),
+        // Exit 2, like every other "you named a file I cannot read".
+        search::SearchError::Read { path, source } => CliError::Read { path, source },
+    })?;
     trace(
-        || format!("walk {} -> {} files", root.display(), targets.len()),
+        || {
+            format!(
+                "search {} -> {} files, {} matches",
+                root.display(),
+                results.files,
+                results.matches.len()
+            )
+        },
         started,
     );
 
-    let started = Instant::now();
-    for file in &targets {
-        let source = read_walked(root, file)?;
-        let doc = Document::parse(&source);
-        let headings = doc.headings();
-        let lines = doc.lines();
-
-        for found in regex.find_iter(&source) {
-            let context = heading_path(&headings, found.start());
-            matches.push(Match {
-                path: file.clone(),
-                line: lines.line_of(found.start()),
-                heading: context.0,
-                anchor: context.1,
-                text: source[line_bounds(&source, found.start())]
-                    .trim_end()
-                    .to_owned(),
-            });
-        }
-    }
-    trace(|| format!("search {} matches", matches.len()), started);
-
     if json {
-        return print_json(&matches);
+        return print_json(&results.matches);
     }
 
     let mut out = Output::new();
-    for found in &matches {
+    for found in &results.matches {
         if found.heading.is_empty() {
             emitln!(
                 out,
@@ -2732,38 +2980,185 @@ fn cmd_grep(
     out.finish()
 }
 
-/// The `>`-joined heading path a match sits under, plus the innermost anchor.
+/// One reference, with the file it came from and the line it sits on.
 ///
-/// A match on a heading's own line is attributed to that heading, so
-/// `## Middle` under `# Top` reports `Top > Middle` — the breadcrumb names
-/// where the match is, not where it starts.
-fn heading_path(headings: &[mark_core::parse::Heading], offset: usize) -> (String, Option<String>) {
-    let mut stack: Vec<&mark_core::parse::Heading> = Vec::new();
-    for heading in headings {
-        if heading.start > offset {
-            break;
-        }
-        while stack.last().is_some_and(|open| open.level >= heading.level) {
-            stack.pop();
-        }
-        stack.push(heading);
-    }
-    let anchor = stack.last().map(|h| h.anchor.clone());
-    let path = stack
-        .iter()
-        .map(|h| h.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" > ");
-    (path, anchor)
+/// A flatter shape than [`links::Checked`] on purpose: this is what a script
+/// filters, and `jq 'select(.exists == false)'` should not have to reach
+/// through a `target` object to learn what kind of destination it is looking
+/// at.
+#[derive(Serialize)]
+struct LinkRow {
+    path: PathBuf,
+    line: usize,
+    /// `link` or `image`.
+    kind: links::RefKind,
+    /// `fragment`, `external`, or `local`.
+    target: &'static str,
+    /// The destination exactly as the document wrote it.
+    dest: String,
+    /// The link text or image alt.
+    text: String,
+    /// The resolved absolute path, for a local destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: Option<PathBuf>,
+    /// Whether the target is there. Absent for a fragment or an external URL,
+    /// neither of which is checked — which is a different answer from `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exists: Option<bool>,
 }
 
-/// Byte range of the line containing `offset`.
-fn line_bounds(source: &str, offset: usize) -> std::ops::Range<usize> {
-    let start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let end = source[offset..]
-        .find('\n')
-        .map_or(source.len(), |i| offset + i);
-    start..end
+/// `mark links --to <file>` — what points at this document.
+fn cmd_backlinks(
+    path: Option<&Path>,
+    target: &Path,
+    json: bool,
+    depth: usize,
+) -> Result<(), CliError> {
+    let root = path.unwrap_or_else(|| Path::new("."));
+
+    let started = Instant::now();
+    let found = links::backlinks(
+        root,
+        target,
+        &tree::Options {
+            max_depth: depth.max(1),
+            ..tree::Options::default()
+        },
+    )?;
+    trace(
+        || format!("backlinks to {} -> {}", target.display(), found.len()),
+        started,
+    );
+
+    if json {
+        return print_json(&found);
+    }
+
+    let mut out = Output::new();
+    for link in &found {
+        // The link's own *text* rather than the target's filename: what the
+        // other document calls this one is the useful half, and the filename is
+        // already in the argument.
+        let anchor = link
+            .fragment
+            .as_ref()
+            .map(|f| format!("#{f}"))
+            .unwrap_or_default();
+        if link.heading.is_empty() {
+            emitln!(
+                out,
+                "{}:{}: {}{}",
+                link.path.display(),
+                link.line,
+                link.text,
+                anchor
+            )?;
+        } else {
+            emitln!(
+                out,
+                "{}:{}: [{}] {}{}",
+                link.path.display(),
+                link.line,
+                link.heading,
+                link.text,
+                anchor
+            )?;
+        }
+    }
+    out.finish()
+}
+
+fn cmd_links(
+    path: Option<&Path>,
+    broken: bool,
+    images: bool,
+    json: bool,
+    depth: usize,
+) -> Result<(), CliError> {
+    let root = path.unwrap_or_else(|| Path::new("."));
+
+    let started = Instant::now();
+    let targets = markdown_targets(root, depth)?;
+    trace(
+        || format!("walk {} -> {} files", root.display(), targets.len()),
+        started,
+    );
+
+    let started = Instant::now();
+    let mut rows: Vec<LinkRow> = Vec::new();
+    for file in &targets {
+        let source = read_walked(root, file)?;
+        let doc = Document::parse(&source);
+        let lines = doc.lines();
+        // Resolution is relative to the *document*, not to the walk root: a
+        // note two directories down means `./sibling.md` next to itself.
+        //
+        // Absolutized first, so `resolved` in the JSON is a path a caller can
+        // use from any directory, and so a `../` that climbs out of the walk
+        // root still names a real place. `std::path::absolute` is lexical —
+        // no `stat`, and it does not fail on a path that is not there, which
+        // is precisely the case `--broken` exists to report.
+        //
+        // `parent()` of a bare `notes.md` is `Some("")`, not `None`, and
+        // `absolute("")` is an error rather than the current directory — so
+        // the empty case is mapped to `.` before it gets there. Without that,
+        // every `resolved` in the JSON comes back relative.
+        let relative = match file.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let base = std::path::absolute(relative).unwrap_or_else(|_| relative.to_path_buf());
+
+        let mut found = links::references(&doc);
+        if images {
+            found.retain(|reference| reference.kind == links::RefKind::Image);
+        }
+        for entry in links::check(found, &base) {
+            if broken && entry.exists != Some(false) {
+                continue;
+            }
+            let target = match entry.reference.target {
+                links::Destination::Fragment { .. } => "fragment",
+                links::Destination::External { .. } => "external",
+                links::Destination::Local { .. } => "local",
+            };
+            rows.push(LinkRow {
+                path: file.clone(),
+                line: lines.line_of(entry.reference.span.start),
+                kind: entry.reference.kind,
+                target,
+                dest: entry.reference.dest,
+                text: entry.reference.text,
+                resolved: entry.path,
+                exists: entry.exists,
+            });
+        }
+    }
+    trace(|| format!("check {} references", rows.len()), started);
+
+    if json {
+        return print_json(&rows);
+    }
+
+    let mut out = Output::new();
+    for row in &rows {
+        let mark = match row.exists {
+            Some(false) => " (missing)",
+            // An external URL is neither present nor absent as far as this
+            // command is concerned, and saying so beats implying either.
+            None if row.target == "external" => " (not checked)",
+            _ => "",
+        };
+        emitln!(
+            out,
+            "{}:{}: {}{}",
+            row.path.display(),
+            row.line,
+            row.dest,
+            mark
+        )?;
+    }
+    out.finish()
 }
 
 /// A single file, or every markdown file below a directory.
@@ -2812,6 +3207,13 @@ struct Stats {
     rich_failures: usize,
     headings: usize,
     tasks: tasks::Counts,
+    /// How long the document is in the units a *writer* cares about, as
+    /// opposed to everything above, which is about the renderer.
+    words: usize,
+    characters: usize,
+    characters_no_spaces: usize,
+    lines: usize,
+    reading_minutes: usize,
     parse_ms: f64,
     render_ms: f64,
     /// A second full render with the highlight cache warm — the file-watcher
@@ -2842,6 +3244,9 @@ fn cmd_stats(path: &Path, json: bool) -> Result<(), CliError> {
     let warm = render(&doc, &RenderOptions::default());
     let warm_time = started.elapsed();
 
+    // Counted from the parse we already have rather than from a second one.
+    let counts = wordcount::count(&doc);
+
     let stats = Stats {
         path: path.to_path_buf(),
         bytes: source.len(),
@@ -2853,6 +3258,11 @@ fn cmd_stats(path: &Path, json: bool) -> Result<(), CliError> {
         rich_failures: cold.rich_failures,
         headings: doc.headings().len(),
         tasks: tasks::counts(&source),
+        words: counts.words,
+        characters: counts.characters,
+        characters_no_spaces: counts.characters_no_spaces,
+        lines: counts.lines,
+        reading_minutes: counts.reading_minutes(),
         parse_ms: ms(parse),
         render_ms: ms(render_time),
         rerender_ms: ms(warm_time),
@@ -2901,6 +3311,20 @@ fn cmd_stats(path: &Path, json: bool) -> Result<(), CliError> {
         stats.tasks.done,
         stats.tasks.cancelled,
         stats.tasks.blocked
+    )?;
+    emitln!(
+        out,
+        "words             {} ({} chars, {} without spaces)",
+        stats.words,
+        stats.characters,
+        stats.characters_no_spaces
+    )?;
+    emitln!(out, "lines             {}", stats.lines)?;
+    emitln!(
+        out,
+        "reading time      {} min at {:.0} wpm",
+        stats.reading_minutes,
+        mark_core::wordcount::WORDS_PER_MINUTE
     )?;
     emitln!(out, "parse             {:.3} ms", stats.parse_ms)?;
     emitln!(out, "render            {:.3} ms", stats.render_ms)?;
@@ -3652,25 +4076,6 @@ mod tests {
     }
 
     #[test]
-    fn line_bounds_covers_first_middle_and_last_lines() {
-        let source = "alpha\nbeta\ngamma";
-        assert_eq!(&source[line_bounds(source, 0)], "alpha");
-        assert_eq!(&source[line_bounds(source, 7)], "beta");
-        assert_eq!(&source[line_bounds(source, 12)], "gamma");
-    }
-
-    #[test]
-    fn heading_path_is_a_breadcrumb() {
-        let source = "# Top\n\n## Middle\n\ntext\n\n## Other\n\nmore\n";
-        let doc = Document::parse(source);
-        let headings = doc.headings();
-        let offset = source.find("text").unwrap();
-        assert_eq!(heading_path(&headings, offset).0, "Top > Middle");
-        let offset = source.find("more").unwrap();
-        assert_eq!(heading_path(&headings, offset).0, "Top > Other");
-    }
-
-    #[test]
     fn a_long_tab_title_is_cut_without_splitting_a_character() {
         assert_eq!(ellipsize("short", 24), "short");
         let long = "Talk to the running app over a Unix socket";
@@ -3678,11 +4083,5 @@ mod tests {
         assert!(ellipsize(long, 10).ends_with('…'));
         // Multi-byte, cut mid-string: this panics if the cut is by bytes.
         assert_eq!(ellipsize("émoji → 🎯 title", 5).chars().count(), 5);
-    }
-
-    #[test]
-    fn heading_path_is_empty_above_the_first_heading() {
-        let doc = Document::parse("intro\n\n# Later\n");
-        assert_eq!(heading_path(&doc.headings(), 0), (String::new(), None));
     }
 }

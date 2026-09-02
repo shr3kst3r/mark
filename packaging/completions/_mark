@@ -64,6 +64,8 @@ _mark() {
     'normalize:rewrite the extended task markers as plain GFM'
     'ls:list markdown files with titles and task counts'
     'grep:search, reporting the heading each match sits under'
+    'links:every link and image, and whether its target is there'
+    'watch:block until a file or directory changes'
     'stats:per-stage timings and counters for one document'
     'doctor:environment report for a bug report'
     'open:open a file in a tab, or root the sidebar at a directory'
@@ -152,6 +154,22 @@ _mark() {
             '--git[add changed lines against git HEAD]' \
             '1:dir:_files -/'
           ;;
+        watch)
+          _arguments \
+            '--follow[keep going instead of exiting at the first change]' \
+            '--interval=[seconds between polls]:seconds:' \
+            '--json[machine-readable output]' \
+            '--depth=[levels to descend]:depth:' \
+            '1:path:_files'
+          ;;
+        toc)
+          _arguments \
+            '--json[machine-readable output]' \
+            '--insert[write the list into the document, between the markers]' \
+            '--min-level=[shallowest heading level]:level:' \
+            '--max-level=[deepest heading level]:level:' \
+            '1:file:_files'
+          ;;
         grep)
           _arguments \
             '--json[machine-readable output]' \
@@ -159,6 +177,14 @@ _mark() {
             '--depth=[levels to descend]:depth:' \
             '1:pattern:' \
             '2:path:_files'
+          ;;
+        links)
+          _arguments \
+            '--broken[only references whose local target is missing]' \
+            '--images[only images, leaving links out]' \
+            '--json[machine-readable output]' \
+            '--depth=[levels to descend]:depth:' \
+            '1:path:_files'
           ;;
         doctor|reload|sidebar)
           _arguments '--json[machine-readable output]'

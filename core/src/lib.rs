@@ -60,13 +60,17 @@ pub mod diff;
 pub mod git;
 pub mod highlight;
 pub mod lines;
+pub mod links;
 pub mod lock;
 pub mod parse;
 pub mod render;
 pub mod rich;
+pub mod sanitize;
+pub mod search;
 pub mod tasks;
 pub mod theme;
 pub mod tree;
+pub mod wordcount;
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int};
@@ -268,6 +272,7 @@ pub unsafe extern "C" fn mark_render_html(
     source: *const c_char,
     prefix_blocks: usize,
     theme: *const c_char,
+    flags: c_int,
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let Some(source) = (unsafe { input(source, "source") }) else {
@@ -281,11 +286,25 @@ pub unsafe extern "C" fn mark_render_html(
         let options = RenderOptions {
             prefix_blocks: (prefix_blocks > 0).then_some(prefix_blocks),
             theme,
+            standalone: flags & MARK_RENDER_STANDALONE != 0,
             ..RenderOptions::default()
         };
         out(render(&doc, &options).html)
     })
 }
+
+/// Wrap the output in a complete `<html>` document with both palettes inline,
+/// rather than emitting the bare `mk-blk` fragments the shell injects.
+///
+/// A **flag on an existing function** rather than a fifteenth one:
+/// `2026-09-01-document-images-over-a-scoped-scheme` sets the ceiling at
+/// fourteen and says the next capability spends a flag on a function whose name
+/// already covers the answer. "Render this document to HTML" does.
+///
+/// This is what `File ▸ Export as HTML…` writes, and it is the same code path
+/// `mark render --html` takes — so an exported document and a piped one cannot
+/// disagree.
+pub const MARK_RENDER_STANDALONE: c_int = 1 << 0;
 
 /// Render an arbitrary half-open range of top-level blocks, `start..end`.
 ///
@@ -515,6 +534,246 @@ pub unsafe extern "C" fn mark_toc_json(source: *const c_char) -> *mut c_char {
         };
         clear_last_error();
         json_out(&Document::parse(source).headings())
+    })
+}
+
+/// Only report references whose target is a local path that is **not there**.
+///
+/// The `mark links --broken` filter, applied in the core so the caller does not
+/// have to know that a fragment and an external URL are "not checked" rather
+/// than "not broken".
+pub const MARK_LINKS_BROKEN: c_int = 1 << 0;
+
+/// Only report images, leaving `[text](dest)` links out.
+///
+/// This is the shell's filter. A `WKURLSchemeHandler` serving the document's
+/// pictures needs the set of image paths and nothing else, and asking the core
+/// for that set is what keeps the handler an allowlist rather than a file
+/// server pointed at the reader's home directory.
+pub const MARK_LINKS_IMAGES: c_int = 1 << 1;
+
+/// Every link and image in a document, as a JSON array, with local
+/// destinations resolved against `base` and `stat`ed.
+///
+/// Each element is `{kind, span:{start,end}, dest, text, title, target:{…}}`
+/// plus `path` and `exists` for a local destination. `base` is the directory
+/// holding the document — a [`Document`] is parsed from a string and has no
+/// path of its own, so the caller supplies it. A null `base` skips resolution
+/// entirely and reports classification only, which is what a caller with no
+/// file on disk (the Today page, an unsaved buffer) wants.
+///
+/// `flags` is [`MARK_LINKS_BROKEN`] and [`MARK_LINKS_IMAGES`], ANDed together
+/// when both are set.
+///
+/// Returns null on failure. Free with [`mark_free`].
+///
+/// # Safety
+/// `source` must be a NUL-terminated UTF-8 string; `base` must be null or one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_links_json(
+    source: *const c_char,
+    base: *const c_char,
+    flags: c_int,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(source) = (unsafe { input(source, "source") }) else {
+            return std::ptr::null_mut();
+        };
+        clear_last_error();
+        let base = if base.is_null() {
+            None
+        } else {
+            match unsafe { input(base, "base") } {
+                Some(base) => Some(base),
+                None => return std::ptr::null_mut(),
+            }
+        };
+
+        let doc = Document::parse(source);
+        let mut found = links::references(&doc);
+        if flags & MARK_LINKS_IMAGES != 0 {
+            found.retain(|reference| reference.kind == links::RefKind::Image);
+        }
+
+        let Some(base) = base else {
+            // No base: classification only. Every reference comes back with
+            // `path` and `exists` absent, which is a different answer from
+            // "checked and missing" and must not be confused with it — so
+            // `--broken` with no base is an empty list rather than everything.
+            let unchecked: Vec<links::Checked> = found
+                .into_iter()
+                .map(|reference| links::Checked {
+                    reference,
+                    path: None,
+                    exists: None,
+                })
+                .collect();
+            let filtered = if flags & MARK_LINKS_BROKEN != 0 {
+                Vec::new()
+            } else {
+                unchecked
+            };
+            return json_out(&filtered);
+        };
+
+        let mut checked = links::check(found, Path::new(base));
+        if flags & MARK_LINKS_BROKEN != 0 {
+            checked.retain(|entry| entry.exists == Some(false));
+        }
+        json_out(&checked)
+    })
+}
+
+/// Every reference in `root` that points at `target`, as a JSON array of
+/// `{path, line, offset, text, heading, fragment?, kind}`.
+///
+/// The other direction from [`mark_links_json`], and the question a notes
+/// directory is navigated by. One parse per markdown file below `root`, so this
+/// is a call to make off the main thread.
+///
+/// `depth` of 0 means the default recursive depth. A separate function rather
+/// than a flag on `mark_links_json`, whose input is a document's *source*: this
+/// one takes a directory and a target, which is a different question with a
+/// different shape.
+///
+/// Returns null on failure. Free with [`mark_free`].
+///
+/// # Safety
+/// `root` and `target` must be NUL-terminated UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_backlinks_json(
+    root: *const c_char,
+    target: *const c_char,
+    depth: usize,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(root) = (unsafe { input(root, "root") }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(target) = (unsafe { input(target, "target") }) else {
+            return std::ptr::null_mut();
+        };
+        clear_last_error();
+        let options = tree::Options {
+            max_depth: if depth == 0 {
+                tree::DEFAULT_RECURSIVE_DEPTH
+            } else {
+                depth
+            },
+            ..tree::Options::default()
+        };
+        match links::backlinks(Path::new(root), Path::new(target), &options) {
+            Ok(found) => json_out(&found),
+            Err(error) => {
+                set_last_error(error.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// How long a document is, in the units a writer cares about:
+/// `{words, characters, characters_no_spaces, lines, blocks, headings,
+/// code_bytes, reading_minutes}`.
+///
+/// Counted from the **event stream**, so frontmatter, code, math, diagrams and
+/// a link's URL are not prose — which is why this is in the core rather than a
+/// whitespace split in Swift, and why the editor's status line and `mark stats`
+/// cannot disagree.
+///
+/// A new function rather than a flag, by the rule
+/// `2026-09-01-search-in-the-core` sets: no existing function's *name* covers
+/// "how long is this document".
+///
+/// Returns null on failure. Free with [`mark_free`].
+///
+/// # Safety
+/// `source` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_wordcount_json(source: *const c_char) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(source) = (unsafe { input(source, "source") }) else {
+            return std::ptr::null_mut();
+        };
+        clear_last_error();
+        let counts = wordcount::count_source(source);
+        json_out(&serde_json::json!({
+            "words": counts.words,
+            "characters": counts.characters,
+            "characters_no_spaces": counts.characters_no_spaces,
+            "lines": counts.lines,
+            "blocks": counts.blocks,
+            "headings": counts.headings,
+            "code_bytes": counts.code_bytes,
+            "reading_minutes": counts.reading_minutes(),
+        }))
+    })
+}
+
+/// Fold case.
+pub const MARK_SEARCH_IGNORE_CASE: c_int = 1 << 0;
+
+/// Include dotfiles and dot-directories.
+pub const MARK_SEARCH_HIDDEN: c_int = 1 << 1;
+
+/// Search a file, or every markdown file below a directory, reporting the
+/// heading each hit sits under.
+///
+/// `{"matches":[{path,line,offset,column:{start,end},heading,anchor?,text}],
+///   "truncated":false,"files":12}`.
+///
+/// `limit` caps the hits and 0 means no cap. The window passes one because it
+/// searches on every keystroke; `mark grep` passes 0 because a script piping to
+/// `wc -l` wants the truth. `truncated` says the cap was reached and is
+/// reported rather than inferred from the count, which is ambiguous when a
+/// tree happens to hold exactly `limit` matches.
+///
+/// This is the fifteenth function. `2026-09-01-document-images-over-a-scoped-scheme`
+/// is amended by `2026-09-01-search-in-the-core` rather than bumped again: the
+/// ABI's constraint is that it stays flat and string-shaped, and a running count
+/// was the wrong shape for that rule. The reason it is a function and not a flag
+/// is that no existing function's name covers "find text across a directory".
+///
+/// Returns null on failure — an invalid pattern, or a named file that cannot be
+/// read — with the reason in [`mark_last_error`]. A file found by *walking* that
+/// cannot be read is skipped, not an error. Free with [`mark_free`].
+///
+/// # Safety
+/// `root` and `pattern` must be NUL-terminated UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_search_json(
+    root: *const c_char,
+    pattern: *const c_char,
+    depth: usize,
+    limit: usize,
+    flags: c_int,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(root) = (unsafe { input(root, "root") }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(pattern) = (unsafe { input(pattern, "pattern") }) else {
+            return std::ptr::null_mut();
+        };
+        clear_last_error();
+
+        let options = search::Options {
+            ignore_case: flags & MARK_SEARCH_IGNORE_CASE != 0,
+            max_depth: if depth == 0 {
+                tree::DEFAULT_RECURSIVE_DEPTH
+            } else {
+                depth
+            },
+            limit,
+            hidden: flags & MARK_SEARCH_HIDDEN != 0,
+        };
+        match search::search(Path::new(root), pattern, &options) {
+            Ok(results) => json_out(&results),
+            Err(error) => {
+                set_last_error(error.to_string());
+                std::ptr::null_mut()
+            }
+        }
     })
 }
 
@@ -755,7 +1014,15 @@ pub unsafe extern "C" fn mark_tree_json(
         };
         clear_last_error();
         let options = tree::Options {
-            max_depth: depth.max(1),
+            // 0 means "as deep as a recursive walk goes", matching
+            // `mark_search_json`. Nothing passed 0 before this — every caller
+            // asked for 1 — so widening it costs no existing behaviour, and
+            // `Open Quickly` needs the whole tree rather than one level.
+            max_depth: if depth == 0 {
+                tree::DEFAULT_RECURSIVE_DEPTH
+            } else {
+                depth
+            },
             with_stats: with_stats != 0,
             markdown_only: flags & MARK_TREE_ALL_FILES == 0,
             hidden: flags & MARK_TREE_HIDDEN != 0,
@@ -1056,6 +1323,65 @@ mod tests {
         CString::new(text).unwrap()
     }
 
+    // ---- mark_links_json -------------------------------------------------
+
+    #[test]
+    fn links_json_classifies_without_a_base() {
+        let source = c("[a](x.md) ![b](y.png) [c](https://z.test) [d](#e)");
+        let json = take(unsafe { mark_links_json(source.as_ptr(), std::ptr::null(), 0) }).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0]["kind"], "link");
+        assert_eq!(rows[1]["kind"], "image");
+        assert_eq!(rows[2]["target"]["kind"], "external");
+        assert_eq!(rows[3]["target"]["kind"], "fragment");
+        // No base means no resolution, and "unchecked" must not look like
+        // "checked and present".
+        assert!(rows[0].get("exists").is_none());
+        assert!(rows[0].get("path").is_none());
+    }
+
+    #[test]
+    fn links_json_resolves_and_stats_against_a_base() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("there.md"), "# there").unwrap();
+        let source = c("[here](there.md) [gone](missing.md)");
+        let base = c(dir.path().to_str().unwrap());
+        let json = take(unsafe { mark_links_json(source.as_ptr(), base.as_ptr(), 0) }).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(rows[0]["exists"], serde_json::json!(true));
+        assert_eq!(rows[1]["exists"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn links_json_images_flag_is_what_the_shell_asks_for() {
+        let source = c("[a](x.md) ![b](y.png)");
+        let json =
+            take(unsafe { mark_links_json(source.as_ptr(), std::ptr::null(), MARK_LINKS_IMAGES) })
+                .unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["kind"], "image");
+    }
+
+    #[test]
+    fn links_json_broken_with_no_base_is_empty_rather_than_everything() {
+        // Nothing has been checked, so nothing can be reported broken.
+        // Answering "all of them" would be the dangerous reading.
+        let source = c("[a](x.md) [b](y.md)");
+        let json =
+            take(unsafe { mark_links_json(source.as_ptr(), std::ptr::null(), MARK_LINKS_BROKEN) })
+                .unwrap();
+        assert_eq!(json.trim(), "[]");
+    }
+
+    #[test]
+    fn links_json_survives_a_null_source() {
+        assert!(take(unsafe { mark_links_json(std::ptr::null(), std::ptr::null(), 0) }).is_none());
+    }
+
     #[test]
     fn guard_turns_a_panic_into_the_sentinel() {
         let value = without_panic_noise(|| guard(-7, || panic!("boom")));
@@ -1085,7 +1411,7 @@ mod tests {
     #[test]
     fn render_emits_block_ids_and_task_spans() {
         let source = c("# T\n\n- [x] done\n");
-        let html = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME) }).unwrap();
+        let html = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME, 0) }).unwrap();
         assert!(html.contains("data-blk="), "{html}");
         assert!(html.contains("class=\"mk-task\""), "{html}");
     }
@@ -1093,9 +1419,9 @@ mod tests {
     #[test]
     fn render_honours_the_prefix_tunable() {
         let source = c("a\n\nb\n\nc\n");
-        let two = take(unsafe { mark_render_html(source.as_ptr(), 2, THEME) }).unwrap();
+        let two = take(unsafe { mark_render_html(source.as_ptr(), 2, THEME, 0) }).unwrap();
         assert_eq!(two.matches("mk-blk").count(), 2, "{two}");
-        let all = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME) }).unwrap();
+        let all = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME, 0) }).unwrap();
         assert_eq!(all.matches("mk-blk").count(), 3, "{all}");
     }
 
@@ -1115,7 +1441,7 @@ mod tests {
     fn render_range_over_a_partition_equals_a_whole_render() {
         // The property M2 currently gets by rendering everything and slicing.
         let source = c("# H\n\n- [ ] t\n\n```rust\nfn f() {}\n```\n\npara\n");
-        let whole = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME) }).unwrap();
+        let whole = take(unsafe { mark_render_html(source.as_ptr(), 0, THEME, 0) }).unwrap();
         let head = take(unsafe { mark_render_range(source.as_ptr(), 0, 2, THEME) }).unwrap();
         let tail =
             take(unsafe { mark_render_range(source.as_ptr(), 2, usize::MAX, THEME) }).unwrap();
@@ -1357,7 +1683,7 @@ mod tests {
 
     #[test]
     fn null_input_is_an_error_not_a_crash() {
-        assert!(unsafe { mark_render_html(std::ptr::null(), 0, THEME) }.is_null());
+        assert!(unsafe { mark_render_html(std::ptr::null(), 0, THEME, 0) }.is_null());
         assert_eq!(take(mark_last_error()).as_deref(), Some("source is null"));
         assert_eq!(unsafe { mark_toggle(std::ptr::null(), 0, 2) }, -1);
         assert_eq!(take(mark_last_error()).as_deref(), Some("path is null"));

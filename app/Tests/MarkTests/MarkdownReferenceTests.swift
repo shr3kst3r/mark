@@ -177,3 +177,64 @@ struct MarkdownReferenceTests {
         #expect(!source.hasPrefix("---"))
     }
 }
+
+/// The one picture the reference shows, and whether it actually arrives.
+///
+/// `2026-09-01-document-images-over-a-scoped-scheme` records why this is a
+/// separate suite rather than one more assertion above: images were the single
+/// construct whose failure the reference could not demonstrate, because the
+/// Images section only quoted the syntax in a fenced block. It quotes *and*
+/// shows one now, so a regression in the asset path takes the reference page
+/// down with it — visibly — the way a regression in tables or math already
+/// does.
+@Suite("The markdown reference's picture")
+@MainActor
+struct MarkdownReferenceImageTests {
+
+    @Test("the image it points at ships beside it")
+    func theImageShips() throws {
+        let reference = try #require(MarkdownReference.url)
+        let image = reference
+            .deletingLastPathComponent()
+            .appendingPathComponent("markdown-reference-image.png")
+        #expect(
+            FileManager.default.fileExists(atPath: image.path),
+            """
+            markdown-reference.md points at markdown-reference-image.png, which is \
+            not next to it — check Package.swift and scripts/assemble-bundle.sh
+            """)
+    }
+
+    @Test("the Images section shows a picture rather than only quoting the syntax")
+    func theSectionShowsOne() throws {
+        let source = try #require(MarkdownReference.source)
+        let images = try MarkCore.links(source: source, images: true)
+        #expect(
+            !images.isEmpty,
+            "the Images section demonstrates nothing a reader can see it fail at")
+    }
+
+    @Test("it loads in the reference window")
+    func itLoadsInTheWindow() async throws {
+        // Failable: it returns nil when the resource is missing, which
+        // `theImageShips` above already reports more precisely.
+        let controller = try #require(HelpWindowController())
+        defer { controller.tearDown() }
+        await controller.documentView.awaitReady()
+        await controller.documentView.ensureFullyRendered()
+
+        let width = try await controller.documentView.call(
+            """
+            var img = document.querySelector('#mk-doc img');
+            if (!img) return -1;
+            if (img.complete) return img.naturalWidth;
+            return await new Promise(function (resolve) {
+              img.addEventListener('load', function () { resolve(img.naturalWidth); });
+              img.addEventListener('error', function () { resolve(0); });
+              setTimeout(function () { resolve(img.naturalWidth); }, 3000);
+            });
+            """)
+        let pixels = (width as? Int) ?? Int((width as? Double) ?? -1)
+        #expect(pixels == 320, "the reference's own picture did not load; got \(pixels)")
+    }
+}

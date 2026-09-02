@@ -4,13 +4,16 @@
 
 # ADR index
 
-16 active · 5 superseded
+19 active · 5 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
 | [2026-09-01-sidebar-poll-gates-the-tick-not-the-timer](2026-09-01-sidebar-poll-gates-the-tick-not-the-timer.md) | The sidebar poll's visibility check gates each tick's work, not the timer's existence | Accepted | app, sidebar | — | 2026-09-01 |
+| [2026-09-01-search-in-the-core](2026-09-01-search-in-the-core.md) | Move search into the core, and replace the ABI's function-count ceiling with the rule it was standing in for | Proposed | core, cli, app, ipc | — | 2026-09-01 |
+| [2026-09-01-filter-embedded-html](2026-09-01-filter-embedded-html.md) | Filter the HTML a document embeds, in the core, with no way to turn it off | Proposed | core, render, cli, app | — | 2026-09-01 |
+| [2026-09-01-document-images-over-a-scoped-scheme](2026-09-01-document-images-over-a-scoped-scheme.md) | Serve a document's images over a second scheme, from an allowlist the core computes, and spend a fourteenth ABI function on it | Proposed | app, core, cli, render | — | 2026-09-01 |
 | [2026-08-31-today-page](2026-08-31-today-page.md) | Show the day's work as a document mark assembles and renders, in a window with no file behind it | Proposed | app, render | — | 2026-08-31 |
 | [2026-08-28-tabbed-document-pane](2026-08-28-tabbed-document-pane.md) | Make the sidebar's lower half a tabbed document pane, and give the five task states somewhere to be read | Accepted | app, sidebar, tabs | — | 2026-08-28 |
 | [2026-08-28-git-differences-by-running-git](2026-08-28-git-differences-by-running-git.md) | Learn what changed by running `git --no-optional-locks` as a child process, and show it as rendered markdown rather than as patch text | Accepted | core, cli, app, render, sidebar | — | 2026-08-28 |

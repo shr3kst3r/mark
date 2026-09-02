@@ -21,7 +21,14 @@ import Foundation
 public final class ResidencyGovernor {
 
     /// The application's governor. Windows share it; tests make their own.
-    public static let shared = ResidencyGovernor()
+    ///
+    /// Started from the *preference* rather than from the constant, so a limit
+    /// set in Settings survives a relaunch. `MARK_RESIDENT_TABS` still wins
+    /// when it is set — `Preferences.residentTabs` is what enforces that, and
+    /// the reason is that an environment variable is a deliberate per-launch
+    /// act, usually a measurement, that a stored preference must not silently
+    /// override.
+    public static let shared = ResidencyGovernor(limit: Preferences.residentTabs())
 
     /// **3, carried forward unchanged from
     /// `2026-08-24-tab-residency-and-memory-model`.** A resident tab costs

@@ -17,9 +17,19 @@
  * across, is the signal ADR-1 names for reconsidering the design in a
  * superseding ADR.
  *
- * There are thirteen. 2026-08-28-git-differences-by-running-git spent the last
- * one on mark_git_json and set the ceiling there; the next capability that
- * wants to cross this boundary supersedes that ADR.
+ * 2026-09-01-search-in-the-core retires the function *count* and keeps the rule
+ * it was a proxy for:
+ *
+ *   Every function here takes and returns NUL-terminated UTF-8 strings and C
+ *   scalars, and nothing else. No struct crosses this boundary, no pointer to
+ *   one, no callback, no ownership mark_free does not describe. A capability
+ *   whose answer does not fit that shape is the signal to reconsider the
+ *   design in a superseding ADR -- not the number of functions that have.
+ *
+ *   A new capability is a new function when no existing function's NAME covers
+ *   the answer, and a flag on an existing one when it does. mark_links_json is
+ *   a function because "tasks" does not cover "links"; MARK_RENDER_STANDALONE
+ *   is a flag because "render this document to HTML" covers "as a whole page".
  */
 
 #ifndef MARK_H
@@ -61,7 +71,21 @@ void mark_free(char *ptr);
  *
  * Returns NULL on failure.
  */
-char *mark_render_html(const char *source, size_t prefix_blocks, const char *theme);
+/*
+ * With MARK_RENDER_STANDALONE the answer is a complete <html> document with
+ * both palettes inline, rather than the bare mk-blk fragments the shell
+ * injects -- what File > Export as HTML... writes, and the same path
+ * `mark render --html` takes, so the two cannot disagree.
+ *
+ * A flag rather than a fifteenth function:
+ * 2026-09-01-document-images-over-a-scoped-scheme sets the ceiling at fourteen
+ * and says the next capability spends a flag on a function whose name already
+ * covers the answer. "Render this document to HTML" does.
+ */
+#define MARK_RENDER_STANDALONE 1
+
+char *mark_render_html(const char *source, size_t prefix_blocks, const char *theme,
+                       int flags);
 
 /*
  * The same, for an arbitrary half-open block range [start, end).
@@ -207,6 +231,83 @@ char *mark_tasks_json(const char *source, int flags);
 char *mark_toc_json(const char *source);
 
 /*
+ * Every link and image in a document, as a JSON array:
+ *
+ *   [{"kind":"image","span":{"start":12,"end":40},"dest":"assets/x.png",
+ *     "text":"alt","title":"","target":{"kind":"local","path":"assets/x.png",
+ *     "fragment":null},"path":"/abs/assets/x.png","exists":true}, ...]
+ *
+ * "base" is the directory holding the document, since a parsed document has no
+ * path of its own. NULL skips resolution: "path" and "exists" are then absent,
+ * which is a different answer from "checked and missing" and must not be read
+ * as one.
+ *
+ * This is the fourteenth function, and 2026-08-28-git-differences-by-running-git
+ * set the ceiling at thirteen. 2026-09-01-document-images-over-a-scoped-scheme
+ * is the ADR that raises it, and the reason it is a function rather than a flag
+ * on mark_tasks_json is stated there: an allowlist a WKURLSchemeHandler serves
+ * from must not be reachable only through a call whose name says "tasks".
+ */
+#define MARK_LINKS_BROKEN 1
+#define MARK_LINKS_IMAGES 2
+
+char *mark_links_json(const char *source, const char *base, int flags);
+
+/*
+ * Search a file, or every markdown file below a directory, reporting the
+ * heading each hit sits under:
+ *
+ *   {"matches":[{"path":"notes.md","line":412,"offset":9130,
+ *                "column":{"start":5,"end":10},"heading":"Deploys > Rollback",
+ *                "anchor":"rollback","text":"roll it back"}],
+ *    "truncated":false,"files":37}
+ *
+ * depth of 0 means the default recursive depth. limit caps the hits and 0 means
+ * no cap -- the window passes one because it searches on every keystroke,
+ * `mark grep` passes 0 because a script piping to wc -l wants the truth.
+ * "truncated" says the cap was reached, and is reported rather than inferred
+ * from the count, which is ambiguous when a tree holds exactly limit matches.
+ *
+ * NULL on an invalid pattern, or on a file the caller NAMED that cannot be
+ * read. A file found by WALKING that cannot be read is skipped, not an error:
+ * `mark grep pat broken.md` exits 2, and a walk past the same file keeps its
+ * other results.
+ */
+/*
+ * How long a document is, in the units a writer cares about:
+ *
+ *   {"words":412,"characters":2380,"characters_no_spaces":2001,"lines":58,
+ *    "blocks":22,"headings":4,"code_bytes":190,"reading_minutes":2}
+ *
+ * Counted from the event stream, so frontmatter, fenced and inline code, math,
+ * diagrams, an image's alt text, and a link's URL are all excluded -- which is
+ * why this is here rather than a whitespace split in Swift, and why the
+ * editor's status line and `mark stats` cannot disagree.
+ */
+char *mark_wordcount_json(const char *source);
+
+/*
+ * Every reference below "root" that points at "target" -- the other direction
+ * from mark_links_json, and the question a notes directory is navigated by:
+ *
+ *   [{"path":"notes/index.md","line":7,"offset":112,"text":"the runbook",
+ *     "heading":"Index > Ops","fragment":"install","kind":"link"}]
+ *
+ * Matching is on the RESOLVED path, so `../notes/runbook.md` from a sibling
+ * directory and `runbook.md` from beside it both count. A document never links
+ * to itself. depth of 0 means the default recursive depth.
+ *
+ * One parse per markdown file below root: call this off the main thread.
+ */
+char *mark_backlinks_json(const char *root, const char *target, size_t depth);
+
+#define MARK_SEARCH_IGNORE_CASE 1
+#define MARK_SEARCH_HIDDEN 2
+
+char *mark_search_json(const char *root, const char *pattern, size_t depth,
+                       size_t limit, int flags);
+
+/*
  * Toggle task `index` in the file at `path`, in place: exactly one byte
  * changes, written via a temp file and a rename.
  *
@@ -300,6 +401,11 @@ char *mark_write_json(const char *path, const char *source, size_t index,
 #define MARK_TREE_ALL_FILES 1 /* include non-markdown files */
 #define MARK_TREE_HIDDEN    2 /* include dotfiles and dot-directories */
 
+/*
+ * depth of 0 means the default recursive depth, as it does for
+ * mark_search_json; 1 means this directory only, which is what the sidebar
+ * asks for (it must never walk ahead of what the reader expanded).
+ */
 char *mark_tree_json(const char *dir, size_t depth, int with_stats, int flags);
 
 /*

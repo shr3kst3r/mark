@@ -225,6 +225,7 @@ cp "${root}/app/Resources/shell.html" \
    "${root}/app/Resources/shell.js" \
    "${root}/app/Resources/shell.css" \
    "${root}/app/Resources/markdown-reference.md" \
+   "${root}/app/Resources/markdown-reference-image.png" \
    "${bundle}/Contents/Resources/"
 
 # The two icons, named by `CFBundleIconFile` and by the markdown document type's

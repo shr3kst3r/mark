@@ -14,7 +14,7 @@ after you stop typing. The `mark` CLI does everything the window does, and
 drives the running app over a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-402 Rust tests, 397 Swift tests, 48 integration checks, and committed
+627 Rust tests, 885 Swift tests, 48 integration checks, and committed
 performance gates.
 
 ## Install
@@ -134,6 +134,13 @@ binary says `binary` rather than claiming `+0 −0`.
 > or the Command Line Tools are not installed, the feature is simply absent —
 > no badges, no dialog, and `mark doctor` says which `git` it found.
 
+**Right-click a row** for the things a notes directory needs: Rename…,
+Duplicate, Move to Trash, New Folder…, New Document Here…, Reveal in Finder,
+Copy Path. Every one refuses rather than clobbers — a document with unsaved
+changes cannot be renamed or trashed, a name that already exists is refused
+instead of overwritten, and trashing goes to the Trash so Finder can put it
+back. A rename takes its tab with it.
+
 ⌘O and ⌘T are the same open panel — several files at once, starting in the
 folder you are reading, and a folder itself is a valid choice that roots the
 tree there. Both offer **every** extension mark counts as markdown — `.md`,
@@ -175,10 +182,37 @@ been torn down still has a correct outline *and* a correct task list. Ticking a
 box stays in the preview and in `mark check` — the pane navigates and never
 writes, which keeps one locked, byte-verified write path.
 
-⌃⌘T is Contents and ⌃⌘Y is Tasks; either one hides the pane when its own tab is
-already showing, and ⌃⌘S still hides the whole sidebar. The tab you last used is
+**Links** is the third tab: what points *at* the document you are reading, from
+anywhere below the sidebar's root. A row is the linking document, the heading
+the link sits under, and the link's own text — what the other note calls this
+one, which beats repeating the filename you are already looking at. ↩ opens it
+at the link. Unlike its two siblings this one is not free — it parses every
+markdown file below the root — so it is computed only while it is on screen,
+off the main thread, and an answer for a document you have already switched
+away from is dropped rather than shown under the wrong name.
+
+⌃⌘T is Contents, ⌃⌘Y is Tasks and ⌃⌘B is Links; any of them hides the pane when
+its own tab is already showing, and ⌃⌘S still hides the whole sidebar. The tab you last used is
 remembered, like the divider. Drag the divider to say how the two halves share
 the height.
+
+**Open a note by name** with ⌥⌘O — **File ▸ Open Quickly…**. Subsequence
+matching over every markdown file below the sidebar's root, so `rbk` finds
+`deploys/runbook.md`, ↑ and ↓ walk the list while the caret stays in the field,
+and ↩ opens the top hit. The sidebar's own filter deliberately only covers rows
+you have already expanded — the tree never walks ahead of you — so this is how
+you reach a file three directories down without navigating to it.
+
+**Find across the folder** with ⇧⌘F — **Edit ▸ Find ▸ Find in Folder…** — in a
+window of its own. Every note below the sidebar's root, searched with the same
+engine and the same regex dialect `mark grep` uses, and every hit says which
+*heading* it sits under: `runbook.md:412 · Deploys › Rollback · roll it back`.
+↩ or a double-click opens the file scrolled to the hit — by byte offset, so a
+match inside a table or under a diagram lands where the bytes say. It searches
+while you type, off the main thread, cancelling the search you have typed past;
+a half-finished pattern like `roll(` leaves the last results alone rather than
+flashing the table empty. The window holds no rendered page, so opening it costs
+nothing from the tab budget.
 
 **Find in the document** with ⌘F, in a bar along the bottom edge. Every match is
 highlighted at once and the current one is picked out; ⌘G and ⇧⌘G — or ↩, ⇧↩,
@@ -253,6 +287,13 @@ derived, so inserting a paragraph does not renumber what is below it, and an
 external save patches only the blocks that changed — already-laid-out diagrams
 and math survive untouched.
 
+**Pictures.** `![alt](assets/diagram.png)` resolves against the document, `../`
+included, and is capped at the width of the text column. mark serves them over a
+scheme of its own from the set of images the document actually names — so a
+picture appears and nothing else on your disk does, even though a markdown file
+may contain arbitrary HTML. `mark links --images` prints that set and
+`mark links --broken` finds the ones that have gone.
+
 **Math and diagrams.** `$x^2$` and `$$…$$` become inline MathML; ```` ```mermaid ````
 fences become inline SVG. Both are rendered in Rust at render time and memoized,
 so `mark render --html` produces exactly what the window shows, with no
@@ -271,6 +312,20 @@ scrollbars — goes light. **Match System Appearance**, at the top of the same
 menu, hands the choice back to macOS, and then the half in force is ticked and
 its partner is dashed. Your own themes go in `~/.config/mark/themes/*.toml` and
 are picked up without a rebuild. `mark theme --list` names them all.
+
+**Getting it out.** ⌘P prints the rendered document — the preview, not the
+source pane — and **File ▸ Export as HTML…** writes exactly what
+`mark render --html` would have written, so an exported file and a piped one
+cannot disagree. **Export as PDF…** is its own item rather than being left to
+the print panel's PDF menu, which is a place people do not find. Paper gets its
+own palette: a dark theme is a screen decision, and printing one as laid out is
+a page of toner.
+
+**Text size.** ⌘+ and ⌘− walk a fixed ladder from 60% to 200%, and ⌘0 goes back
+to actual size. Both panes move together — the preview through `pageZoom`, the
+editor by scaling its type, so the change ruler and the whitespace marks stay
+where they belong. It is app-wide and remembered, like the theme: two windows
+disagreeing about how big text is is not a state anyone means to be in.
 
 **A markdown reference, rendered by the renderer it documents.** ⇧⌘/ — or
 **Help ▸ Markdown Reference** — opens every construct mark supports, with the
@@ -297,6 +352,17 @@ opening. A file that has since moved or been deleted stays in the list, greyed
 and marked *missing*, because an unmounted volume is not a deletion. The window
 is a plain list — it holds no rendered page, so opening it never displaces a
 document from the memory budget.
+
+**Reopen what you closed** with ⌥⌘T, up to ten documents back, across every
+window — a tab closed in one and a window closed entirely are the same loss.
+(⌥⌘T rather than the browser's ⇧⌘T, which is already File ▸ Today.)
+
+**A new document can start from a template.** Put a `_template.md` beside it, or
+in any directory up to the journal or sidebar root, and ⇧⌘N seeds from it —
+nearest wins. `{{title}}`, `{{filename}}`, `{{date}}` and `{{time}}` are filled
+in. No preference and no config directory: a template is a file you can see in
+the sidebar, edit in mark, and commit with everything around it, and a folder
+without one behaves exactly as it did before.
 
 **Today, if your notes are a journal.** ⇧⌘T — or **File ▸ Today** — assembles
 one page out of your notes and renders it: the day's outstanding items from
@@ -333,6 +399,31 @@ asked — keep mine, take theirs, or show me the diff — and nothing is written
 until you answer. The pane starts hidden: a document opens read-only until you
 ask to edit it, and the app remembers that you asked.
 
+**The editor knows it is markdown.** ⏎ in a list starts the next item, keeping
+the indentation and counting an ordered list on; ⏎ on an *empty* item ends the
+list rather than making another. **Format** has Bold (⌘B), Italic (⌘I), Code
+(⌃⌘E), Strikethrough, Link (⌘K — a URL already on the clipboard goes straight
+into the parentheses), and heading levels on ⌃⌘1 to ⌃⌘6, with ⌃⌘0 for body text.
+Each one toggles: ⌘B on bold text unbolds it. Everything else about the pane is
+still the system's — undo, spellcheck, Find & Replace and accessibility are
+`NSTextView`'s, and these override exactly one key.
+
+**How long is it.** A line under the editor says words, characters, lines and
+an estimated reading time, and `mark stats` prints the same numbers. Counted
+from the parsed document rather than from its bytes, so a document's
+frontmatter, its fenced and inline code, its math and diagrams, an image's alt
+text and a link's URL are none of them prose — which is the whole reason the
+counting is in the core and not a whitespace split in the window.
+
+**Line numbers, when you want them.** ⌃⌘L puts them in the margin beside the
+change bars, and ⌘L goes to one. Off by default — a gutter full of numbers is
+the invasive version of that margin, the same reason nothing is drawn on line
+endings. A soft-wrapped line gets one number against its first row and nothing
+against the rest, so the gutter agrees with `mark grep`, `mark toc`, and every
+error message that names a line. A number past the end of the document is
+refused rather than clamped to the last line, which is indistinguishable from
+the document being shorter than you thought.
+
 **Every space, and which kind.** The editor draws a mark for each blank it
 holds: a faint dot in the middle of a space, an arrow across the full width of a
 tab, and — in the theme's warning colour, because these are the ones that
@@ -346,6 +437,13 @@ the invasive version of this. ⌥⌘I turns the marks off; the choice is app-wid
 and remembered, like the theme, and nothing is written into the document — the
 marks are drawn over the text rather than substituted into it, so copying a line
 out of the pane copies the spaces you had.
+
+**⌃⌘D makes today's note.** The Today page tells you when there is no daily for
+today and shows the most recent instead, which left you to create it by hand,
+three directories down, under a name you had to get exactly right.
+`daily/2026/09/2026-09-01.md` and its folders are created, seeded from
+`daily/_template.md` if you have one, and opened. Running it when today's note
+already exists just opens it.
 
 **Making one.** ⇧⌘N names a new document in a save panel, creates it, and opens
 it with the editor already focused — there is no untitled buffer to lose,
@@ -380,6 +478,15 @@ task marker the write is refused rather than guessed. While a tab is dirty the
 click applies to the buffer instead, so the preview and the file can never
 disagree about which task you clicked.
 
+**Settings** on ⌘, holds the two things that could previously be changed only
+by editing a constant or exporting an environment variable: how long autosave
+waits after you stop typing, and how many tabs keep a live web view (about
+52 MB each). Everything else stays where it is — the theme is in **View ▸
+Theme** because you want to see it applied as you arrow through it, and the
+sidebar's switches are beside the tree they change. `MARK_RESIDENT_TABS` still
+wins when it is set, and the window says so rather than showing a control that
+does nothing.
+
 **Session.** Tabs, order, selection, scroll offsets, sidebar root and history,
 the theme and which half of it is on screen, and whether the editor was open all
 come back on relaunch, from our own JSON file rather than `NSWindowRestoration`.
@@ -392,7 +499,7 @@ script or an agent is usually in:
 | Command | What it does |
 |---|---|
 | `mark render <f> [--html\|--ansi\|--plain] [--prefix N] [--theme NAME]` | A styled document on stdout. `--html` is self-contained: both palettes, inline MathML and SVG, no JavaScript. |
-| `mark toc <f> [--json]` | The heading tree, with anchors, byte offsets, and block ids. |
+| `mark toc <f> [--json] [--insert]` | The heading tree, with anchors, byte offsets, and block ids. `--insert` writes the list *into* the document between `<!-- toc -->` and `<!-- /toc -->`, which must already be there — it will not guess where one belongs. |
 | `mark tasks [path] [--open] [--state <s>] [--json]` | Every task: path, index, state, text, byte span. `--open` is everything still outstanding — open, in progress, or blocked. |
 | `mark tasks [path] [--tag @t] [--priority N] [--due-before\|--due-after <when>] [--overdue] [--no-due] [--sort due\|priority\|state\|index] [--today YYYY-MM-DD]` | The metadata filters. `<when>` is a date, `today`, or `+Nd`. `--today` is the only place a date comparison reads a clock, and naming it makes the answer testable. |
 | `mark check <f> --item N [--on\|--off\|--toggle\|--state <s>] [--stamp] [--json]` | Flips one checkbox by changing exactly one byte. `--state` reaches the other three; `--stamp` also appends `@done(YYYY-MM-DD)`, in the same atomic write. Refuses, with exit 6, if another `mark` holds the file — see below. |
@@ -400,7 +507,10 @@ script or an agent is usually in:
 | `mark ls [dir] [--json] [--depth N] [--all] [--git]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. `--git` adds each file's `+12 −3` against `HEAD`. |
 | `mark diff [path] [--html\|--ansi\|--plain] [--json] [--stat] [--tracked]` | What changed against git `HEAD`. A **file** shows its changed lines; a **directory** shows one row per changed file. `--html` is the *rendered* diff — removed blocks struck through in place — not patch text. Exits 0 outside a repository. |
 | `mark grep <pat> [path] [--json] [-i]` | Regex search, reporting the heading each match sits under. |
-| `mark stats <f> [--json]` | Per-stage timings and counters. |
+| `mark links [path] [--broken] [--images] [--json]` | Every link and image, and whether its target is there. A directory is walked. External URLs are reported and never fetched, so `--broken` means a local path that is missing. |
+| `mark links --to <f> [path] [--json]` | The other direction: what points **at** this file. Matched on the resolved path, so a link written from a sibling directory counts. |
+| `mark watch [path] [--follow] [--interval S]` | Block until something changes, then say what changed and exit. `while mark watch notes/; do just build; done`. Polls, for the reason the sidebar does. |
+| `mark stats <f> [--json]` | Per-stage timings and counters, plus words, characters, lines, and reading time. Counted from the parse, so code and frontmatter are not prose. |
 | `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, every bundle registered as `dev.mark.app`, theme dir, asset load time. |
 | `mark theme --list\|--show <name>\|--import <file> [--json]` | List, inspect, or convert a `.tmTheme` or base16 scheme. |
 
@@ -545,6 +655,15 @@ short version:
   binary and the 1.95 MSRV, and that trade is recorded.
 - **The buffer is the source of truth while a tab is dirty**, and the file when it
   is clean. Every feature that touches document bytes has to ask which.
+
+**Embedded HTML is filtered, not passed through.** Markdown lets a document
+contain raw HTML, and a `.md` file is something you clone, download, or are
+sent. `<kbd>`, `<details>`, `<sub>` and the rest of what markdown cannot express
+render; `<script>`, `<iframe>`, `<style>`, every `on…` handler, and a
+`javascript:` or `data:` destination do not — they show as the text you typed,
+so you can see why. It is an allowlist, it applies to `mark render --html`
+exactly as it applies to the window, and there is no flag to turn it off. See
+`docs/adrs/2026-09-01-filter-embedded-html.md`.
 
 There is **no telemetry of any kind**. This tool reads private notes.
 

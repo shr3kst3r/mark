@@ -11,7 +11,7 @@ _mark_complete() {
     previous="${COMP_WORDS[COMP_CWORD-1]}"
     command="${COMP_WORDS[1]}"
 
-    local commands="render diff toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav"
+    local commands="render diff toc tasks check normalize ls grep links watch stats doctor open tab theme goto reload sidebar nav"
 
     # The five task states (2026-08-27-five-task-states). Hard-coded: no verb
     # lists them, and an unknown name is a usage error rather than a filter that
@@ -74,6 +74,9 @@ _mark_complete() {
         normalize) options="--gfm --in-place --check" ;;
         ls) options="--json --depth --all --git" ;;
         grep) options="--json --ignore-case --depth" ;;
+        toc) options="--json --insert --min-level --max-level" ;;
+        links) options="--to --broken --images --json --depth" ;;
+        watch) options="--follow --interval --json --depth" ;;
         doctor|reload|sidebar) options="--json" ;;
         open) options="--tab --json" ;;
         goto) options="--json" ;;

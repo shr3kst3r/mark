@@ -119,7 +119,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     /// The change gutter. Owned by the scroll view, so it scrolls with the text
     /// without an observer keeping it aligned.
-    private let ruler: ChangeRuler
+    let ruler: ChangeRuler
 
     /// The whitespace marks, drawn over the text. A subview of the text view,
     /// so it scrolls with the document for the same reason the ruler does.
@@ -282,6 +282,22 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     public private(set) var lastSubstringSeconds: Double = 0
     public private(set) var lastSpliceSeconds: Double = 0
 
+    /// One line under the text: words, characters, lines, reading time.
+    let statusBar = NSTextField(labelWithString: "")
+
+    /// The count in flight, cancelled when another edit arrives.
+    ///
+    /// Counting parses the document, and this runs after every keystroke — so
+    /// it is debounced and off the main actor, the same shape the search box
+    /// uses. A status line is never worth a dropped frame.
+    private var countTask: _Concurrency.Task<Void, Never>?
+
+    /// How long the status bar waits after a keystroke before recounting.
+    ///
+    /// Longer than a frame and shorter than the autosave, so a burst of typing
+    /// is one parse and the number is never visibly stale once you stop.
+    static let countDebounce: Duration = .milliseconds(300)
+
     /// How many times the buffer and the text view had to be resynchronised.
     ///
     /// Expected to be zero forever. Counted rather than merely logged because
@@ -316,11 +332,27 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         scrollView.rulersVisible = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
+
+        // The status bar. Below the text rather than above it, and one line
+        // tall, because it is a fact about the document rather than a control:
+        // it should be findable and never in the way.
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+        statusBar.alignment = .right
+        statusBar.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        statusBar.textColor = .secondaryLabelColor
+        statusBar.lineBreakMode = .byTruncatingTail
+        statusBar.isSelectable = false
+        addSubview(statusBar)
+
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+
+            statusBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            statusBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            statusBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
         ])
 
         // Highlighting is applied to the visible range only, so scrolling has
@@ -351,6 +383,19 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             name: Invisibles.didChangeNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(zoomChanged),
+            name: TextZoom.didChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(lineNumbersSettingChanged),
+            name: LineNumbers.didChangeNotification,
+            object: nil
+        )
+        ruler.showsLineNumbers = LineNumbers.isShowing
         applyThemeColours()
     }
 
@@ -416,6 +461,8 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             textView.isEditable = false
             highlightRanges = []
             showGutter(nil)
+            countTask?.cancel()
+            statusBar.stringValue = ""
             return
         }
         // A different document: the same byte offset means something else now,
@@ -430,6 +477,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         defer { isMovingItself = false }
         textView.isEditable = true
         replaceText(with: buffer.text)
+        // Immediately, not debounced: an empty status bar for 300 ms after
+        // opening a document reads as broken rather than as busy.
+        updateWordCountNow()
         if let place = places[ObjectIdentifier(buffer)] {
             let length = (textView.string as NSString).length
             let selection = NSRange(
@@ -467,6 +517,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         let length = (textView.string as NSString).length
         textView.setSelectedRange(NSRange(location: min(caret.location, length), length: 0))
         scheduleHighlight(immediately: true)
+        updateWordCountNow()
     }
 
     private func replaceText(with text: String) {
@@ -488,6 +539,21 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     }
 
     // MARK: - NSTextViewDelegate
+
+    /// The one key this pane takes from `NSTextView`.
+    ///
+    /// `doCommandBy` rather than `keyDown`, because it is the hook that runs
+    /// *after* input methods and key bindings have had their say — so ⏎ while a
+    /// candidate window is up still commits the candidate, and a reader who has
+    /// rebound Return keeps their binding. Returning `false` for everything
+    /// else is what keeps the rest of `2026-08-25-flock-write-locking`'s
+    /// "inherit the system's editing" intact.
+    public func textView(
+        _ view: NSTextView, doCommandBy selector: Selector
+    ) -> Bool {
+        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        return handleNewline()
+    }
 
     /// Per-buffer undo. Without this, one shared text view means one shared
     /// undo stack, and ⌘Z after a tab switch edits the document you are not
@@ -557,6 +623,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         }
         lastKeystrokeSeconds = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000_000
         scheduleHighlight()
+        // Debounced and off the main actor, so a status line never costs a
+        // frame at typing cadence.
+        scheduleWordCount()
         // Not on the throttle: a space you have just typed must get its dot on
         // the same frame as its cell, or the marks lag the caret. One
         // viewport-bounded draw is affordable at typing cadence; the parse the
@@ -610,6 +679,213 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// The app-wide switch moved. Every open editor gets this, which is the
     /// point of it being a notification.
     @objc private func invisiblesSettingChanged() {
+        invisibles.needsDisplay = true
+    }
+
+    // MARK: - Markdown editing
+
+    /// The text view's whole content and the current selection, as `String`
+    /// and `String.Index` — which is what ``MarkdownEditing`` speaks, and what
+    /// keeps every offset here away from `NSRange`'s UTF-16 units.
+    private func currentSelection() -> (text: String, range: Range<String.Index>)? {
+        let text = textView.string
+        let nsRange = textView.selectedRange()
+        guard let range = Range(nsRange, in: text) else { return nil }
+        return (text, range)
+    }
+
+    /// Replace the whole buffer through the undo manager and restore a
+    /// selection.
+    ///
+    /// `shouldChangeText` / `didChangeText` around the edit is what makes ⌘Z
+    /// undo it as one step and what tells the highlighter and the autosave
+    /// something moved. Skipping either is how an edit becomes invisible to the
+    /// rest of the pane.
+    private func apply(text: String, selection: Range<String.Index>) {
+        let whole = NSRange(location: 0, length: (textView.string as NSString).length)
+        guard textView.shouldChangeText(in: whole, replacementString: text) else { return }
+        textView.textStorage?.replaceCharacters(in: whole, with: text)
+        textView.didChangeText()
+        textView.setSelectedRange(NSRange(selection, in: text))
+    }
+
+    /// Recount the document and put the answer under it.
+    ///
+    /// Debounced and off the main actor: counting parses, and this is on the
+    /// keystroke path.
+    func scheduleWordCount() {
+        countTask?.cancel()
+        let source = textView.string
+        countTask = _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(for: Self.countDebounce)
+            guard !_Concurrency.Task.isCancelled, let self else { return }
+            let counts = await _Concurrency.Task.detached(priority: .utility) {
+                () -> WordCount? in
+                try? MarkCore.wordCount(source: source)
+            }.value
+            guard !_Concurrency.Task.isCancelled else { return }
+            self.statusBar.stringValue = counts?.summary ?? ""
+        }
+    }
+
+    /// The same, immediately — for binding a document, where there is nothing
+    /// to debounce and an empty bar for 300 ms reads as broken.
+    func updateWordCountNow() {
+        countTask?.cancel()
+        let source = textView.string
+        statusBar.stringValue = (try? MarkCore.wordCount(source: source))?.summary ?? ""
+    }
+
+    /// Whether the margin draws line numbers beside the change bars.
+    public var showsLineNumbers: Bool {
+        get { ruler.showsLineNumbers }
+        set { ruler.showsLineNumbers = newValue }
+    }
+
+    /// Put the caret on `line` (1-based) and scroll it into view.
+    ///
+    /// Returns `false` for a line the document does not have, so the caller can
+    /// say so rather than silently landing on the last one — which is what
+    /// every "go to line" that clamps does, and it is indistinguishable from
+    /// the document being shorter than you thought.
+    @discardableResult
+    public func goToLine(_ line: Int) -> Bool {
+        guard line >= 1 else { return false }
+        let text = textView.string
+        var index = text.startIndex
+        var remaining = line - 1
+        while remaining > 0 {
+            guard let newline = text[index...].firstIndex(of: "\n") else { return false }
+            index = text.index(after: newline)
+            remaining -= 1
+            // A trailing newline makes an empty last line, which is a line the
+            // reader can put a caret on.
+            if index == text.endIndex && remaining > 0 { return false }
+        }
+        let lineEnd = text[index...].firstIndex(of: "\n") ?? text.endIndex
+        let range = NSRange(index..<lineEnd, in: text)
+        textView.setSelectedRange(NSRange(location: range.location, length: 0))
+        textView.scrollRangeToVisible(range)
+        window?.makeFirstResponder(textView)
+        return true
+    }
+
+    /// How many lines the document has, for the Go to Line prompt.
+    public var lineCount: Int {
+        let text = textView.string
+        if text.isEmpty { return 1 }
+        return text.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+    }
+
+    /// Bold, italic, and inline code: wrap the selection, or unwrap it.
+    public func wrapSelection(with marker: String) {
+        guard let (text, range) = currentSelection() else { return }
+        let result = MarkdownEditing.toggleWrap(text, range: range, marker: marker)
+        apply(text: result.text, selection: result.selection)
+    }
+
+    /// ⌘K. A URL already on the pasteboard goes straight into the parentheses,
+    /// which is the case this is most often reached for — copy a link, select
+    /// the words, press ⌘K.
+    public func makeLink() {
+        guard let (text, range) = currentSelection() else { return }
+        let pasted = NSPasteboard.general.string(forType: .string) ?? ""
+        let url = looksLikeURL(pasted) ? pasted : ""
+        let result = MarkdownEditing.makeLink(text, range: range, url: url)
+        apply(text: result.text, selection: result.selection)
+    }
+
+    private func looksLikeURL(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(" "), !trimmed.contains("\n") else {
+            return false
+        }
+        return trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
+            || trimmed.hasPrefix("mailto:")
+    }
+
+    /// Set the heading level of every line the selection touches. 0 clears it.
+    public func setHeading(level: Int) {
+        guard let (text, range) = currentSelection() else { return }
+        // `lineRange(for:)` includes the trailing newline. Splitting on it with
+        // the empty tail kept would hand `setHeading` an empty final line and
+        // put a `###` on it — which then merges with the line *below* the
+        // selection. So the newline is taken off first and put back after.
+        var lineRange = text.lineRange(for: range)
+        if text[lineRange].hasSuffix("\n") {
+            lineRange = lineRange.lowerBound..<text.index(before: lineRange.upperBound)
+        }
+
+        let rewritten =
+            text[lineRange]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { MarkdownEditing.setHeading(String($0), level: level) }
+            .joined(separator: "\n")
+
+        var out = text
+        out.replaceSubrange(lineRange, with: rewritten)
+        let end = out.index(lineRange.lowerBound, offsetBy: rewritten.count)
+        apply(text: out, selection: lineRange.lowerBound..<end)
+    }
+
+    /// ⏎, with the list the caret is in continued.
+    ///
+    /// Returns `false` when there is nothing markdown-specific to do, so the
+    /// caller hands the key back to `NSTextView` — which is the whole shape of
+    /// this feature: inherit everything, override the one case.
+    func handleNewline() -> Bool {
+        guard let (text, range) = currentSelection(), range.isEmpty else { return false }
+        let lineRange = text.lineRange(for: range)
+        // `lineRange(for:)` includes the newline; the prefix parser wants the
+        // line's own characters.
+        var line = String(text[lineRange])
+        if line.hasSuffix("\n") { line.removeLast() }
+
+        guard let action = MarkdownEditing.newlineAction(forLine: line) else { return false }
+        switch action {
+        case .insert(let inserted):
+            let nsRange = NSRange(range, in: text)
+            guard textView.shouldChangeText(in: nsRange, replacementString: inserted) else {
+                return true
+            }
+            textView.textStorage?.replaceCharacters(in: nsRange, with: inserted)
+            textView.didChangeText()
+
+        case .clearLine(let replacement):
+            // The list is over. The marker goes, and the newline still
+            // happens, so ⏎⏎ ends a list the way it does everywhere else.
+            var lineOnly = lineRange
+            if text[lineOnly].hasSuffix("\n") {
+                lineOnly = lineOnly.lowerBound..<text.index(before: lineOnly.upperBound)
+            }
+            let nsRange = NSRange(lineOnly, in: text)
+            let inserted = replacement + "\n"
+            guard textView.shouldChangeText(in: nsRange, replacementString: inserted) else {
+                return true
+            }
+            textView.textStorage?.replaceCharacters(in: nsRange, with: inserted)
+            textView.didChangeText()
+        }
+        return true
+    }
+
+    /// The app-wide switch moved. Every open editor gets this.
+    @objc private func lineNumbersSettingChanged() {
+        ruler.showsLineNumbers = LineNumbers.isShowing
+    }
+
+    /// ⌘+ / ⌘− / ⌘0, from any window.
+    ///
+    /// A full repaint rather than an incremental one, for the reason
+    /// ``themeChanged()`` gives: every attribute dictionary already applied
+    /// carries the old size, so there is no such thing as a partial pass here.
+    /// The whitespace marks are invalidated with it — they are drawn in points
+    /// against the text's own metrics, so a dot sized for 13pt text is in the
+    /// wrong place on 16pt text.
+    @objc private func zoomChanged() {
+        textView.font = Self.bodyFont
+        highlightedRange = NSRange(location: 0, length: 0)
+        applyHighlight()
         invisibles.needsDisplay = true
     }
 
@@ -1204,8 +1480,16 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
 
     // MARK: - Type
 
-    static let bodyFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .regular)
-    private static let boldFont: NSFont = .monospacedSystemFont(ofSize: 13, weight: .bold)
+    /// The editor's natural type size, before ``TextZoom``.
+    static let baseFontSize: Double = 13
+
+    /// Computed rather than a constant, so ⌘+ reaches it. Every attribute
+    /// dictionary below is rebuilt on a repaint, and a repaint is what
+    /// ``zoomChanged()`` forces — so scaling here is enough to move all of
+    /// them, including the per-level heading sizes.
+    static var bodyFont: NSFont {
+        .monospacedSystemFont(ofSize: TextZoom.scale * baseFontSize, weight: .regular)
+    }
 
     private static var baseAttributes: [NSAttributedString.Key: Any] {
         [
@@ -1227,7 +1511,10 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         let theme = ThemeController.shared
         switch kind {
         case "heading":
-            let size = max(13.0, 19.0 - Double(level ?? 1) * 1.5)
+            // Scaled from the same base, so a level-3 heading keeps its
+            // relationship to body text at every zoom level.
+            let natural = max(baseFontSize, 19.0 - Double(level ?? 1) * 1.5)
+            let size = natural * TextZoom.scale
             return [
                 .font: NSFont.monospacedSystemFont(ofSize: size, weight: .bold),
                 .foregroundColor: theme.editorColor(of: "heading", fallback: .textColor),

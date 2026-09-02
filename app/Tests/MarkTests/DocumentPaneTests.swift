@@ -58,7 +58,7 @@ struct DocumentPaneTests {
         let preferences = VolatileDefaults()
         let pane = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         _ = pane.view
         #expect(pane.mode == .contents)
         #expect(pane.activeChild === pane.contents)
@@ -69,13 +69,13 @@ struct DocumentPaneTests {
         let preferences = VolatileDefaults()
         let first = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         _ = first.view
         first.mode = .tasks
 
         let second = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         _ = second.view
         #expect(second.mode == .tasks)
         #expect(second.activeChild === second.taskList)
@@ -90,7 +90,7 @@ struct DocumentPaneTests {
         preferences.defaults.set("outline-v2", forKey: DocumentPaneController.modeDefaultsKey)
         let pane = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         _ = pane.view
         #expect(pane.mode == .contents)
     }
@@ -103,7 +103,7 @@ struct DocumentPaneTests {
         let preferences = VolatileDefaults()
         let pane = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         let container = try #require(pane.view as? DocumentPaneContainerView)
 
         #expect(pane.contents.view.superview === container)
@@ -125,9 +125,9 @@ struct DocumentPaneTests {
         let preferences = VolatileDefaults()
         let pane = DocumentPaneController(
             contents: TableOfContentsViewController(), taskList: TaskListViewController(),
-            defaults: preferences.defaults)
+            backlinks: BacklinksViewController(), defaults: preferences.defaults)
         let container = try #require(pane.view as? DocumentPaneContainerView)
-        #expect(container.tabs.segmentCount == 2)
+        #expect(container.tabs.segmentCount == 3)
         #expect(container.tabs.label(forSegment: 0) == "Contents")
         #expect(container.tabs.label(forSegment: 1) == "Tasks")
 

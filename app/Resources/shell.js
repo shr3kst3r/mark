@@ -120,6 +120,45 @@
     return paintDue(container);
   };
 
+  /*
+   * Point relative `src` and `href` at the directory holding the document.
+   *
+   * A `<base>` element rather than rewriting every `src` in the core, because
+   * a rewrite would have to happen on all four paths that put HTML in this
+   * page — the first-paint prefix, the background fill, the patch, and the
+   * rendered diff — and one of them forgetting is a silently broken picture.
+   * `<base>` is applied by the parser to whatever arrives, so there is no path
+   * to forget.
+   *
+   * It is created here and never in `shell.html`, which matters: `<base>` also
+   * governs the `<link>` and `<script>` in that file's head, so a static one
+   * would send the stylesheet and this script off to the reader's notes
+   * directory. By the time this runs, both have already loaded from
+   * `mark-asset://shell/` and are unaffected.
+   *
+   * Link *following* is unaffected too: the click handler reads
+   * `getAttribute("href")`, which is the raw attribute, and calls
+   * `preventDefault()` on every link — so a `<base>` can neither change what
+   * Swift is told nor let the page navigate itself somewhere.
+   */
+  function setDocumentBase(href) {
+    var element = document.head.querySelector("base");
+    if (!href) {
+      /* No base is the honest state for a document with no file behind it —
+       * the Today page, the markdown reference. Removing it rather than
+       * leaving the last document's is what stops one page's pictures being
+       * requested from another page's directory. */
+      if (element) element.remove();
+      return;
+    }
+    if (!element) {
+      element = document.createElement("base");
+      /* First in the head, because `<base>` governs only what follows it. */
+      document.head.insertBefore(element, document.head.firstChild);
+    }
+    element.setAttribute("href", href);
+  }
+
   /* -------------------------------------------------------------- painting */
 
   /*
@@ -137,6 +176,12 @@
     cancelFill();
     // Every find range points into the nodes about to be thrown away.
     findReset();
+    /* Before the injection: the browser starts fetching an `<img>` the moment
+     * the node exists, and a src resolved against the *previous* document's
+     * base would ask for the wrong file — or, on the first document, against
+     * `mark-asset://shell/`, which is where every local image in every
+     * document used to 404. */
+    setDocumentBase(meta && meta.base);
     container.scrollTop = 0;
     window.scrollTo(0, 0);
 

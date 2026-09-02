@@ -202,6 +202,27 @@ struct MenuBarTests {
         #expect(newWindow.keyEquivalentModifierMask == [.command])
     }
 
+    /// The Services submenu, which a hand-built menu bar does not get for free.
+    ///
+    /// The failure this catches is quiet: selecting text and reaching for
+    /// Services finds nothing, which reads as the platform being broken rather
+    /// than as a menu nobody built. `NSApp.servicesMenu` has to *be* this menu
+    /// or the system fills in nothing.
+    @Test("the application menu offers Services")
+    func servicesMenu() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let app = try #require(menu.items.first?.submenu)
+
+        let services = try #require(
+            app.items.first { $0.title == "Services" },
+            "no Services item — selecting text and reaching for Services finds nothing")
+        let submenu = try #require(services.submenu)
+        // Empty in code on purpose: the system populates it at runtime from
+        // whatever the reader has installed.
+        #expect(NSApplication.shared.servicesMenu === submenu)
+    }
+
     /// **Help ▸ Markdown Reference** on ⇧⌘/
     /// (`2026-08-26-markdown-reference-window`).
     ///
@@ -218,7 +239,15 @@ struct MenuBarTests {
 
         let open = try #require(file.items.firstIndex { $0.title == "Open…" })
         let history = try #require(file.items.firstIndex { $0.title == "History" })
-        #expect(history == open + 1)
+        #expect(history > open)
+        // Same *group*, rather than the next row down. The claim is that
+        // History sits with the other ways to reach a document rather than off
+        // on its own, and `Open Quickly…` joined that group between them — so
+        // the assertion is "no separator in between", which is what a group is,
+        // instead of an index that any future sibling breaks.
+        #expect(
+            !file.items[open...history].contains { $0.isSeparatorItem },
+            "History was separated from Open… — it belongs in that group")
 
         let item = file.items[history]
         #expect(item.keyEquivalent == "y")

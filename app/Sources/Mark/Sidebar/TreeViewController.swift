@@ -52,7 +52,7 @@ public struct SidebarState: Equatable, Sendable {
 /// * Badges come from ``TaskBadgeService`` — background, on demand, one visible
 ///   row at a time — and never from the listing.
 @MainActor
-public final class TreeViewController: NSViewController {
+public final class TreeViewController: NSViewController, NSMenuDelegate {
 
     /// Called when the user picks a markdown file with a single click.
     ///
@@ -80,6 +80,25 @@ public final class TreeViewController: NSViewController {
     /// Passed straight through to the window, which owns the panel and the
     /// creation (`2026-08-26-new-documents-are-files-on-disk`).
     public var onNewDocument: ((URL) -> Void)?
+
+    /// A row's context menu asked for something that moves bytes on disk.
+    ///
+    /// Passed to the window for the same reason ``onNewDocument`` is: the
+    /// window knows which documents have unsaved changes, owns the alert, and
+    /// owns the tab that has to follow a renamed file. The tree's job is to say
+    /// what was clicked.
+    public var onFileOperation: ((FileOperation, TreeNode) -> Void)?
+
+    /// What a row's context menu can ask for.
+    public enum FileOperation: Equatable, Sendable {
+        case reveal
+        case copyPath
+        case rename
+        case duplicate
+        case trash
+        case newFolder
+        case newDocument
+    }
 
     public private(set) var outlineView: NSOutlineView!
     public private(set) var breadcrumbBar: BreadcrumbBar!
@@ -209,6 +228,12 @@ public final class TreeViewController: NSViewController {
         outlineView.delegate = self
         outlineView.target = self
         outlineView.doubleAction = #selector(rowDoubleClicked)
+        // The row context menu. Built on demand in `menuNeedsUpdate`, so it
+        // always describes the row under the pointer rather than the one that
+        // was there when the view was made.
+        let rowMenu = NSMenu()
+        rowMenu.delegate = self
+        outlineView.menu = rowMenu
         // Drag a file out to Finder (plan §2 M8). `forLocal: false` is the
         // out-of-app half; there is no in-app drop target for a row, so the
         // local mask stays empty rather than showing a move cursor that would
@@ -928,6 +953,105 @@ public final class TreeViewController: NSViewController {
 
     @objc private func filterChanged(_ sender: NSSearchField) {
         filter = sender.stringValue
+    }
+
+    // MARK: - The row context menu
+
+    /// Build the menu for the row that was right-clicked.
+    ///
+    /// `menuNeedsUpdate` rather than `NSView.menu(for:)`, because this is a
+    /// view *controller* and that hook is the view's. AppKit sets
+    /// `clickedRow` before asking, and it is set for a right-click even when
+    /// the row is not selected — so the menu acts on the row under the
+    /// pointer, which is what Finder does and what anyone expects.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let outlineView else { return }
+        let row = outlineView.clickedRow
+
+        // A click below the last row is still a click *in this folder*, so it
+        // gets the two "make something here" items and nothing that needs a
+        // target.
+        guard row >= 0, let node = outlineView.item(atRow: row) as? TreeNode else {
+            for item in menuForRoot().items.map({ $0.copy() as! NSMenuItem }) {
+                menu.addItem(item)
+            }
+            return
+        }
+        // Selecting first, so the highlight agrees with what the menu will act
+        // on. Without this a right-click acts on a row that does not look
+        // selected, which reads as acting on the wrong one.
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        for item in rowMenu(for: node).items.map({ $0.copy() as! NSMenuItem }) {
+            menu.addItem(item)
+        }
+    }
+
+    func rowMenu(for node: TreeNode) -> NSMenu {
+        let menu = NSMenu()
+        if node.isMarkdown {
+            menu.addItem(item("Open", .newDocument, node, action: #selector(openFromMenu(_:))))
+            menu.addItem(.separator())
+        }
+        if node.isDirectory {
+            menu.addItem(item("New Document Here…", .newDocument, node))
+            menu.addItem(item("New Folder…", .newFolder, node))
+            menu.addItem(.separator())
+        }
+        menu.addItem(item("Rename…", .rename, node))
+        menu.addItem(item("Duplicate", .duplicate, node))
+        menu.addItem(item("Move to Trash", .trash, node))
+        menu.addItem(.separator())
+        menu.addItem(item("Reveal in Finder", .reveal, node))
+        menu.addItem(item("Copy Path", .copyPath, node))
+        return menu
+    }
+
+    /// The menu for empty space below the rows: the root is the only target.
+    private func menuForRoot() -> NSMenu {
+        let menu = NSMenu()
+        let node = TreeNode(url: root, name: root.lastPathComponent, isDirectory: true)
+        menu.addItem(item("New Document Here…", .newDocument, node))
+        menu.addItem(item("New Folder…", .newFolder, node))
+        menu.addItem(.separator())
+        menu.addItem(item("Reveal in Finder", .reveal, node))
+        return menu
+    }
+
+    private func item(
+        _ title: String,
+        _ operation: FileOperation,
+        _ node: TreeNode,
+        action: Selector = #selector(fileOperationChosen(_:))
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = MenuTarget(operation: operation, node: node)
+        return item
+    }
+
+    /// What a menu item carries. A box rather than a tag, because the operation
+    /// and the row it applies to have to travel together — a menu built for one
+    /// row must not act on whatever is selected by the time it is chosen.
+    final class MenuTarget: NSObject {
+        let operation: FileOperation
+        let node: TreeNode
+        init(operation: FileOperation, node: TreeNode) {
+            self.operation = operation
+            self.node = node
+        }
+    }
+
+    @objc private func fileOperationChosen(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? MenuTarget else { return }
+        onFileOperation?(target.operation, target.node)
+    }
+
+    @objc private func openFromMenu(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? MenuTarget,
+            target.node.isMarkdown
+        else { return }
+        onActivate?(target.node.url)
     }
 
     @objc private func rowDoubleClicked() {

@@ -31,9 +31,42 @@ import Foundation
 @MainActor
 public final class ChangeRuler: NSRulerView {
 
-    /// Width of the margin. Just enough for a 3-point bar and air on both
-    /// sides; this is not a line-number gutter and should not read as one.
+    /// Width of the margin with no numbers in it. Just enough for a 3-point
+    /// bar and air on both sides.
     public static let thickness: CGFloat = 8
+
+    /// Whether line numbers are drawn beside the change bars.
+    ///
+    /// Off by default. A gutter full of numbers is the invasive version of
+    /// this margin — the same argument `Invisibles` makes for drawing nothing
+    /// on line endings — and someone who wants them is someone who has gone
+    /// looking for them.
+    public var showsLineNumbers = false {
+        didSet {
+            guard showsLineNumbers != oldValue else { return }
+            ruleThickness = showsLineNumbers ? numberedThickness() : Self.thickness
+            needsDisplay = true
+        }
+    }
+
+    /// How wide the margin needs to be to hold the document's largest line
+    /// number, plus the bar and its air.
+    ///
+    /// Measured from the digit count rather than fixed, so a 12,000-line
+    /// document does not clip and a 30-line one does not waste a centimetre.
+    private func numberedThickness() -> CGFloat {
+        let digits = max(2, String(max(1, lastLine)).count)
+        return Self.thickness + CGFloat(digits) * 7 + 6
+    }
+
+    /// The highest line number the document has, for sizing the margin.
+    private var lastLine = 1
+
+    /// The type numbers are drawn in. Monospaced digits, so the column does not
+    /// jitter as it scrolls past 99 into 100.
+    private static var numberFont: NSFont {
+        .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize - 1, weight: .regular)
+    }
 
     /// Line number (**zero-based**, as the core reports) → what happened to it.
     ///
@@ -109,10 +142,70 @@ public final class ChangeRuler: NSRulerView {
     }
 
     public override func drawHashMarksAndLabels(in rect: NSRect) {
+        if showsLineNumbers { drawLineNumbers() }
         enumerateBars { kind, bar in
             Self.color(for: kind).setFill()
             NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
         }
+    }
+
+    /// One number per *document* line, against the visible fragments only.
+    ///
+    /// Same bound as the bars: this walks what is on screen and never the
+    /// document, because it runs on every scroll. A soft-wrapped line gets one
+    /// number against its first row and nothing against the rest — numbering
+    /// the wrapped rows would make the gutter disagree with `mark grep`,
+    /// `mark toc`, and every error message that names a line.
+    private func drawLineNumbers() {
+        guard let textView = clientView as? NSTextView,
+            let layoutManager = textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager
+        else { return }
+
+        let inset = textView.textContainerInset.height
+        let visible = scrollView?.contentView.bounds ?? bounds
+        guard
+            let firstVisible = layoutManager.textLayoutFragment(
+                for: CGPoint(x: 0, y: max(0, visible.minY - inset)))
+        else { return }
+
+        var line = lineNumber(
+            of: firstVisible.rangeInElement.location, in: contentManager, textView: textView)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Self.numberFont,
+            .foregroundColor: ThemeController.shared.editorColor(
+                of: "muted", fallback: .tertiaryLabelColor),
+        ]
+        let width = ruleThickness - Self.thickness
+
+        layoutManager.enumerateTextLayoutFragments(from: firstVisible.rangeInElement.location) {
+            fragment in
+            let frame = fragment.layoutFragmentFrame
+            if frame.minY > visible.maxY { return false }
+
+            var isFirstRow = true
+            for lineFragment in fragment.textLineFragments {
+                let lineFrame = lineFragment.typographicBounds.offsetBy(dx: 0, dy: frame.minY)
+                if isFirstRow {
+                    // Displayed 1-based, stored 0-based — the conversion the
+                    // class comment insists happens at the boundary and not
+                    // before it.
+                    let label = NSAttributedString(string: "\(line + 1)", attributes: attributes)
+                    let size = label.size()
+                    let y = lineFrame.minY + inset - visible.minY
+                        + (lineFrame.height - size.height) / 2
+                    // Right-aligned, so the digits line up as they grow.
+                    label.draw(at: NSPoint(x: width - size.width, y: y))
+                }
+                isFirstRow = false
+                if Self.endsLine(lineFragment) {
+                    line += 1
+                    isFirstRow = true
+                }
+            }
+            return true
+        }
+        lastLine = max(lastLine, line + 1)
     }
 
     /// Every bar the margin would draw right now, in this view's coordinates.
@@ -156,10 +249,15 @@ public final class ChangeRuler: NSRulerView {
                     dx: 0, dy: frame.minY)
                 if let kind = marks[line] {
                     let y = lineFrame.minY + inset - visible.minY
+                    // Against the text, whatever is to the left of it: with
+                    // numbers on, the gutter grew leftwards and the bar has to
+                    // stay where the eye expects it — beside the line it marks,
+                    // not stranded at the far edge.
+                    let x = ruleThickness - Self.thickness + 2.5
                     body(
                         kind,
                         NSRect(
-                            x: 2.5, y: y, width: 3,
+                            x: x, y: y, width: 3,
                             height: max(2, lineFrame.height - 1)))
                 }
                 // A *visual* row, not a line: the editor soft-wraps, so one

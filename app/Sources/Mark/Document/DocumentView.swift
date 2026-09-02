@@ -197,6 +197,15 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         self.webView = webView
 
         let state = Log.signposter.beginInterval("shell load")
+        // Before the load, so a page that paints immediately paints at the
+        // right size rather than at 100% and then jumping.
+        webView.pageZoom = TextZoom.scale
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(zoomChanged),
+            name: TextZoom.didChangeNotification,
+            object: nil
+        )
         webView.load(URLRequest(url: ShellAssets.shellURL))
         Log.signposter.endInterval("shell load", state)
     }
@@ -247,6 +256,9 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
     /// it — path, scroll offset, title, task counts — lives on ``DocumentTab``,
     /// not here.
     public func tearDown() {
+        // The allowlist outlives nothing: a dehydrated tab may not serve the
+        // pictures it could serve while it was resident.
+        WebViewFactory.documentAssets.forget(webView)
         fillTask?.cancel()
         fillTask = nil
         presentTask?.cancel()
@@ -364,6 +376,11 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         }
 
         let generation = self.generation
+        // Before the patch, not after: an inserted block may carry an `<img>`,
+        // and the page requests it the moment the block is in the DOM. The
+        // base URL is already set — it is per document, and the document has
+        // not changed — so only the allowlist needs the refresh.
+        refreshDocumentAssets(url: url, source: newSource)
         // The tail has to be in the DOM before a script that names blocks in it
         // can be applied (ADR-2).
         await ensureFullyRendered()
@@ -742,6 +759,68 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
 
     // MARK: - The ADR-2 pipeline
 
+    /// ⌘+ / ⌘− / ⌘0, from any window.
+    ///
+    /// `pageZoom` rather than a re-render: the document's HTML does not change
+    /// with its size, so this costs no core call, no patch, and nothing from
+    /// ADR-2's budget. It is the same argument the theme makes for being a CSS
+    /// swap.
+    ///
+    /// A dehydrated tab has no web view and needs nothing — it reads
+    /// ``TextZoom/scale`` when it rehydrates, above.
+    @objc private func zoomChanged() {
+        webView?.pageZoom = TextZoom.scale
+    }
+
+    /// Tell the asset handler which images this document may load, and return
+    /// the base URL relative sources resolve against.
+    ///
+    /// Called on every path that changes what the page is showing — the first
+    /// paint, an external write, and an edit — because the answer changes with
+    /// the source: an image added in the editor has to become servable, and one
+    /// deleted has to stop being servable, without waiting for a reopen.
+    ///
+    /// Only images that **exist** are allowed. A reference to a file that is
+    /// not there is already going to draw a broken image; putting it on the
+    /// allowlist would only mean the handler stats it again to find that out.
+    @discardableResult
+    private func refreshDocumentAssets(url: URL, source: String) -> String {
+        let base = DocumentAssetSchemeHandler.base(forDocumentAt: url)
+        var paths: Set<String> = []
+        // `mark_links_json` parses the document a second time — the render has
+        // already parsed it once — and this runs on the first-paint path and
+        // again on every patch. ADR-2 budgets first paint in single-digit
+        // milliseconds and measured the parse at ~2.9 ms/MB, so a second one
+        // per open is not free at the top of the range.
+        //
+        // Almost no document has a picture in it, and every markdown image
+        // starts `![` — reference-style `![alt][ref]` included. So a substring
+        // scan decides whether the parse is worth doing, and the common
+        // document pays a `memchr` instead. A raw `<img>` in embedded HTML has
+        // no `![` and is therefore not served; it was not served before this
+        // change either, and `links.rs` reports markdown images rather than
+        // HTML ones by design.
+        if source.contains("![") {
+            do {
+                let images = try MarkCore.links(
+                    source: source,
+                    base: url.deletingLastPathComponent().path,
+                    images: true)
+                for image in images where image.exists == true {
+                    if let path = image.path { paths.insert(path) }
+                }
+            } catch {
+                // An empty allowlist, which fails closed: pictures do not
+                // appear, rather than the handler falling back to serving
+                // anything.
+                Log.render.error(
+                    "enumerating document images failed: \(String(describing: error))")
+            }
+        }
+        WebViewFactory.documentAssets.allow(paths, for: webView)
+        return base?.absoluteString ?? ""
+    }
+
     private func present(_ url: URL) {
         let source: String
         do {
@@ -782,12 +861,20 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             "core render prefix", renderSeconds,
             detail: "blocks=\(blocks) bytes=\(prefix.utf8.count)")
 
+        // The document's pictures, declared to the scheme handler before the
+        // page can ask for one. Both halves have to be in place *before* the
+        // injection below or the first paint requests an image the handler
+        // does not yet know about and draws a broken one: the allowlist says
+        // which files may be served, and `base` is what makes a relative
+        // `src` resolve onto the scheme at all.
+        let base = refreshDocumentAssets(url: url, source: source)
+
         presentTask = _Concurrency.Task { @MainActor in
             let state = Log.signposter.beginInterval("first paint")
             do {
                 let injected = try await self.call(
                     "return window.mark.setDocument(html, meta);",
-                    arguments: ["html": prefix, "meta": ["path": url.path]]
+                    arguments: ["html": prefix, "meta": ["path": url.path, "base": base]]
                 )
                 Log.signposter.endInterval("first paint", state)
                 self.absorb(paintReport: injected)

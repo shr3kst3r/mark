@@ -21,7 +21,7 @@ cask "mark" do
   # bundle by `scripts/assemble-bundle.sh` is (`MarkBuildCommit` in Info.plist,
   # the About panel, `mark doctor`). Homebrew never compares this to anything,
   # because the sha256 below is `:no_check`.
-  version "0.3.0"
+  version "0.4.0"
 
   # A locally built artifact has no stable checksum across rebuilds.
   # `:no_check` is correct here and would be rejected by homebrew-cask upstream —

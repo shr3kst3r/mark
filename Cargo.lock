@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "mark-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "libc",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "mark-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ignore",
  "libc",
@@ -811,6 +811,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "pulldown-latex",
+ "regex",
  "serde",
  "serde_json",
  "syntect",

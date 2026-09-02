@@ -10,7 +10,7 @@
 .\"
 .\" Preview it with:  man packaging/mark.1
 .\" Lint it with:     mandoc -T lint packaging/mark.1
-.TH MARK 1 "2026-08-27" "mark 0.3.0" "User Commands"
+.TH MARK 1 "2026-09-01" "mark 0.4.0" "User Commands"
 .SH NAME
 mark \- fast native markdown viewer for macOS, and its CLI
 .SH SYNOPSIS
@@ -28,8 +28,8 @@ Commands split into two kinds, and the distinction is the one that matters when
 scripting:
 .TP
 .B local
-.BR render ,\  diff ,\  toc ,\  tasks ,\  check ,\  normalize ,\  ls ,\  grep ,\  stats ,
-.BR doctor ,
+.BR render ,\  diff ,\  toc ,\  tasks ,\  check ,\  normalize ,\  ls ,\  grep ,\  links ,
+.BR watch ,\  stats ,\  doctor ,
 and
 .B theme
 with
@@ -111,8 +111,30 @@ machine with no
 .B git
 at all, or with no Command Line Tools, behaves identically.
 .TP
-.BI "toc " file " [--json]"
+.BI "toc " file " [--json] [--insert] [--min-level " N "] [--max-level " N ]
 The heading tree: level, text, anchor, byte offsets, line, and block id.
+.IP
+.B --insert
+writes the contents list
+.I into
+the document, between
+.B <!-- toc -->
+and
+.BR "<!-- /toc -->" .
+Both markers must already be there:
+.B mark
+will not guess where a contents list belongs, and adding two comment lines is a
+smaller ask than undoing a wrong insertion. Nothing outside the markers is
+touched, so running it again replaces what it wrote and changes nothing else \(em
+and a run that would change nothing writes nothing at all, rather than moving the
+file's mtime and waking every watcher looking at it.
+.IP
+The markers are HTML comments, which mark's renderer drops, so they never appear
+on the page. Links use the anchors the renderer generated, deduplicated the same
+way, so a document with two identically-named headings links to the right one.
+The write goes through the same locked, atomic path
+.B mark check
+uses.
 .TP
 .BI "tasks " [path] " [--open] [--state " name "] [--tag " tag "] [--priority " N "] \
 [--due-before " when "] [--due-after " when "] [--overdue] [--no-due] [--sort " key "] \
@@ -282,9 +304,89 @@ a repository simply gains no column.
 .BI "grep " pattern " " [path] " [--json] [-i|--ignore-case] [--depth " N ]
 Regular-expression search reporting the heading each match sits under.
 .TP
+.BI "links " [path] " [--to " FILE ] " [--broken] [--images] [--json] [--depth " N ]
+Every link and image, and whether its target is there. A
+.I file
+reports its own references; a
+.I directory
+is walked, which is the shape the interesting question takes \(em which of these
+notes point at something that is no longer there.
+.IP
+Destinations are resolved against the
+.I document
+that holds them, not against the walk root, and are percent\(hydecoded first, so
+.B my%20note.md
+is looked for under the name it actually has on disk.
+.IP
+.B --broken
+means a
+.I local
+path that is missing.
+.B mark
+never fetches an external URL \(em a checker that makes HTTP requests is a
+different tool with different failure modes \(em so
+.BR http ,\  https ,
+and
+.B mailto
+destinations are reported as
+.BR "not checked" ,
+and a fragment resolves inside the document. Neither is ever called broken.
+.IP
+.B --images
+narrows to
+.BR ![alt](\(...) ,
+which is the half the app asks for: the shell serves a document's pictures over
+a scheme of its own, and this is the allowlist it serves from.
+.IP
+.B --to
+turns the question around: what points
+.I at
+this file. Matching is on the resolved path, so a link written from a sibling
+directory counts and a document never links to itself. Each row is the linking
+document, the heading the link sits under, and the link's own text \(em what the
+other document calls this one, which is the useful half when the filename is
+already in the argument.
+.IP
+Exits 0 whether or not anything is broken. The finding is on stdout; a non\(hyzero
+exit is reserved for not being able to answer.
+.TP
+.BI "watch " [path] " [--follow] [--interval " SECONDS "] [--json] [--depth " N ]
+Block until a file or directory changes, then say what changed and exit \(em for
+the shell loop an agent actually writes:
+.IP
+.EX
+while mark watch notes/; do just build; done
+.EE
+.IP
+One line per change:
+.BR created ,
+.BR modified ,
+or
+.B removed
+and the path.
+.B --follow
+keeps going instead, printing each change until interrupted, and flushes every
+round so it can be piped into something.
+.IP
+It polls rather than using FSEvents, for the reason
+.I 2026-08-27-sidebar-polls-listed-directories
+gives for the sidebar: one
+.BR stat (2)
+per watched file is cheap, bounded, and has no callback to leak.
+.B --interval
+has a 50 ms floor, since a zero interval is a busy loop on somebody's battery
+rather than a faster answer.
+.TP
 .BI "stats " file " [--json]"
 Per-stage timings and counters for one document: parse, highlight, render,
-block count, code bytes, task counts, cache hit rate.
+block count, code bytes, task counts, cache hit rate \(em and how long the
+document is in the units a *writer* cares about: words, characters, lines, and
+an estimated reading time.
+.IP
+The word count is taken from the parsed document rather than from its bytes, so
+frontmatter, fenced and inline code, math, diagrams, an image's alt text and a
+link's URL are none of them counted as prose. That is also why the number the
+editor's status bar shows and the one printed here cannot differ.
 .TP
 .BR doctor " [--json]"
 Environment report to paste into a bug report: the resolved socket path and its

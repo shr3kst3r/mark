@@ -23,12 +23,16 @@ public final class DocumentPaneController: NSViewController {
     public enum Mode: String, CaseIterable, Sendable {
         case contents
         case tasks
+        case links
 
         /// The segment's label, and the menu item's noun.
         public var title: String {
             switch self {
             case .contents: return "Contents"
             case .tasks: return "Tasks"
+            // "Links" rather than "Backlinks": the pane is already scoped to
+            // the front document, so the "back" is implied by where it is.
+            case .links: return "Links"
             }
         }
     }
@@ -50,6 +54,14 @@ public final class DocumentPaneController: NSViewController {
 
     /// The front document's tasks.
     public let taskList: TaskListViewController
+
+    /// What points *at* the front document.
+    ///
+    /// The one tab in this pane that is not free: Contents and Tasks come from
+    /// calls the tab badge already pays for, and this one walks the tree. It is
+    /// filled only while it is on screen, through the same `onNeedsContent`
+    /// hook that keeps the other two lazy.
+    public let backlinks: BacklinksViewController
 
     private let defaults: UserDefaults
 
@@ -84,10 +96,12 @@ public final class DocumentPaneController: NSViewController {
     public init(
         contents: TableOfContentsViewController,
         taskList: TaskListViewController,
+        backlinks: BacklinksViewController,
         defaults: UserDefaults = .standard
     ) {
         self.contents = contents
         self.taskList = taskList
+        self.backlinks = backlinks
         self.defaults = defaults
         // An unknown or absent stored value reads as `contents`: the tab this
         // pane has always opened on, and the one a reader who has never pressed
@@ -96,6 +110,7 @@ public final class DocumentPaneController: NSViewController {
         super.init(nibName: nil, bundle: nil)
         addChild(contents)
         addChild(taskList)
+        addChild(backlinks)
     }
 
     @available(*, unavailable)
@@ -120,6 +135,7 @@ public final class DocumentPaneController: NSViewController {
         switch mode {
         case .contents: return contents
         case .tasks: return taskList
+        case .links: return backlinks
         }
     }
 
@@ -135,7 +151,10 @@ public final class DocumentPaneController: NSViewController {
         // Filled before it is installed, never after: the child that is about
         // to appear is holding whichever document it last drew.
         onNeedsContent?()
-        for child in [contents as NSViewController, taskList as NSViewController]
+        for child in [
+            contents as NSViewController, taskList as NSViewController,
+            backlinks as NSViewController,
+        ]
         where child !== wanted {
             if child.view.superview === container { child.view.removeFromSuperview() }
         }

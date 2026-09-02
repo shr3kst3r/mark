@@ -227,3 +227,27 @@ proptest! {
         prop_assert_eq!(format!("{}{}", head.html, tail.html), whole(&source));
     }
 }
+
+/// A `javascript:` destination written in markdown rather than in HTML.
+///
+/// `2026-09-01-filter-embedded-html`: the raw-HTML filter cannot see this one,
+/// so the render path checks `Tag::Link` and `Tag::Image` destinations against
+/// the same rule. The anchor survives with an empty `href` — the text stays
+/// readable and selectable, and it goes nowhere.
+#[test]
+fn a_javascript_destination_written_in_markdown_is_neutered() {
+    let html = whole("[click me](javascript:alert(1))");
+    assert!(!html.to_ascii_lowercase().contains("javascript:"), "{html}");
+    assert!(html.contains("click me"), "the text must survive: {html}");
+
+    let html = whole("![pic](javascript:alert(1))");
+    assert!(!html.to_ascii_lowercase().contains("javascript:"), "{html}");
+}
+
+#[test]
+fn an_ordinary_destination_is_untouched() {
+    assert!(whole("[a](notes.md)").contains("href=\"notes.md\""));
+    assert!(whole("[a](#x)").contains("href=\"#x\""));
+    assert!(whole("[a](https://x.test)").contains("href=\"https://x.test\""));
+    assert!(whole("![a](pic.png)").contains("src=\"pic.png\""));
+}

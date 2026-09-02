@@ -22,12 +22,13 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pulldown_cmark::{Event, Tag, TagEnd, html};
+use pulldown_cmark::{CowStr, Event, Tag, TagEnd, html};
 
 use crate::block::Block;
 use crate::highlight::{self, Highlighter};
 use crate::parse::{Document, code_language, slugify};
 use crate::rich::{self, Diagram, MathDisplay};
+use crate::sanitize;
 use crate::tasks;
 use crate::theme::{self, ThemePair};
 
@@ -415,11 +416,60 @@ fn render_block(
 /// Hand a run of untouched events to `pulldown-cmark`'s own writer. Splitting
 /// the stream this way keeps its correct handling of tables, footnotes, and
 /// inline HTML while letting us own the three constructs that carry contracts.
+///
+/// **Raw HTML does not go through untouched.** `Event::Html` and
+/// `Event::InlineHtml` carry whatever the document embedded, and
+/// `pulldown-cmark` writes them verbatim — which is how a `<script>` in a
+/// markdown file came to run in the shell page, with the bridge that writes to
+/// the reader's files in reach. Each one is filtered by [`sanitize::fragment`]
+/// first, and then handed on as `Event::Html` so the writer still sees the
+/// event kind it expects and paragraph and block handling are unchanged.
+///
+/// The filter is applied here rather than in `Document::parse` on purpose:
+/// parsing stays a faithful record of the document, spans keep pointing at the
+/// bytes they came from, and only the thing that produces *HTML for a browser*
+/// pays the cost or takes the opinion.
 fn flush(events: &[(Event<'_>, Range<usize>)], range: Range<usize>, out: &mut String) {
     if range.is_empty() {
         return;
     }
-    html::push_html(out, events[range].iter().map(|(event, _)| event.clone()));
+    html::push_html(
+        out,
+        events[range].iter().map(|(event, _)| match event {
+            Event::Html(raw) => Event::Html(sanitize::fragment(raw).into()),
+            Event::InlineHtml(raw) => Event::InlineHtml(sanitize::fragment(raw).into()),
+            // A destination markdown wrote, rather than one HTML wrote.
+            // `[click](javascript:alert(1))` never reaches `sanitize::fragment`
+            // — it is not raw HTML — and `push_html` would emit it as an
+            // `href` verbatim. Two spellings of the same thing must not get
+            // two answers.
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) if !sanitize::safe_url(dest_url) => Event::Start(Tag::Link {
+                link_type: *link_type,
+                // Emptied rather than dropped: the anchor stays, so the link
+                // text is still read and still copyable, and it goes nowhere.
+                dest_url: CowStr::Borrowed(""),
+                title: title.clone(),
+                id: id.clone(),
+            }),
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) if !sanitize::safe_url(dest_url) => Event::Start(Tag::Image {
+                link_type: *link_type,
+                dest_url: CowStr::Borrowed(""),
+                title: title.clone(),
+                id: id.clone(),
+            }),
+            other => other.clone(),
+        }),
+    );
 }
 
 /// One task marker, as the element ADR-1's checkbox contract fixes.
@@ -756,6 +806,43 @@ math[display='block'] { display: block; margin: 0.6rem 0; overflow-x: auto; }
    that is not on disk. The shell refuses the click; this makes the refusal
    visible rather than mysterious. */
 .mk-blk[data-mk-side='old'] input.mk-task { pointer-events: none; opacity: 0.5; }
+/*
+ * Paper.
+ *
+ * A theme is a screen decision: sixteen of them exist because a reader picks
+ * one for the room they are in, and none of that survives a printer. So the
+ * palette is overridden wholesale here rather than each rule being adjusted —
+ * ink on white, and every rule below keeps working because they all read the
+ * same custom properties.
+ *
+ * Backgrounds are the specific thing that has to go. A dark theme printed as
+ * laid out is a page of toner, and the reader who pressed Print did not ask for
+ * one.
+ */
+@media print {
+  :root, :root[data-theme='dark'] {
+    --mk-background: #ffffff; --mk-surface: #f4f4f4;
+    --mk-foreground: #000000; --mk-heading: #000000;
+    --mk-muted: #444444; --mk-subtle: #666666;
+    --mk-border: #cccccc; --mk-link: #0000ee;
+  }
+  html, body.mk-doc { background: #ffffff; color: #000000; }
+  body.mk-doc { max-width: none; padding: 0; font-size: 11pt; }
+  /* Page breaks. A heading at the foot of a page, or a code block or table
+     split down the middle, is the difference between a printout someone can
+     read and one they reprint. */
+  .mk-h { break-after: avoid-page; break-inside: avoid; }
+  pre, table, .mk-diagram, blockquote, li { break-inside: avoid; }
+  img, svg { max-width: 100%; break-inside: avoid; }
+  /* Screen-only affordances. The find highlight is a reading aid, and a
+     deleted-block tint is a page of grey. */
+  ::highlight(mk-find), ::highlight(mk-find-current) { background: transparent; }
+  /* An attribute match rather than the three class selectors spelled out.
+     `ShellAssetsTests` pins those by substring, and repeating one here
+     would be found ahead of the real rule in whichever stylesheet carries
+     this block first. */
+  .mk-blk[class*='mk-diff-'] { background: transparent; }
+}
 ",
     );
     css.push_str(&token_css());

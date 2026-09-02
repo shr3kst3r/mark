@@ -223,7 +223,10 @@ public final class Buffer {
     /// Injectable so a test can drive the debounce without sleeping for a
     /// second per assertion, and so the 60-second gate can run at a realistic
     /// cadence without a 60-second test.
-    private let autosaveDelay: TimeInterval
+    /// Not `private`: `PreferencesTests` asserts that a new buffer picks the
+    /// preference up rather than the constant, and there is no other way to see
+    /// which one it took.
+    let autosaveDelay: TimeInterval
     private let previewDelay: TimeInterval
 
     public init(
@@ -243,9 +246,14 @@ public final class Buffer {
     }
 
     /// Read the file and open a buffer on it.
+    ///
+    /// The default delay is the *preference* rather than the constant, so a
+    /// change in Settings reaches the next document opened without a relaunch.
+    /// `Buffer.autosaveDebounce` is still the fallback and still the number the
+    /// ADR names; the preference only moves it.
     public static func open(
         url: URL,
-        autosaveDelay: TimeInterval = Buffer.autosaveDebounce,
+        autosaveDelay: TimeInterval = Preferences.autosaveDelay(),
         previewDelay: TimeInterval = Buffer.previewDebounce
     ) throws -> Buffer {
         Buffer(

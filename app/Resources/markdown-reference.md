@@ -288,8 +288,18 @@ Three behaviours worth knowing:
 ![alt text](path/to/image.png "A title")
 ````
 
-Paths are resolved relative to the document. Images are capped at the width of
-the text column.
+Paths are resolved relative to the document, so this page — which lives in
+mark's own `Contents/Resources` — shows the picture sitting next to it:
+
+![A placeholder landscape: two hills and a sun](markdown-reference-image.png)
+
+A relative path may climb: `../assets/diagram.png` is an ordinary thing to
+write, and works. Images are capped at the width of the text column.
+
+`mark` serves a document's pictures over a scheme of its own, from the set of
+images that document actually names — so a picture appears, and nothing else on
+your disk does. `mark links --images notes.md` prints that set, and
+`mark links --broken` finds the ones that have gone.
 
 ## Code
 
@@ -514,13 +524,35 @@ This page has none, because you would not be able to see it.
 
 ## Raw HTML
 
-HTML is passed through untouched:
+HTML is filtered, not passed through. What markdown cannot say, you can still
+say in HTML:
 
 ````markdown
 Text with <kbd>⌘F</kbd> and <sub>subscript</sub> and <sup>superscript</sup>.
 ````
 
 Text with <kbd>⌘F</kbd> and <sub>subscript</sub> and <sup>superscript</sup>.
+
+Anything that could run code, load something, or restyle the page does not
+render — it shows as the text you typed, so you can see why it did not work:
+
+````markdown
+<script>alert(1)</script> and <iframe src="https://example.com"></iframe>
+````
+
+<script>alert(1)</script> and <iframe src="https://example.com"></iframe>
+
+The rule is an allowlist. Structural and inline elements are kept —
+`<kbd>`, `<details>`, `<summary>`, `<sub>`, `<sup>`, `<abbr>`, `<div>`,
+`<span>`, the table elements, `<img>`, `<a>`. Event handlers (`onclick` and
+every other `on…`), `style` attributes, `<style>`, `<script>`, `<iframe>`,
+`<object>`, `<embed>`, `<form>`, `<svg>` and `<math>` are not. A `href` or
+`src` may be relative, or `http`, `https`, `mailto`, or `tel`;
+`javascript:` and `data:` are dropped.
+
+This is not configurable, and it applies to `mark render --html` exactly as it
+applies to the window — a rendered document has no scripts in it, whoever wrote
+the markdown. A `.md` file is something you clone, download, or are sent.
 
 > [!WARNING]
 > A **block-level** HTML element that wraps markdown across a blank line —
@@ -542,6 +574,7 @@ These parse as ordinary text. They are listed so you know it is deliberate:
 | `--` and `"quotes"` | stay as typed; no smart punctuation |
 | A definition list (`Term` / `: definition`) | renders as a paragraph |
 | `https://example.com` on its own | stays text — see [Links](#links) |
+| `<script>`, `<iframe>`, `onclick=` | shown as text — see [Raw HTML](#raw-html) |
 
 ## Where the rest of it is
 

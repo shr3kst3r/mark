@@ -8,7 +8,7 @@
 function __mark_no_subcommand
     for token in (commandline -opc)[2..-1]
         switch $token
-            case render diff toc tasks check normalize ls grep stats doctor open tab theme goto reload sidebar nav
+            case render diff toc tasks check normalize ls grep links watch stats doctor open tab theme goto reload sidebar nav
                 return 1
         end
     end
@@ -34,6 +34,8 @@ complete -c mark -n __mark_no_subcommand -a check -d 'Set, clear, or flip one ch
 complete -c mark -n __mark_no_subcommand -a normalize -d 'Rewrite the extended task markers as plain GFM'
 complete -c mark -n __mark_no_subcommand -a ls -d 'List markdown files with titles and task counts'
 complete -c mark -n __mark_no_subcommand -a grep -d 'Search, reporting the heading each match sits under'
+complete -c mark -n __mark_no_subcommand -a links -d 'Every link and image, and whether its target is there'
+complete -c mark -n __mark_no_subcommand -a watch -d 'Block until a file or directory changes'
 complete -c mark -n __mark_no_subcommand -a stats -d 'Per-stage timings and counters'
 complete -c mark -n __mark_no_subcommand -a doctor -d 'Environment report for a bug report'
 complete -c mark -n __mark_no_subcommand -a open -d 'Open a file in a tab, or root the sidebar at a directory'
@@ -45,7 +47,7 @@ complete -c mark -n __mark_no_subcommand -a sidebar -d 'Report the sidebar root,
 complete -c mark -n __mark_no_subcommand -a nav -d "Move the sidebar's root"
 
 # --- files and directories --------------------------------------------------
-complete -c mark -n '__fish_seen_subcommand_from render diff toc tasks check normalize stats open grep' -F
+complete -c mark -n '__fish_seen_subcommand_from render diff toc tasks check normalize stats open grep links' -F
 complete -c mark -n '__fish_seen_subcommand_from ls nav' -a '(__fish_complete_directories)'
 
 # --- per-subcommand flags ---------------------------------------------------
@@ -62,7 +64,7 @@ complete -c mark -n '__fish_seen_subcommand_from diff' -l tracked -d 'Leave untr
 complete -c mark -n '__fish_seen_subcommand_from diff' -l theme -r -a '(__mark_themes)' -d 'Theme for --html and --ansi'
 complete -c mark -n '__fish_seen_subcommand_from ls' -l git -d 'Add changed lines against git HEAD'
 
-complete -c mark -n '__fish_seen_subcommand_from toc tasks check diff ls grep stats doctor open theme goto reload sidebar nav tab' -l json -d 'Machine-readable output'
+complete -c mark -n '__fish_seen_subcommand_from toc tasks check diff ls grep links watch stats doctor open theme goto reload sidebar nav tab' -l json -d 'Machine-readable output'
 
 # The five task states (2026-08-27-five-task-states). Hard-coded: nothing lists
 # them, and an unknown name is a usage error rather than an empty filter.
@@ -78,9 +80,17 @@ complete -c mark -n '__fish_seen_subcommand_from tasks' -l overdue -d 'Only task
 complete -c mark -n '__fish_seen_subcommand_from tasks' -l no-due -d 'Only tasks with no @due(...)'
 complete -c mark -n '__fish_seen_subcommand_from tasks' -l sort -r -a 'due priority state index' -d 'Order the answer'
 complete -c mark -n '__fish_seen_subcommand_from tasks' -l today -r -d 'What today means, for --overdue and +Nd'
-complete -c mark -n '__fish_seen_subcommand_from tasks ls grep' -l depth -r -d 'Levels to descend'
+complete -c mark -n '__fish_seen_subcommand_from tasks ls grep links watch' -l depth -r -d 'Levels to descend'
 complete -c mark -n '__fish_seen_subcommand_from ls' -l all -d 'Include non-markdown files'
 complete -c mark -n '__fish_seen_subcommand_from grep' -s i -l ignore-case -d 'Case-insensitive matching'
+complete -c mark -n '__fish_seen_subcommand_from links' -l to -r -d 'Report what points at this file'
+complete -c mark -n '__fish_seen_subcommand_from toc' -l insert -d 'Write the list into the document'
+complete -c mark -n '__fish_seen_subcommand_from toc' -l min-level -r -d 'Shallowest heading level'
+complete -c mark -n '__fish_seen_subcommand_from toc' -l max-level -r -d 'Deepest heading level'
+complete -c mark -n '__fish_seen_subcommand_from watch' -l follow -d 'Keep going instead of exiting'
+complete -c mark -n '__fish_seen_subcommand_from watch' -l interval -r -d 'Seconds between polls'
+complete -c mark -n '__fish_seen_subcommand_from links' -l broken -d 'Only references whose local target is missing'
+complete -c mark -n '__fish_seen_subcommand_from links' -l images -d 'Only images, leaving links out'
 
 complete -c mark -n '__fish_seen_subcommand_from check' -l item -r -d 'Task index in document order'
 complete -c mark -n '__fish_seen_subcommand_from check' -l on -d 'Check the box'

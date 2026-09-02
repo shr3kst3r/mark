@@ -85,6 +85,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         // The first line in the log of every launch, so a report that arrives
         // with a log attached says which build produced it.
         Log.app.info("mark \(BuildInfo.summary, privacy: .public)")
+
+        // What mark can hand to a Service, and take back from one: plain text
+        // and file URLs. Without this the Services menu built below is present
+        // and permanently empty, because the system filters it by what the
+        // application says it can exchange.
+        NSApplication.shared.registerServicesMenuSendTypes(
+            [.string, .fileURL], returnTypes: [.string])
         let core = (try? MarkCore.version()) ?? "unavailable"
         Log.app.info("mark-core \(core, privacy: .public)")
 
@@ -369,6 +376,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "About mark", action: #selector(about(_:)), keyEquivalent: ""
         ).target = self
         appMenu.addItem(.separator())
+        // ⌘, — the platform's binding, and the reason this window exists: every
+        // other setting mark has is a menu item, and the two that were not
+        // could only be changed by editing a constant or exporting an
+        // environment variable.
+        appMenu.addItem(
+            withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(.separator())
+
+        // **Services.** Absent until now, and not by decision: this menu bar is
+        // hand-built rather than loaded from a nib (there is no nib), and a nib
+        // is where the Services item usually comes from. The effect was that
+        // selecting text in the editor or the preview and reaching for Services
+        // found nothing — every other text view on the platform offers them.
+        //
+        // Assigning `NSApp.servicesMenu` is what makes the system fill it in;
+        // the menu itself stays empty in code and is populated at runtime from
+        // whatever the reader has installed.
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        let servicesMenu = NSMenu(title: "Services")
+        servicesItem.submenu = servicesMenu
+        appMenu.addItem(servicesItem)
+        NSApplication.shared.servicesMenu = servicesMenu
+        appMenu.addItem(.separator())
+
         appMenu.addItem(
             withTitle: "Hide mark", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(
@@ -418,6 +449,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         // No ellipsis, matching Help ▸ Markdown Reference: this shows a window,
         // it does not open a dialog that wants more input first.
         fileMenu.addItem(
+            withTitle: "Open Quickly…", action: #selector(openQuickly(_:)), keyEquivalent: "o"
+        ).keyEquivalentModifierMask = [.command, .option]
+        // ⌥⌘T rather than the browser's ⇧⌘T, which File ▸ Today already has.
+        fileMenu.addItem(
+            withTitle: "Reopen Closed Tab",
+            action: #selector(MainWindowController.reopenClosedTab(_:)), keyEquivalent: "t"
+        ).keyEquivalentModifierMask = [.command, .option]
+        fileMenu.addItem(
             withTitle: "History", action: #selector(showHistory(_:)), keyEquivalent: "y"
         ).target = self
         // `2026-08-31-today-page`. Beside History because it is the same kind
@@ -430,6 +469,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         let todayItem = fileMenu.addItem(
             withTitle: "Today", action: #selector(showToday(_:)), keyEquivalent: "T")
         todayItem.keyEquivalentModifierMask = [.command, .shift]
+        // Beside Today, because it is the act that page leaves you wanting when
+        // it says there is no note for today yet.
+        fileMenu.addItem(
+            withTitle: "New Daily Note",
+            action: #selector(MainWindowController.newDailyNote(_:)), keyEquivalent: "d"
+        ).keyEquivalentModifierMask = [.command, .control]
         todayItem.target = self
         fileMenu.addItem(
             withTitle: "Reload", action: #selector(MainWindowController.reloadDocument(_:)),
@@ -440,6 +485,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         fileMenu.addItem(
             withTitle: "Save", action: #selector(MainWindowController.saveDocument(_:)),
             keyEquivalent: "s")
+        fileMenu.addItem(.separator())
+
+        // Getting a document out. mark could render sixteen themes, math and
+        // diagrams, and had no way to produce any of it anywhere but its own
+        // window — no ⌘P and no export — while `mark render --html` had emitted
+        // a self-contained document since M1.
+        //
+        // Export as PDF is its own item rather than being left to the print
+        // panel's PDF menu, which is a place people do not find.
+        let exportHTML = fileMenu.addItem(
+            withTitle: "Export as HTML…", action: #selector(MainWindowController.exportAsHTML(_:)),
+            keyEquivalent: "E")
+        exportHTML.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(
+            withTitle: "Export as PDF…", action: #selector(MainWindowController.exportAsPDF(_:)),
+            keyEquivalent: "")
+        fileMenu.addItem(
+            withTitle: "Print…", action: #selector(MainWindowController.printDocument(_:)),
+            keyEquivalent: "p")
         fileMenu.addItem(.separator())
         // ⌘W is the tab, ⇧⌘W is the window — the platform convention, and the
         // one place where "we own the tab bar" is visible in the menu bar.
@@ -515,6 +579,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             item.keyEquivalentModifierMask = modifiers
             item.tag = action.rawValue
         }
+        // Find in Folder is not an `NSTextFinder.Action`, so it is added after
+        // the loop rather than smuggled into that table with a bogus tag.
+        findMenu.addItem(.separator())
+        let inFolder = findMenu.addItem(
+            withTitle: "Find in Folder…", action: #selector(findInFolder(_:)),
+            keyEquivalent: "F")
+        inFolder.keyEquivalentModifierMask = [.command, .shift]
         findItem.submenu = findMenu
         editMenu.addItem(findItem)
 
@@ -550,6 +621,56 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
+        // ---- Format -------------------------------------------------------
+        //
+        // A menu of its own rather than more items in Edit, because these are
+        // the only commands in the app that write *markdown* — everything in
+        // Edit above is `NSTextView`'s and would work in any text field.
+        //
+        // `2026-08-25-flock-write-locking` chose `NSTextView` to inherit the
+        // system's editing, and the cost was that the editor knew nothing about
+        // the language it was editing. This is the smallest thing that fixes
+        // that without reimplementing any of what was inherited.
+        let formatItem = NSMenuItem()
+        let formatMenu = NSMenu(title: "Format")
+        formatMenu.addItem(
+            withTitle: "Bold", action: #selector(MainWindowController.toggleBold(_:)),
+            keyEquivalent: "b")
+        formatMenu.addItem(
+            withTitle: "Italic", action: #selector(MainWindowController.toggleItalic(_:)),
+            keyEquivalent: "i")
+        formatMenu.addItem(
+            withTitle: "Code", action: #selector(MainWindowController.toggleInlineCode(_:)),
+            keyEquivalent: "e"
+        ).keyEquivalentModifierMask = [.command, .control]
+        formatMenu.addItem(
+            withTitle: "Strikethrough",
+            action: #selector(MainWindowController.toggleStrikethrough(_:)),
+            keyEquivalent: "")
+        formatMenu.addItem(.separator())
+        formatMenu.addItem(
+            withTitle: "Link", action: #selector(MainWindowController.insertLink(_:)),
+            keyEquivalent: "k")
+        formatMenu.addItem(.separator())
+
+        // ⌃⌘1…⌃⌘6, because ⌘1–⌘9 are the tabs. ⌃⌘0 is body text, which is the
+        // one people reach for after applying a heading to the wrong line.
+        let headings = NSMenuItem(title: "Heading", action: nil, keyEquivalent: "")
+        let headingMenu = NSMenu(title: "Heading")
+        for level in 0...6 {
+            let title = level == 0 ? "Body Text" : "Heading \(level)"
+            let item = headingMenu.addItem(
+                withTitle: title,
+                action: #selector(MainWindowController.setHeadingLevel(_:)),
+                keyEquivalent: "\(level)")
+            item.keyEquivalentModifierMask = [.command, .control]
+            item.tag = level
+        }
+        headings.submenu = headingMenu
+        formatMenu.addItem(headings)
+        formatItem.submenu = formatMenu
+        mainMenu.addItem(formatItem)
+
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(
@@ -581,6 +702,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         viewMenu.addItem(
             withTitle: "Show Tasks",
             action: #selector(MainWindowController.toggleTaskList(_:)), keyEquivalent: "y"
+        ).keyEquivalentModifierMask = [.command, .control]
+        // The pane's third tab, on the same ⌃⌘ row as its two siblings. ⌃⌘B was
+        // free; `keyEquivalentsAreUnique` is what says so.
+        viewMenu.addItem(
+            withTitle: "Show Links",
+            action: #selector(MainWindowController.toggleBacklinks(_:)), keyEquivalent: "b"
         ).keyEquivalentModifierMask = [.command, .control]
         // `2026-08-28-git-differences-by-running-git`. A mode of the tab rather
         // than a second tab: it is a way of looking at the document already
@@ -624,6 +751,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeItem.submenu = ThemeMenu()
         viewMenu.addItem(themeItem)
+        viewMenu.addItem(.separator())
+
+        // Text size, beside the theme: both change how the *document* looks
+        // rather than which panes are around it, and both are app-wide and
+        // persisted (``TextZoom``).
+        //
+        // `⌘+` is declared as `"+"` with `.shift`, and `⌘=` is registered
+        // alongside it with no shift. That pair is what every browser does, and
+        // it is why the key next to backspace works without reaching for shift
+        // — an item bound only to `"+"` is one nobody can press casually.
+        let zoomIn = viewMenu.addItem(
+            withTitle: "Bigger Text", action: #selector(MainWindowController.zoomTextIn(_:)),
+            keyEquivalent: "+")
+        zoomIn.keyEquivalentModifierMask = [.command, .shift]
+        let zoomInPlain = viewMenu.addItem(
+            withTitle: "Bigger Text", action: #selector(MainWindowController.zoomTextIn(_:)),
+            keyEquivalent: "=")
+        zoomInPlain.isAlternate = true
+        zoomInPlain.isHidden = true
+        zoomInPlain.keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(
+            withTitle: "Smaller Text", action: #selector(MainWindowController.zoomTextOut(_:)),
+            keyEquivalent: "-"
+        ).keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(
+            withTitle: "Actual Size", action: #selector(MainWindowController.zoomTextReset(_:)),
+            keyEquivalent: "0"
+        ).keyEquivalentModifierMask = [.command]
         viewMenu.addItem(.separator())
 
         // The editor's whitespace marks: a dot for a space, an arrow across a
@@ -705,6 +860,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             action: #selector(MainWindowController.navigateToParent(_:)),
             keyEquivalent: String(UnicodeScalar(NSUpArrowFunctionKey)!))
         goMenu.addItem(.separator())
+        // In Go rather than in Edit: it moves the caret somewhere, which is
+        // what every other item in this menu does.
+        goMenu.addItem(
+            withTitle: "Go to Line…", action: #selector(MainWindowController.goToLine(_:)),
+            keyEquivalent: "l")
+        goMenu.addItem(.separator())
         goMenu.addItem(
             withTitle: "Focus Path Bar",
             action: #selector(MainWindowController.focusPathBar(_:)), keyEquivalent: "p"
@@ -770,6 +931,73 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
     /// (`2026-08-26-editor-groups-per-pane-tab-bars`). With no window open —
     /// every one of them closed while the app kept running — one is made first,
     /// rooted where the file is, rather than the click doing nothing.
+    /// ⌥⌘O. The other half of ⇧⌘F: that one finds notes by what is *in* them,
+    /// this one by what they are *called*.
+    ///
+    /// **⌥⌘O and not ⇧⌘O**, which is Xcode's binding for the same idea and
+    /// would have been the better one. ⇧⌘O is already Reveal in Sidebar here,
+    /// and moving an existing binding is churn a reader feels; ⌥⌘O is free,
+    /// sits next to ⌘O, and reads as "open, but quickly".
+    @objc func openQuickly(_ sender: Any?) {
+        guard let coordinator = windows else {
+            Log.app.error("Open Quickly before the window coordinator exists")
+            NSSound.beep()
+            return
+        }
+        let root =
+            coordinator.keyController?.sidebar.root
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        QuickOpenController.show(root: root) { [weak coordinator] url in
+            guard let coordinator else { return }
+            let controller =
+                coordinator.keyController
+                ?? coordinator.makeWindow(root: url.deletingLastPathComponent())
+            controller.open(url)
+            controller.showWindow(activating: true)
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// ⇧⌘F. Scoped to the *key window's* sidebar root, because "in this
+    /// folder" has to mean the folder the reader is looking at — not the one
+    /// the search window happened to open on.
+    @objc func findInFolder(_ sender: Any?) {
+        guard let coordinator = windows else {
+            Log.app.error("Find in Folder before the window coordinator exists")
+            NSSound.beep()
+            return
+        }
+        let root =
+            coordinator.keyController?.sidebar.root
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        SearchWindowController.show(root: root) { [weak coordinator] url, offset in
+            guard let coordinator else { return }
+            let controller =
+                coordinator.keyController
+                ?? coordinator.makeWindow(root: url.deletingLastPathComponent())
+            controller.open(url)
+            controller.showWindow(activating: true)
+            // The scroll is deferred rather than issued with the open: the
+            // page has to exist before it can be scrolled, and `open` returns
+            // as soon as the tab does. `follow(sourceByte:)` is the same route
+            // the editor uses to keep the two panes on the same line, so a hit
+            // in a diagram or a table lands where the bytes say rather than
+            // where a percentage would guess.
+            _Concurrency.Task { @MainActor in
+                await controller.documentView?.awaitReady()
+                controller.documentView?.follow(sourceByte: offset)
+            }
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        PreferencesWindowController.show()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
     @objc func showHistory(_ sender: Any?) {
         // The coordinator owns the one history there is — there is no
         // `OpenHistory.shared` to fall back to, deliberately, and falling back

@@ -54,6 +54,14 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| MARKDOWN.iter().any(|m| e.eq_ignore_ascii_case(m)))
 }
 
+/// How deep a recursive walk goes when the caller does not say.
+///
+/// Not "unlimited": the user's real notes tree holds 608k files (research
+/// §2.8), and a walk with no floor under it is a multi-second hang. 64 is
+/// deeper than any notes directory anyone has and shallow enough to terminate
+/// on a symlink loop.
+pub const DEFAULT_RECURSIVE_DEPTH: usize = 64;
+
 /// How much of the tree to look at.
 #[derive(Debug, Clone)]
 pub struct Options {

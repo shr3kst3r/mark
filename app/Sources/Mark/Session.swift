@@ -388,6 +388,20 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// explaining.
     public var editorInvisibles: Bool?
 
+    /// How large document text is drawn — ``TextZoom``.
+    ///
+    /// The *scale* rather than the ladder index, so changing `TextZoom.steps`
+    /// cannot silently move an existing reader's setting to a different size.
+    /// Optional and additive like the fields around it; absent means 100%, and
+    /// 100% writes nothing.
+    public var textZoom: Double?
+
+    /// Whether the editor's margin numbers its lines — ``LineNumbers``.
+    ///
+    /// Optional and additive like the fields around it. Absent means off,
+    /// which is the default, so the common case writes nothing.
+    public var editorLineNumbers: Bool?
+
     /// Every window, in creation order
     /// (`2026-08-26-multiple-windows-and-split-panes`).
     ///
@@ -457,6 +471,8 @@ public struct SessionState: Codable, Equatable, Sendable {
         themeAppearance: String? = nil,
         editorVisible: Bool? = nil,
         editorInvisibles: Bool? = nil,
+        textZoom: Double? = nil,
+        editorLineNumbers: Bool? = nil,
         windows: [SessionWindow]? = nil,
         history: [SessionHistoryEntry]? = nil
     ) {
@@ -471,6 +487,8 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.themeAppearance = themeAppearance
         self.editorVisible = editorVisible
         self.editorInvisibles = editorInvisibles
+        self.textZoom = textZoom
+        self.editorLineNumbers = editorLineNumbers
         self.windows = windows
         self.history = history
     }

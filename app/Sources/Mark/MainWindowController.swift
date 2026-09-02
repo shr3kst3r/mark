@@ -31,6 +31,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// state and clickable (`2026-08-28-tabbed-document-pane`).
     public let taskList: TaskListViewController
 
+    /// The sidebar's Links tab — what points at the front document.
+    public let backlinks: BacklinksViewController
+
     /// The two tabs, and the control that chooses between them.
     public let documentPane: DocumentPaneController
 
@@ -180,8 +183,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar = TreeViewController(root: root)
         toc = TableOfContentsViewController()
         taskList = TaskListViewController()
+        backlinks = BacklinksViewController()
         documentPane = DocumentPaneController(
-            contents: toc, taskList: taskList, defaults: preferences)
+            contents: toc, taskList: taskList, backlinks: backlinks, defaults: preferences)
         sidebarPane = SidebarPaneController(tree: sidebar, documentPane: documentPane)
         groups = TabGroups()
         groupSplit = GroupSplitView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
@@ -286,6 +290,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar.onNewDocument = { [weak self] directory in
             self?.newDocument(in: directory)
         }
+        sidebar.onFileOperation = { [weak self] operation, node in
+            self?.perform(operation, on: node)
+        }
         // M8: the root, the history, and the two listing toggles all live in
         // the session file, so anything that moves them schedules a save.
         sidebar.onStateChange = { [weak self] in
@@ -339,6 +346,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // (`2026-08-28-tabbed-document-pane`).
         taskList.onSelect = { [weak self] task in
             self?.scrollToTask(task)
+        }
+        backlinks.onSelect = { [weak self] url, offset in
+            guard let self else { return }
+            self.open(url)
+            // Deferred, for the reason Find in Folder defers: `open` returns as
+            // soon as the tab does, and a page that does not exist yet cannot
+            // be scrolled.
+            _Concurrency.Task { @MainActor in
+                await self.documentView?.awaitReady()
+                self.documentView?.follow(sourceByte: offset)
+            }
         }
         // The tab that is about to appear has not been fed while it was off
         // screen — see ``updateDocumentPane()`` for the measurement that made
@@ -947,6 +965,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
                 tab?.metadata?.tasks ?? [],
                 counts: tab?.metadata?.taskCounts ?? .empty,
                 for: tab?.url)
+        case .links:
+            // Scoped to the sidebar's root rather than to the whole disk: "what
+            // links here" is only ever true of somewhere, and the root is the
+            // somewhere the reader has chosen.
+            backlinks.show(tab?.url, root: sidebar.root)
         }
     }
 
@@ -1096,6 +1119,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // The editor's whitespace marks, with the same scope for the same
         // reason — see ``SessionState/editorInvisibles``.
         state.editorInvisibles = Invisibles.isShowing
+        state.textZoom = TextZoom.persistedScale
+        state.editorLineNumbers = LineNumbers.isShowing ? true : nil
         return state
     }
 
@@ -1143,6 +1168,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             named: state.theme,
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
         Invisibles.restore(state.editorInvisibles)
+        TextZoom.restore(state.textZoom)
+        LineNumbers.restore(state.editorLineNumbers)
         guard let window = state.effectiveWindows.first else { return }
         restore(window, sidebarRoot: sidebarRoot)
     }
@@ -1402,6 +1429,10 @@ extension MainWindowController: TabStoreDelegate {
     /// ADR-6 says never to resolve a conflict by writing, and closing the tab
     /// is not the user answering the question.
     public func tabStore(_ store: TabStore, willClose tab: DocumentTab) {
+        // Before the buffer work below, and unconditionally: a tab with no
+        // buffer — one that was never edited, which is most of them — is
+        // exactly the tab someone closes by accident.
+        windows?.rememberClosed(tab.url)
         guard let buffer = tab.buffer else { return }
         if buffer.isDirty && !buffer.isConflicted {
             buffer.save()
@@ -2010,9 +2041,22 @@ extension MainWindowController: NSMenuItemValidation {
     /// The editor is shown and takes the keyboard. That is this route only:
     /// *"a document opens read-only until you ask to edit it"* still holds
     /// everywhere else, and making a file is asking.
+    /// The highest directory a template search may reach.
+    ///
+    /// The journal root when the sidebar is inside one, and the sidebar root
+    /// otherwise. Never the filesystem root: a stray `_template.md` in a home
+    /// directory must not silently seed every new document in the app.
+    private var templateCeiling: URL {
+        JournalRoot.find(from: sidebar.root)?.url ?? sidebar.root
+    }
+
     @discardableResult
     public func createDocument(at url: URL) throws -> DocumentTab {
-        try MarkCore.save("", to: url.path)
+        // `_template.md` beside the new document, or in any directory up to the
+        // journal or sidebar root. Absent — which is the ordinary case and was
+        // the only case until now — this is the empty string it always was.
+        let body = DocumentTemplate.body(for: url, stoppingAt: templateCeiling) ?? ""
+        try MarkCore.save(body, to: url.path)
         Log.app.info("created \(url.lastPathComponent, privacy: .public)")
 
         // Permanent, not preview: a file the reader has just named is the most
@@ -2342,6 +2386,11 @@ extension MainWindowController: NSMenuItemValidation {
         toggleDocumentPane(.tasks)
     }
 
+    /// ⌃⌘B — the pane's third tab, what points at this document.
+    @objc public func toggleBacklinks(_ sender: Any?) {
+        toggleDocumentPane(.links)
+    }
+
     /// One rule for both items: show the pane on this tab, or hide the pane if
     /// this tab is already the one showing
     /// (`2026-08-28-tabbed-document-pane`).
@@ -2404,6 +2453,25 @@ extension MainWindowController: NSMenuItemValidation {
     /// as the toggle half-working.
     @objc public func toggleInvisibles(_ sender: Any?) {
         Invisibles.isShowing.toggle()
+        saveSessionSoon()
+    }
+
+    /// ⌘+, ⌘−, ⌘0. App-wide, like the theme and the whitespace marks: every
+    /// open page and editor hears about it through
+    /// ``TextZoom/didChangeNotification``, so a second window does not stay at
+    /// the old size.
+    @objc public func zoomTextIn(_ sender: Any?) {
+        TextZoom.zoomIn()
+        saveSessionSoon()
+    }
+
+    @objc public func zoomTextOut(_ sender: Any?) {
+        TextZoom.zoomOut()
+        saveSessionSoon()
+    }
+
+    @objc public func zoomTextReset(_ sender: Any?) {
+        TextZoom.reset()
         saveSessionSoon()
     }
 
@@ -2529,8 +2597,383 @@ extension MainWindowController: NSMenuItemValidation {
         buffer.save()
     }
 
+    // MARK: - Getting a document out
+
+    /// The bytes of the selected document, buffer-first.
+    ///
+    /// `authoritativeSource` answers only while a tab is *dirty* — it is
+    /// deliberately `nil` for a clean one, so a caller cannot accidentally
+    /// treat a stale buffer as truth. Reading the file is therefore the other
+    /// half, and doing it here keeps the rule in one place for both exports.
+    private func sourceForOutput(_ tab: DocumentTab) -> String? {
+        if let dirty = tab.authoritativeSource { return dirty }
+        return try? DocumentSource.read(tab.url)
+    }
+
+    /// ⌘P. The **preview**, never the editor: paper wants the rendered
+    /// document, and the source pane is a working view.
+    @objc public func printDocument(_ sender: Any?) {
+        guard let tab = tabs.selected, let webView = tab.webView else {
+            NSSound.beep()
+            return
+        }
+        let operation = DocumentOutput.printOperation(for: webView, jobName: tab.title)
+        guard let window else {
+            operation.run()
+            return
+        }
+        operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+    }
+
+    /// **File ▸ Export as HTML…** — the same bytes `mark render --html` writes.
+    @objc public func exportAsHTML(_ sender: Any?) {
+        guard let tab = tabs.selected, let source = sourceForOutput(tab) else {
+            NSSound.beep()
+            return
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.nameFieldStringValue = DocumentOutput.suggestedName(
+            for: tab.url, title: tab.metadata?.documentTitle, extension: "html")
+        panel.directoryURL = tab.url.deletingLastPathComponent()
+
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let html = try DocumentOutput.html(source: source, title: tab.metadata?.documentTitle)
+                try html.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                self?.reportOutputFailure(error, verb: "export", to: url)
+            }
+        }
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
+    /// **File ▸ Export as PDF…**
+    ///
+    /// A menu item of its own rather than leaving it to the print panel's PDF
+    /// menu, which is a place people do not find.
+    @objc public func exportAsPDF(_ sender: Any?) {
+        guard let tab = tabs.selected, let webView = tab.webView else {
+            NSSound.beep()
+            return
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = DocumentOutput.suggestedName(
+            for: tab.url, title: tab.metadata?.documentTitle, extension: "pdf")
+        panel.directoryURL = tab.url.deletingLastPathComponent()
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else { return }
+            DocumentOutput.pdfOperation(for: webView, writingTo: url).run()
+        }
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
+    /// A failed export is an alert, not a log line: the reader asked for a file
+    /// and has to be told they did not get one.
+    private func reportOutputFailure(_ error: any Error, verb: String, to url: URL) {
+        Log.render.error(
+            "\(verb, privacy: .public) to \(url.lastPathComponent, privacy: .public) failed: \(String(describing: error), privacy: .public)"
+        )
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not \(verb) \u{201C}\(url.lastPathComponent)\u{201D}."
+        alert.informativeText = String(describing: error)
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// **File ▸ Reopen Closed Tab** (⌥⌘T).
+    ///
+    /// **⌥⌘T and not ⇧⌘T**, which is what a browser uses and what fingers
+    /// expect. ⇧⌘T is already File ▸ Today here, and that is a binding this app
+    /// shipped with; moving it would be churn for anyone who has learned it.
+    /// Worth revisiting if it turns out more people arrive from a browser than
+    /// from this app's own history.
+    @objc public func reopenClosedTab(_ sender: Any?) {
+        guard let url = windows?.takeMostRecentlyClosed() else {
+            NSSound.beep()
+            return
+        }
+        open(url)
+        showWindow(activating: true)
+    }
+
+    // MARK: - Today's note
+
+    /// **File ▸ New Daily Note** (⌃⌘D).
+    ///
+    /// The Today page shows the most recent daily and says which day it is when
+    /// there is no note for today — which is honest, and leaves the reader to
+    /// go and make one by hand, three directories down, under a name they have
+    /// to get exactly right. This is that act.
+    ///
+    /// Existing already is success, not an error: the point is to arrive at
+    /// today's note, and whether this call is what created it is not something
+    /// the reader asked about.
+    @objc public func newDailyNote(_ sender: Any?) {
+        guard let journal = JournalRoot.find(from: sidebar.root) else {
+            let alert = NSAlert()
+            alert.messageText = "No journal here."
+            alert.informativeText =
+                """
+                A daily note needs a folder holding both \u{201C}daily\u{201D} and \
+                \u{201C}projects\u{201D}. \u{201C}\(sidebar.root.lastPathComponent)\u{201D} \
+                is not inside one.
+                """
+            alert.alertStyle = .informational
+            if let window {
+                alert.beginSheetModal(for: window, completionHandler: nil)
+            } else {
+                alert.runModal()
+            }
+            return
+        }
+
+        let relative = TodayDigest.dailyRelativePath(for: Date())
+        let url = journal.url.appendingPathComponent(relative)
+        do {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                // `daily/2026/09` may not exist yet — the first note of a month
+                // is the common case for this command, not an edge one.
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let body = DocumentTemplate.body(for: url, stoppingAt: journal.url) ?? ""
+                try MarkCore.save(body, to: url.path)
+                Log.app.info("created today\u{2019}s note \(relative, privacy: .public)")
+                sidebar.refresh()
+            }
+            open(url)
+            showWindow(activating: true)
+        } catch {
+            presentCreationFailure(error, at: url)
+        }
+    }
+
+    // MARK: - Line numbers and Go to Line
+
+    /// ⌃⌘L. App-wide and persisted, like the whitespace marks: two editors
+    /// disagreeing about whether lines are numbered is not a state anyone means
+    /// to be in.
+    @objc public func toggleLineNumbers(_ sender: Any?) {
+        LineNumbers.isShowing.toggle()
+        saveSessionSoon()
+    }
+
+    /// ⌘L. A prompt rather than a field in the chrome, because it is a thing
+    /// you do once and then stop doing.
+    @objc public func goToLine(_ sender: Any?) {
+        guard isEditorVisible, tabs.selected != nil else {
+            NSSound.beep()
+            return
+        }
+        let total = editor.lineCount
+        FileOperations.askForName(
+            title: "Go to Line",
+            message: "1 to \(total)",
+            initial: "",
+            confirm: "Go",
+            in: window
+        ) { [weak self] entered in
+            guard let self, let entered, let line = Int(entered) else { return }
+            // Refused rather than clamped: landing on the last line for a
+            // number past the end is indistinguishable from the document being
+            // shorter than the reader thought.
+            if !self.editor.goToLine(line) { NSSound.beep() }
+        }
+    }
+
+    // MARK: - Markdown formatting
+
+    /// The formatting commands, all of which act on the editor and are only
+    /// enabled when it is on screen with a document in it.
+    private var formattingEditor: EditorPane? {
+        guard isEditorVisible, tabs.selected != nil else { return nil }
+        return editor
+    }
+
+    @objc public func toggleBold(_ sender: Any?) {
+        formattingEditor?.wrapSelection(with: "**")
+    }
+
+    @objc public func toggleItalic(_ sender: Any?) {
+        // A single `*` rather than `_`: both are legal, and `*` is what the
+        // bold command above already uses, so a reader pressing ⌘B then ⌘I on
+        // the same words gets `***word***` rather than a mixed pair.
+        formattingEditor?.wrapSelection(with: "*")
+    }
+
+    @objc public func toggleInlineCode(_ sender: Any?) {
+        formattingEditor?.wrapSelection(with: "`")
+    }
+
+    @objc public func toggleStrikethrough(_ sender: Any?) {
+        formattingEditor?.wrapSelection(with: "~~")
+    }
+
+    @objc public func insertLink(_ sender: Any?) {
+        formattingEditor?.makeLink()
+    }
+
+    /// ⌃⌘1…⌃⌘6, and ⌃⌘0 for body text. The level rides in the item's `tag`.
+    @objc public func setHeadingLevel(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        formattingEditor?.setHeading(level: item.tag)
+    }
+
+    // MARK: - Sidebar file operations
+
+    /// Whether this window holds unsaved changes for `url`.
+    ///
+    /// The gate on every operation that moves bytes: a buffer whose file has
+    /// been renamed out from under it would autosave to a path that no longer
+    /// means what it meant. Same instinct as
+    /// `2026-08-25-flock-write-locking` — refuse rather than clobber.
+    func hasUnsavedChanges(for url: URL) -> Bool {
+        tab(for: url)?.isDirty == true
+    }
+
+    func perform(_ operation: TreeViewController.FileOperation, on node: TreeNode) {
+        let url = node.url
+        switch operation {
+        case .reveal:
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+
+        case .copyPath:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url.path, forType: .string)
+
+        case .newDocument:
+            newDocument(in: node.isDirectory ? url : url.deletingLastPathComponent())
+
+        case .newFolder:
+            let directory = node.isDirectory ? url : url.deletingLastPathComponent()
+            FileOperations.askForName(
+                title: "New Folder",
+                message: "In \u{201C}\(directory.lastPathComponent)\u{201D}",
+                initial: "untitled folder",
+                confirm: "Create",
+                in: window
+            ) { [weak self] name in
+                guard let self, let name else { return }
+                do {
+                    _ = try FileOperations.makeFolder(in: directory, named: name)
+                    self.sidebar.refresh()
+                } catch {
+                    self.report(error)
+                }
+            }
+
+        case .rename:
+            FileOperations.askForName(
+                title: "Rename",
+                message: "\u{201C}\(url.lastPathComponent)\u{201D}",
+                initial: url.lastPathComponent,
+                confirm: "Rename",
+                in: window
+            ) { [weak self] name in
+                guard let self, let name else { return }
+                do {
+                    let moved = try FileOperations.rename(url, to: name) {
+                        self.hasUnsavedChanges(for: $0)
+                    }
+                    // A tab showing the old path is now showing a file that is
+                    // not there. Reopening at the new path and closing the old
+                    // one keeps the reader where they were, which is the whole
+                    // reason a rename in the sidebar beats one in Finder.
+                    self.followRename(from: url, to: moved)
+                    self.sidebar.refresh()
+                } catch {
+                    self.report(error)
+                }
+            }
+
+        case .duplicate:
+            do {
+                let copy = try FileOperations.duplicate(url) { self.hasUnsavedChanges(for: $0) }
+                sidebar.refresh()
+                _ = sidebar.reveal(copy)
+            } catch {
+                report(error)
+            }
+
+        case .trash:
+            do {
+                try FileOperations.trash(url) { self.hasUnsavedChanges(for: $0) }
+                // The tab goes with the file. It is in the Trash rather than
+                // gone, so this is not data loss — but a tab pointed at a path
+                // that is not there is a tab whose next autosave would recreate
+                // the file the reader just threw away.
+                if let tab = tab(for: url) { tabs.close(tab) }
+                sidebar.refresh()
+            } catch {
+                report(error)
+            }
+        }
+    }
+
+    /// Move any tab on `from` to `to`, keeping the reader on the document.
+    private func followRename(from: URL, to: URL) {
+        guard tab(for: from) != nil, from != to else { return }
+        open(to)
+        if let stale = tab(for: from) { tabs.close(stale) }
+    }
+
+    private func report(_ error: any Error) {
+        let alert = NSAlert(error: error)
+        alert.alertStyle = .warning
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(reopenClosedTab(_:)):
+            return windows?.recentlyClosed.isEmpty == false
+        case #selector(newDailyNote(_:)):
+            // Enabled outside a journal too, so choosing it can *say* there is
+            // no journal here rather than being a greyed item that explains
+            // nothing.
+            return true
+        case #selector(goToLine(_:)):
+            return isEditorVisible && tabs.selected != nil
+        case #selector(toggleLineNumbers(_:)):
+            // Enabled with the editor hidden, like Show Invisibles: it is a
+            // setting the next editor to open will honour, and greying it out
+            // would say the setting does not exist.
+            item.state = LineNumbers.isShowing ? .on : .off
+            return true
+        case #selector(toggleBold(_:)), #selector(toggleItalic(_:)),
+            #selector(toggleInlineCode(_:)), #selector(toggleStrikethrough(_:)),
+            #selector(insertLink(_:)), #selector(setHeadingLevel(_:)):
+            // Greyed out with the editor hidden rather than silently doing
+            // nothing: these write to the document, and a command that writes
+            // must never look available when there is nothing to write to.
+            return formattingEditor != nil
+        case #selector(printDocument(_:)), #selector(exportAsPDF(_:)):
+            // Both go through the page's layout, so both need a resident tab.
+            // A dehydrated one has no web view and would print a blank sheet.
+            return tabs.selected?.webView != nil
+        case #selector(exportAsHTML(_:)):
+            // This one does not: it renders from source through the core, so it
+            // works on a tab whose web view has been evicted.
+            return tabs.selected != nil
         case #selector(toggleEditorPane(_:)):
             item.title = isEditorVisible ? "Hide Editor" : "Show Editor"
             return tabs.selected != nil
@@ -2550,6 +2993,9 @@ extension MainWindowController: NSMenuItemValidation {
         // *and* showing its tab, so the pair reads as a choice.
         case #selector(toggleTableOfContents(_:)):
             item.state = documentPaneIsShowing(.contents) ? .on : .off
+            return true
+        case #selector(toggleBacklinks(_:)):
+            item.state = documentPaneIsShowing(.links) ? .on : .off
             return true
         case #selector(toggleTaskList(_:)):
             item.state = documentPaneIsShowing(.tasks) ? .on : .off
@@ -2591,6 +3037,14 @@ extension MainWindowController: NSMenuItemValidation {
             // and greying it out would say the setting does not exist.
             item.state = Invisibles.isShowing ? .on : .off
             return true
+        case #selector(zoomTextIn(_:)):
+            return TextZoom.scale < TextZoom.steps.last!
+        case #selector(zoomTextOut(_:)):
+            return TextZoom.scale > TextZoom.steps.first!
+        case #selector(zoomTextReset(_:)):
+            // Disabled at 100%, which is also how it says what the current
+            // state is: there is no checkmark to put on a one-shot item.
+            return !TextZoom.isDefault
         case #selector(sortSidebar(_:)):
             item.state =
                 TreeSort.allCases.indices.contains(item.tag)

@@ -68,7 +68,7 @@ static void version_round_trips(void) {
 }
 
 static void render_html_still_works(void) {
-    char *html = mark_render_html(DOC, 0, NULL);
+    char *html = mark_render_html(DOC, 0, NULL, 0);
     ok(html != NULL, "mark_render_html returned NULL");
     if (html == NULL) {
         return;
@@ -92,7 +92,7 @@ static void render_range_emits_one_block(void) {
 }
 
 static void a_partition_reassembles_the_document(void) {
-    char *whole = mark_render_html(DOC, 0, NULL);
+    char *whole = mark_render_html(DOC, 0, NULL, 0);
     char *head = mark_render_range(DOC, 0, 2, NULL);
     char *tail = mark_render_range(DOC, 2, (size_t)-1, NULL); /* SIZE_MAX: to the end */
     ok(whole != NULL && head != NULL && tail != NULL, "partition renders are non-NULL");
@@ -256,7 +256,7 @@ static const char *const RICH =
     "```\n";
 
 static void math_and_diagrams_cross_the_boundary(void) {
-    char *html = mark_render_html(RICH, 0, NULL);
+    char *html = mark_render_html(RICH, 0, NULL, 0);
     ok(html != NULL, "mark_render_html(rich) returned NULL");
     if (html == NULL) {
         return;
@@ -288,7 +288,7 @@ static void a_failed_construct_arrives_as_a_badge(void) {
         "    A[[[Start --> B\n"
         "```\n";
 
-    char *html = mark_render_html(BROKEN, 0, NULL);
+    char *html = mark_render_html(BROKEN, 0, NULL, 0);
     ok(html != NULL, "mark_render_html(broken) returned NULL");
     if (html == NULL) {
         return;
@@ -307,7 +307,7 @@ static void a_failed_construct_arrives_as_a_badge(void) {
 static void a_prose_mermaid_fence_is_still_a_code_block(void) {
     /* RenderSvgError::NoDiagram means "not a diagram", not "error". */
     static const char *const PROSE = "```mermaid\nnot a diagram at all\n```\n";
-    char *html = mark_render_html(PROSE, 0, NULL);
+    char *html = mark_render_html(PROSE, 0, NULL, 0);
     ok(html != NULL, "mark_render_html(prose fence) returned NULL");
     if (html == NULL) {
         return;
@@ -355,7 +355,7 @@ static void themes_cross_the_boundary(void) {
     take_error(message, sizeof message);
     ok(strstr(message, "no theme named \"no-such-theme\"") != NULL, message);
 
-    ok(mark_render_html(DOC, 0, "no-such-theme") == NULL,
+    ok(mark_render_html(DOC, 0, "no-such-theme", 0) == NULL,
        "rendering in an unknown theme returned non-NULL");
     take_error(message, sizeof message);
     ok(strstr(message, "no theme named") != NULL, message);
@@ -367,8 +367,8 @@ static void themes_cross_the_boundary(void) {
  */
 static void code_carries_slots_not_colours(void) {
     static const char *const CODE = "```rust\nfn main() {}\n```\n";
-    char *dark = mark_render_html(CODE, 0, "dracula");
-    char *light = mark_render_html(CODE, 0, "github");
+    char *dark = mark_render_html(CODE, 0, "dracula", 0);
+    char *light = mark_render_html(CODE, 0, "github", 0);
     ok(dark != NULL && light != NULL, "themed render returned NULL");
     if (dark == NULL || light == NULL) {
         return;
@@ -551,6 +551,52 @@ static void git_json_rejects_a_null_path(void) {
     ok(strcmp(message, "path is null") == 0, "mark_git_json(NULL) message");
 }
 
+/*
+ * The standalone flag: `File > Export as HTML...` and `mark render --html` take
+ * this path, and a fragment where a document was expected is the failure that
+ * produces a file nobody can open.
+ */
+static void render_html_can_emit_a_whole_document(void)
+{
+    char *fragment = mark_render_html(DOC, 0, NULL, 0);
+    char *document = mark_render_html(DOC, 0, NULL, MARK_RENDER_STANDALONE);
+    ok(fragment != NULL && document != NULL, "mark_render_html returned NULL");
+    if (fragment == NULL || document == NULL) { return; }
+
+    ok(strstr(fragment, "<!DOCTYPE html>") == NULL,
+       "the default is a fragment, as the shell needs");
+    ok(strncmp(document, "<!DOCTYPE html>", 15) == 0,
+       "MARK_RENDER_STANDALONE must emit a document");
+    ok(strstr(document, "<style>") != NULL, "a standalone document inlines its styles");
+    ok(strstr(document, "@media print") != NULL, "and its print rules");
+    mark_free(fragment);
+    mark_free(document);
+}
+
+/*
+ * mark_links_json, the fourteenth function. What the shell's image allowlist
+ * is built from, so the shape matters more than the count.
+ */
+static void links_json_reports_images_and_links(void)
+{
+    char *all = mark_links_json("[a](x.md) ![b](y.png)", NULL, 0);
+    ok(all != NULL, "mark_links_json returned NULL");
+    if (all == NULL) { return; }
+    ok(strstr(all, "\"kind\":\"link\"") != NULL, "a link is reported");
+    ok(strstr(all, "\"kind\":\"image\"") != NULL, "an image is reported");
+    mark_free(all);
+
+    char *images = mark_links_json("[a](x.md) ![b](y.png)", NULL, MARK_LINKS_IMAGES);
+    ok(images != NULL, "mark_links_json(images) returned NULL");
+    if (images == NULL) { return; }
+    ok(strstr(images, "\"kind\":\"link\"") == NULL,
+       "MARK_LINKS_IMAGES must leave links out");
+    ok(strstr(images, "y.png") != NULL, "and keep the image");
+    mark_free(images);
+
+    ok(mark_links_json(NULL, NULL, 0) == NULL, "a null source is an error, not a crash");
+}
+
 int main(void) {
     printf("mark C ABI smoke test\n");
 
@@ -579,6 +625,8 @@ int main(void) {
     diff_flags_add_lines_and_a_document();
     git_json_answers_for_a_path_with_no_repository();
     git_json_rejects_a_null_path();
+    render_html_can_emit_a_whole_document();
+    links_json_reports_images_and_links();
 
     printf("  %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

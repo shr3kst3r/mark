@@ -123,6 +123,13 @@ let package = Package(
                 // resource must be under the target root, and one copy that
                 // ships is better than two that can disagree.
                 .copy("Resources/markdown-reference.md"),
+                // The one picture in the reference, and the reason it is there:
+                // `2026-09-01-document-images-over-a-scoped-scheme` notes that
+                // images were the one construct whose failure the reference
+                // could not show, because the Images section contained no
+                // image. Now it does, so a broken asset path breaks visibly on
+                // the page that claims it works.
+                .copy("Resources/markdown-reference-image.png"),
             ]
         ),
 

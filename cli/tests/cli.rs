@@ -1644,3 +1644,376 @@ fn watch_blocks_until_something_changes_then_exits() {
     assert!(text.contains("\"kind\":\"modified\""), "{text}");
     assert!(text.contains("notes.md"), "{text}");
 }
+
+// ---- the review's fixes and features -------------------------------------
+
+#[test]
+fn toc_insert_ignores_markers_inside_a_code_fence() {
+    // A document that *documents* the feature: the markers appear first as an
+    // example in a fence, then for real. The list belongs between the real
+    // ones and the fence must come back byte for byte.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("readme.md");
+    let fence = "```md\n<!-- toc -->\n<!-- /toc -->\n```\n";
+    let before =
+        format!("# Title\n\n{fence}\n<!-- toc -->\nold\n<!-- /toc -->\n\n## Alpha\n\n## Beta\n");
+    std::fs::write(&path, &before).expect("write");
+
+    let output = run(&["toc", path.to_str().unwrap(), "--insert"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let after = std::fs::read_to_string(&path).expect("read");
+    assert!(
+        after.contains(fence),
+        "the fenced example was rewritten:\n{after}"
+    );
+    assert!(
+        after.contains("<!-- toc -->\n- [Alpha](#alpha)\n- [Beta](#beta)\n<!-- /toc -->"),
+        "{after}"
+    );
+    assert!(!after.contains("\nold\n"), "{after}");
+}
+
+#[test]
+fn toc_insert_accepts_both_markers_on_one_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("doc.md");
+    std::fs::write(&path, "# T\n\n<!-- toc --><!-- /toc -->\n\n## A\n").expect("write");
+    let output = run(&["toc", path.to_str().unwrap(), "--insert"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let after = std::fs::read_to_string(&path).expect("read");
+    assert!(
+        after.contains("<!-- toc -->\n- [A](#a)\n<!-- /toc -->"),
+        "{after}"
+    );
+}
+
+#[test]
+fn watch_reports_a_deleted_file_as_removed_and_keeps_following() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("one.md");
+    std::fs::write(&path, "# One\n").expect("write");
+
+    let mut child = Command::new(binary())
+        .args([
+            "watch",
+            path.to_str().unwrap(),
+            "--interval",
+            "0.1",
+            "--follow",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::fs::remove_file(&path).expect("remove");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    // It used to exit 2 here. Still running is the point.
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "the watcher died when its file was deleted"
+    );
+    std::fs::write(&path, "# One again\n").expect("write");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    child.kill().expect("kill");
+    let output = child.wait_with_output().expect("wait");
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(text.contains("\"kind\":\"removed\""), "{text}");
+    assert!(text.contains("\"kind\":\"created\""), "{text}");
+}
+
+#[test]
+fn watch_refuses_standard_input() {
+    let output = run(&["watch", "-"]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("standard input"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A repository with one committed note, one edited, one untracked, and a
+/// symlinked directory pointing at the notes.
+fn git_fixture() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    std::fs::create_dir_all(root.join("notes")).expect("mkdir");
+    std::fs::write(root.join("notes/a.md"), "# A\nline\n").expect("write");
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    std::fs::write(root.join("notes/a.md"), "# A\nline\nmore\n").expect("write");
+    std::fs::write(root.join("notes/new.md"), "# New\n").expect("write");
+    std::os::unix::fs::symlink("notes", root.join("linked")).expect("symlink");
+    dir
+}
+
+#[test]
+fn diff_through_a_symlinked_directory_diffs_the_real_file() {
+    let dir = git_fixture();
+    // Spelled under the root as git reports it, so the lexical prefix strip
+    // would succeed and name `linked/a.md` — the path HEAD does not have.
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let via_link = root.join("linked/a.md");
+    let direct = root.join("notes/a.md");
+
+    let linked = run(&["diff", via_link.to_str().unwrap(), "--json"]);
+    let real = run(&["diff", direct.to_str().unwrap(), "--json"]);
+    assert_eq!(code(&linked), 0, "{}", stderr(&linked));
+    let linked: serde_json::Value = serde_json::from_str(&stdout(&linked)).expect("json");
+    let real: serde_json::Value = serde_json::from_str(&stdout(&real)).expect("json");
+    // One added line, not the whole file re-reported as new.
+    assert_eq!(real["added"], 1);
+    assert_eq!(linked["added"], real["added"], "{linked}");
+    assert_eq!(linked["removed"], real["removed"]);
+}
+
+#[test]
+fn diff_names_an_untracked_symlink_as_a_symlink_not_a_binary() {
+    let dir = git_fixture();
+    let output = run(&["diff", dir.path().to_str().unwrap(), "--stat", "--plain"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("symlink  linked"), "{text}");
+    assert!(!text.contains("binary"), "{text}");
+}
+
+#[test]
+fn diff_refuses_standard_input() {
+    let output = run(&["diff", "-"]);
+    assert_eq!(code(&output), 1);
+}
+
+#[test]
+fn hidden_files_are_listed_only_when_asked_for() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".notes")).expect("mkdir");
+    std::fs::write(
+        dir.path().join(".notes/secret.md"),
+        "# Secret\n\n- [ ] hush\n",
+    )
+    .expect("write");
+    std::fs::write(dir.path().join(".dot.md"), "# Dot\n\nneedle\n").expect("write");
+    std::fs::write(dir.path().join("plain.md"), "# Plain\n\n[to](.dot.md)\n").expect("write");
+    let root = dir.path().to_str().unwrap();
+
+    let ls = stdout(&run(&["ls", root, "--depth", "3"]));
+    assert!(!ls.contains(".notes"), "{ls}");
+    let ls = stdout(&run(&["ls", root, "--depth", "3", "--hidden"]));
+    assert!(ls.contains(".notes/"), "{ls}");
+    assert!(ls.contains("secret.md"), "{ls}");
+    assert!(ls.contains(".dot.md"), "{ls}");
+
+    assert!(!stdout(&run(&["tasks", root])).contains("hush"));
+    assert!(stdout(&run(&["tasks", root, "--hidden"])).contains("hush"));
+
+    assert!(!stdout(&run(&["grep", "needle", root])).contains(".dot.md"));
+    assert!(stdout(&run(&["grep", "needle", root, "--hidden"])).contains(".dot.md"));
+
+    // `links` walks the hidden file itself; `links --to` finds a hidden linker.
+    assert!(!stdout(&run(&["links", root])).contains("secret"));
+    let backlinks = stdout(&run(&[
+        "links",
+        "--to",
+        dir.path().join(".dot.md").to_str().unwrap(),
+        root,
+        "--hidden",
+    ]));
+    assert!(backlinks.contains("plain.md"), "{backlinks}");
+}
+
+#[test]
+fn check_at_addresses_a_task_by_its_marker_offset() {
+    let (_dir, path) = scratch();
+    let listing = run(&["tasks", path.to_str().unwrap(), "--json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listing)).expect("json");
+    let second = &rows[1];
+    let start = second["start"].as_u64().expect("start") as usize;
+    let end = second["end"].as_u64().expect("end") as usize;
+    let was_open = second["state"] == "open";
+
+    // Any byte inside the marker names it; the `start` is the documented one.
+    let output = run(&[
+        "check",
+        path.to_str().unwrap(),
+        "--at",
+        &(start + 1).to_string(),
+        "--json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let result: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
+    assert_eq!(result["index"], 1);
+    assert_eq!(result["offset"], start as u64 + 1);
+    assert_eq!(result["state"] == "done", was_open);
+    assert!(end > start);
+}
+
+#[test]
+fn check_at_a_byte_that_is_not_a_marker_exits_three_and_writes_nothing() {
+    let (_dir, path) = scratch();
+    let before = std::fs::read_to_string(&path).expect("read");
+    let output = run(&["check", path.to_str().unwrap(), "--at", "0"]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no task marker at byte 0"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), before);
+}
+
+#[test]
+fn check_at_and_item_are_exclusive_and_one_is_required() {
+    let (_dir, path) = scratch();
+    assert_eq!(code(&run(&["check", path.to_str().unwrap()])), 1);
+    assert_eq!(
+        code(&run(&[
+            "check",
+            path.to_str().unwrap(),
+            "--item",
+            "0",
+            "--at",
+            "3"
+        ])),
+        1
+    );
+}
+
+#[test]
+fn check_at_with_stamp_dates_the_item() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("t.md");
+    std::fs::write(&path, "- [ ] a\n- [ ] b\n").expect("write");
+    // `- [ ] b` starts at byte 8; its marker at 10.
+    let output = run(&[
+        "check",
+        path.to_str().unwrap(),
+        "--at",
+        "10",
+        "--on",
+        "--stamp",
+        "--today",
+        "2026-09-03",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "- [ ] a\n- [x] b @done(2026-09-03)\n"
+    );
+}
+
+#[test]
+fn grep_limit_caps_the_answer_and_says_so_on_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("many.md");
+    std::fs::write(&path, "# M\n\nhit\nhit\nhit\nhit\n").expect("write");
+    let output = run(&["grep", "hit", path.to_str().unwrap(), "--limit", "2"]);
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output).lines().count(), 2, "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("stopped after 2 matches"),
+        "{}",
+        stderr(&output)
+    );
+
+    let all = run(&["grep", "hit", path.to_str().unwrap()]);
+    assert_eq!(stdout(&all).lines().count(), 4);
+    assert_eq!(stderr(&all), "");
+}
+
+fn run_with_stdin(args: &[&str], input: &str) -> Output {
+    use std::io::Write as _;
+    let mut child = Command::new(binary())
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait")
+}
+
+#[test]
+fn a_dash_reads_the_document_from_standard_input() {
+    let doc = "# Piped\n\n## Section\n\n- [ ] todo\n- [x] done\n\nneedle here [link](x.md)\n";
+
+    let toc = run_with_stdin(&["toc", "-", "--json"], doc);
+    assert_eq!(code(&toc), 0, "{}", stderr(&toc));
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&stdout(&toc)).expect("json");
+    assert_eq!(entries[1]["anchor"], "section", "{}", stdout(&toc));
+
+    let render = run_with_stdin(&["render", "-", "--plain"], doc);
+    assert_eq!(code(&render), 0, "{}", stderr(&render));
+    assert!(stdout(&render).contains("Piped"));
+
+    let tasks = run_with_stdin(&["tasks", "-", "--open"], doc);
+    assert_eq!(code(&tasks), 0, "{}", stderr(&tasks));
+    assert!(stdout(&tasks).contains("todo"));
+    assert!(!stdout(&tasks).contains("done"));
+
+    let grep = run_with_stdin(&["grep", "needle", "-", "--json"], doc);
+    assert_eq!(code(&grep), 0, "{}", stderr(&grep));
+    let hits: Vec<serde_json::Value> = serde_json::from_str(&stdout(&grep)).expect("json");
+    assert_eq!(hits[0]["heading"], "Piped > Section", "{}", stdout(&grep));
+
+    let stats = run_with_stdin(&["stats", "-", "--json"], doc);
+    assert_eq!(code(&stats), 0, "{}", stderr(&stats));
+    let stats: serde_json::Value = serde_json::from_str(&stdout(&stats)).expect("json");
+    assert_eq!(stats["headings"], 2);
+
+    let links = run_with_stdin(&["links", "-", "--json"], doc);
+    assert_eq!(code(&links), 0, "{}", stderr(&links));
+    assert!(stdout(&links).contains("x.md"));
+
+    let normalize = run_with_stdin(&["normalize", "-"], "- [/] going\n");
+    assert_eq!(code(&normalize), 0, "{}", stderr(&normalize));
+    assert_eq!(stdout(&normalize), "- [ ] going @doing\n");
+}
+
+#[test]
+fn a_dash_is_refused_by_every_command_that_writes() {
+    for args in [
+        vec!["check", "-", "--item", "0"],
+        vec!["toc", "-", "--insert"],
+        vec!["normalize", "-", "--in-place"],
+    ] {
+        let output = run_with_stdin(&args, "- [ ] a\n");
+        assert_eq!(code(&output), 1, "{args:?}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("standard input"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+    // And no file called `-` was left behind in the working directory.
+    assert!(!Path::new("-").exists());
+}

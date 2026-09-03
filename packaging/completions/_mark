@@ -123,11 +123,13 @@ _mark() {
             '--today=[what today means, for --overdue and +Nd]:date:' \
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
+            '--hidden[include dotfiles and dot-directories]' \
             '1:path:_files'
           ;;
         check)
           _arguments \
-            '--item=[task index in document order]:index:' \
+            '(--at)--item=[task index in document order]:index:' \
+            '(--item)--at=[byte offset inside the task marker, from mark tasks --json]:byte:' \
             '(--off --toggle --state)--on[check the box]' \
             '(--on --toggle --state)--off[uncheck the box]' \
             '(--on --off --state)--toggle[flip it (the default)]' \
@@ -151,6 +153,7 @@ _mark() {
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
             '--all[include non-markdown files]' \
+            '--hidden[include dotfiles and dot-directories]' \
             '--git[add changed lines against git HEAD]' \
             '1:dir:_files -/'
           ;;
@@ -160,6 +163,7 @@ _mark() {
             '--interval=[seconds between polls]:seconds:' \
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
+            '--hidden[include dotfiles and dot-directories]' \
             '1:path:_files'
           ;;
         toc)
@@ -174,7 +178,9 @@ _mark() {
           _arguments \
             '--json[machine-readable output]' \
             {-i,--ignore-case}'[case-insensitive matching]' \
+            '--limit=[stop after this many matches]:count:' \
             '--depth=[levels to descend]:depth:' \
+            '--hidden[include dotfiles and dot-directories]' \
             '1:pattern:' \
             '2:path:_files'
           ;;
@@ -184,6 +190,7 @@ _mark() {
             '--images[only images, leaving links out]' \
             '--json[machine-readable output]' \
             '--depth=[levels to descend]:depth:' \
+            '--hidden[include dotfiles and dot-directories]' \
             '1:path:_files'
           ;;
         doctor|reload|sidebar)
@@ -192,6 +199,8 @@ _mark() {
         open)
           _arguments \
             '--tab[add the tab without moving the reader]' \
+            '(--line)--anchor=[scroll to a heading once open]:anchor:' \
+            '(--anchor)--line=[scroll to a source line once open]:line:' \
             '--json[machine-readable output]' \
             '1:path:_files'
           ;;

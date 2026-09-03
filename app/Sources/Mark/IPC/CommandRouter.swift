@@ -304,8 +304,11 @@ public enum Command: Equatable, Sendable {
     /// `mark doctor` and by the integration checks to wait for a launch.
     case ping
     /// `background` is `mark open --tab`: make the tab, leave the selection
-    /// and the window where they are.
-    case open(path: String, background: Bool)
+    /// and the window where they are. `anchor` is `mark open --anchor` (or
+    /// `PATH#anchor`) and `offset` is `--line`, already turned into a byte by
+    /// the CLI: where to put the reader once the document is open, so a
+    /// script does not have to race `mark goto` against the render.
+    case open(path: String, background: Bool, anchor: String?, offset: Int?)
     case tabList
     case tabSelect(TabSelector)
     case tabClose(TabSelector)
@@ -334,7 +337,22 @@ public enum Command: Equatable, Sendable {
 
         case "open":
             let path = try require("path", in: arguments, for: name)
-            return .open(path: path, background: flag("tab", in: arguments))
+            // The `#` is how anchors are written everywhere else, so it is
+            // tolerated here the way `goto` tolerates it.
+            let anchor = arguments["anchor"]
+                .map { $0.hasPrefix("#") ? String($0.dropFirst()) : $0 }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            var offset: Int?
+            if let raw = arguments["offset"] {
+                guard let value = Int(raw), value >= 0 else {
+                    throw CommandFailure(
+                        .badArguments, "open: offset must be a byte count, not \(raw)")
+                }
+                offset = value
+            }
+            return .open(
+                path: path, background: flag("tab", in: arguments), anchor: anchor,
+                offset: offset)
 
         case "tab-list":
             return .tabList
@@ -669,6 +687,13 @@ public protocol CommandTarget: AnyObject {
     ///   not in the document — ADR-3's own example of a failure the CLI must be
     ///   able to exit non-zero on.
     func scrollSelectedDocument(toAnchor anchor: String) async throws -> TabSummary
+    /// `mark open --anchor`: the document at `path`, which `openDocument` has
+    /// just returned, put at a heading — whether or not it is the selected
+    /// tab, which is what `--tab --anchor` means. Same throw as above.
+    func scrollDocument(at path: String, toAnchor anchor: String) async throws
+    /// `mark open --line`, as a byte offset into the source: the same route the
+    /// editor uses to keep the preview on the line under the caret.
+    func scrollDocument(at path: String, toByte offset: Int) async throws
     func reloadSelectedDocument() async throws -> Int
     /// M8. The sidebar's root, breadcrumb, and history.
     func sidebarSummary() -> SidebarSummary
@@ -914,12 +939,25 @@ public final class CommandRouter {
                 "commands": .int(commandCount),
             ]
 
-        case .open(let path, let background):
+        case .open(let path, let background, let anchor, let offset):
             let url = Self.fileURL(from: path)
             let tabs = { JSONValue.int(target.documentTabs().count) }
             switch try target.openDocument(at: url, background: background) {
             case .tab(let tab):
-                return ["tab": tab.json, "tabs": tabs()]
+                var result: [String: JSONValue] = ["tab": tab.json, "tabs": tabs()]
+                // After the open, on the tab it made: the page has to exist
+                // before it can be scrolled. A heading that is not there is
+                // the same refusal `goto` gives — the tab stays open, at the
+                // top, and the CLI exits 5 saying so.
+                if let anchor {
+                    try await target.scrollDocument(at: tab.path, toAnchor: anchor)
+                    result["anchor"] = .string(anchor)
+                }
+                if let offset {
+                    try await target.scrollDocument(at: tab.path, toByte: offset)
+                    result["offset"] = .int(offset)
+                }
+                return result
             case .sidebar(let sidebar):
                 // Deliberately the same key `nav` and `sidebar` answer under,
                 // so a caller that already understands one understands this.

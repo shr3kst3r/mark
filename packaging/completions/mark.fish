@@ -82,6 +82,8 @@ complete -c mark -n '__fish_seen_subcommand_from tasks' -l sort -r -a 'due prior
 complete -c mark -n '__fish_seen_subcommand_from tasks' -l today -r -d 'What today means, for --overdue and +Nd'
 complete -c mark -n '__fish_seen_subcommand_from tasks ls grep links watch' -l depth -r -d 'Levels to descend'
 complete -c mark -n '__fish_seen_subcommand_from ls' -l all -d 'Include non-markdown files'
+complete -c mark -n '__fish_seen_subcommand_from ls tasks grep links watch' -l hidden -d 'Include dotfiles and dot-directories'
+complete -c mark -n '__fish_seen_subcommand_from grep' -l limit -r -d 'Stop after this many matches'
 complete -c mark -n '__fish_seen_subcommand_from grep' -s i -l ignore-case -d 'Case-insensitive matching'
 complete -c mark -n '__fish_seen_subcommand_from links' -l to -r -d 'Report what points at this file'
 complete -c mark -n '__fish_seen_subcommand_from toc' -l insert -d 'Write the list into the document'
@@ -93,6 +95,7 @@ complete -c mark -n '__fish_seen_subcommand_from links' -l broken -d 'Only refer
 complete -c mark -n '__fish_seen_subcommand_from links' -l images -d 'Only images, leaving links out'
 
 complete -c mark -n '__fish_seen_subcommand_from check' -l item -r -d 'Task index in document order'
+complete -c mark -n '__fish_seen_subcommand_from check' -l at -r -d 'Byte offset inside the task marker (mark tasks --json start)'
 complete -c mark -n '__fish_seen_subcommand_from check' -l on -d 'Check the box'
 complete -c mark -n '__fish_seen_subcommand_from check' -l off -d 'Uncheck the box'
 complete -c mark -n '__fish_seen_subcommand_from check' -l toggle -d 'Flip it (the default)'
@@ -106,6 +109,8 @@ complete -c mark -n '__fish_seen_subcommand_from normalize' -l in-place -d 'Rewr
 complete -c mark -n '__fish_seen_subcommand_from normalize' -l check -d 'Report what would change and write nothing'
 
 complete -c mark -n '__fish_seen_subcommand_from open' -l tab -d 'Add the tab without moving the reader'
+complete -c mark -n '__fish_seen_subcommand_from open' -l anchor -r -d 'Scroll to a heading once open'
+complete -c mark -n '__fish_seen_subcommand_from open' -l line -r -d 'Scroll to a source line once open'
 
 complete -c mark -n '__fish_seen_subcommand_from nav' -l up -d "The current root's parent"
 complete -c mark -n '__fish_seen_subcommand_from nav' -l parent -d "The current root's parent"

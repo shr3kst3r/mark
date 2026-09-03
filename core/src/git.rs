@@ -735,20 +735,26 @@ pub fn base_bytes(repo: &Repo, path: &Path, timeout: Duration) -> Result<Option<
 }
 
 /// `path` relative to the repository root. `None` when it is not inside it.
-fn relative_to(repo: &Repo, path: &Path) -> Option<PathBuf> {
+///
+/// Canonical **first**, lexical as the fallback. A path through a symlinked
+/// directory inside the repository — `linked/a.md` where `linked -> notes` —
+/// is lexically inside the root and names nothing git tracks, so stripping the
+/// prefix as spelled produced a path HEAD has never heard of and the whole file
+/// read as added. The root itself may also be a symlinked or
+/// `/private`-prefixed spelling of the same directory — `$TMPDIR` on macOS is
+/// exactly this. The lexical answer is kept for the one case the canonical one
+/// cannot give: a tracked file that has been deleted has no real path.
+pub fn relative_to(repo: &Repo, path: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if let (Ok(root), Ok(real)) = (fs::canonicalize(&repo.root), fs::canonicalize(&absolute))
+        && let Ok(relative) = real.strip_prefix(&root)
+    {
+        return Some(relative.to_path_buf());
+    }
     absolute
         .strip_prefix(&repo.root)
         .ok()
         .map(Path::to_path_buf)
-        .or_else(|| {
-            // The root may be a symlinked or `/private`-prefixed spelling of the
-            // same directory — `$TMPDIR` on macOS is exactly this. Compare
-            // canonical forms before giving up.
-            let root = fs::canonicalize(&repo.root).ok()?;
-            let real = fs::canonicalize(&absolute).ok()?;
-            real.strip_prefix(&root).ok().map(Path::to_path_buf)
-        })
 }
 
 // ---------------------------------------------------------------------------

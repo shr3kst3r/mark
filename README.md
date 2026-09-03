@@ -14,7 +14,7 @@ after you stop typing. The `mark` CLI does everything the window does, and
 drives the running app over a Unix socket.
 
 **Status: complete.** All ten milestones are implemented and tested —
-627 Rust tests, 885 Swift tests, 48 integration checks, and committed
+651 Rust tests, 895 Swift tests, 48 integration checks, and committed
 performance gates.
 
 ## Install
@@ -319,7 +319,10 @@ source pane — and **File ▸ Export as HTML…** writes exactly what
 cannot disagree. **Export as PDF…** is its own item rather than being left to
 the print panel's PDF menu, which is a place people do not find. Paper gets its
 own palette: a dark theme is a screen decision, and printing one as laid out is
-a page of toner.
+a page of toner. **Edit ▸ Copy as HTML** (⌥⇧⌘C) puts the rendered document on
+the clipboard — the fragment, not a whole page, because what you paste is going
+into something that already has a `<head>` — as both HTML and plain text, so a
+rich-text field gets the markup interpreted and an editor gets it as text.
 
 **Text size.** ⌘+ and ⌘− walk a fixed ladder from 60% to 200%, and ⌘0 goes back
 to actual size. Both panes move together — the preview through `pageZoom`, the
@@ -481,7 +484,8 @@ disagree about which task you clicked.
 **Settings** on ⌘, holds the two things that could previously be changed only
 by editing a constant or exporting an environment variable: how long autosave
 waits after you stop typing, and how many tabs keep a live web view (about
-52 MB each). Everything else stays where it is — the theme is in **View ▸
+52 MB each) — and a checkbox for the line numbers, which ⌃⌘L also flips.
+Everything else stays where it is — the theme is in **View ▸
 Theme** because you want to see it applied as you arrow through it, and the
 sidebar's switches are beside the tree they change. `MARK_RESIDENT_TABS` still
 wins when it is set, and the window says so rather than showing a control that
@@ -494,22 +498,26 @@ come back on relaunch, from our own JSON file rather than `NSWindowRestoration`.
 ## The CLI
 
 Answered locally, in milliseconds, with no app running — which is the situation a
-script or an agent is usually in:
+script or an agent is usually in. Wherever a command takes a file, `-` is
+standard input — `generate | mark toc - --json` — for every command that only
+reads; the ones that write refuse it rather than leave a file called `-` behind.
+Every command that walks a directory skips dotfiles and honours `.gitignore`,
+and `--hidden` is the CLI half of the sidebar's **Show Hidden Files**:
 
 | Command | What it does |
 |---|---|
 | `mark render <f> [--html\|--ansi\|--plain] [--prefix N] [--theme NAME]` | A styled document on stdout. `--html` is self-contained: both palettes, inline MathML and SVG, no JavaScript. |
-| `mark toc <f> [--json] [--insert]` | The heading tree, with anchors, byte offsets, and block ids. `--insert` writes the list *into* the document between `<!-- toc -->` and `<!-- /toc -->`, which must already be there — it will not guess where one belongs. |
-| `mark tasks [path] [--open] [--state <s>] [--json]` | Every task: path, index, state, text, byte span. `--open` is everything still outstanding — open, in progress, or blocked. |
+| `mark toc <f> [--json] [--insert]` | The heading tree, with anchors, byte offsets, and block ids. `--insert` writes the list *into* the document between `<!-- toc -->` and `<!-- /toc -->`, which must already be there — it will not guess where one belongs, and a copy of the markers inside a code fence is an example, not the place. |
+| `mark tasks [path] [--open] [--state <s>] [--hidden] [--json]` | Every task: path, index, state, text, byte span. `--open` is everything still outstanding — open, in progress, or blocked. |
 | `mark tasks [path] [--tag @t] [--priority N] [--due-before\|--due-after <when>] [--overdue] [--no-due] [--sort due\|priority\|state\|index] [--today YYYY-MM-DD]` | The metadata filters. `<when>` is a date, `today`, or `+Nd`. `--today` is the only place a date comparison reads a clock, and naming it makes the answer testable. |
-| `mark check <f> --item N [--on\|--off\|--toggle\|--state <s>] [--stamp] [--json]` | Flips one checkbox by changing exactly one byte. `--state` reaches the other three; `--stamp` also appends `@done(YYYY-MM-DD)`, in the same atomic write. Refuses, with exit 6, if another `mark` holds the file — see below. |
+| `mark check <f> --item N\|--at BYTE [--on\|--off\|--toggle\|--state <s>] [--stamp] [--json]` | Flips one checkbox by changing exactly one byte. `--at` names the task by its marker's byte offset — the `start` in `mark tasks --json` — which survives edits that renumber `--item`. `--state` reaches the other three; `--stamp` also appends `@done(YYYY-MM-DD)`, in the same atomic write. Refuses, with exit 6, if another `mark` holds the file — see below. |
 | `mark normalize <f> [--gfm] [--in-place] [--check]` | Rewrites `[-]`, `[/]` and `[?]` as GFM, losslessly: struck-and-ticked, or `[ ]` with a `@doing`/`@blocked` tag. **Writes to stdout** unless `--in-place`. |
-| `mark ls [dir] [--json] [--depth N] [--all] [--git]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. `--git` adds each file's `+12 −3` against `HEAD`. |
+| `mark ls [dir] [--json] [--depth N] [--all] [--hidden] [--git]` | Markdown files with titles and outstanding/active task counts — `--json` counts every state separately. `--git` adds each file's `+12 −3` against `HEAD`. |
 | `mark diff [path] [--html\|--ansi\|--plain] [--json] [--stat] [--tracked]` | What changed against git `HEAD`. A **file** shows its changed lines; a **directory** shows one row per changed file. `--html` is the *rendered* diff — removed blocks struck through in place — not patch text. Exits 0 outside a repository. |
-| `mark grep <pat> [path] [--json] [-i]` | Regex search, reporting the heading each match sits under. |
-| `mark links [path] [--broken] [--images] [--json]` | Every link and image, and whether its target is there. A directory is walked. External URLs are reported and never fetched, so `--broken` means a local path that is missing. |
+| `mark grep <pat> [path] [--json] [-i] [--limit N] [--hidden]` | Regex search, reporting the heading each match sits under. `--limit` stops after N hits across the tree and says so on stderr. |
+| `mark links [path] [--broken] [--images] [--hidden] [--json]` | Every link and image, and whether its target is there. A directory is walked. External URLs are reported and never fetched, so `--broken` means a local path that is missing. |
 | `mark links --to <f> [path] [--json]` | The other direction: what points **at** this file. Matched on the resolved path, so a link written from a sibling directory counts. |
-| `mark watch [path] [--follow] [--interval S]` | Block until something changes, then say what changed and exit. `while mark watch notes/; do just build; done`. Polls, for the reason the sidebar does. |
+| `mark watch [path] [--follow] [--interval S] [--hidden]` | Block until something changes, then say what changed and exit. `while mark watch notes/; do just build; done`. Polls, for the reason the sidebar does. A watched file that is deleted is `removed`, and `created` when it comes back — a `--follow` loop outlives an editor that saves by delete-and-recreate. |
 | `mark stats <f> [--json]` | Per-stage timings and counters, plus words, characters, lines, and reading time. Counted from the parse, so code and frontmatter are not prose. |
 | `mark doctor [--json]` | Environment report to paste into a bug report: socket path and length, whether the app is running, the resolved `.app`, every bundle registered as `dev.mark.app`, theme dir, asset load time. |
 | `mark theme --list\|--show <name>\|--import <file> [--json]` | List, inspect, or convert a `.tmTheme` or base16 scheme. |
@@ -519,7 +527,7 @@ is none, and never stealing focus:
 
 | Command | What it does |
 |---|---|
-| `mark open <path> [--tab] [--json]` | A file opens in a tab; a **directory** roots the sidebar there. The reply says which. `--tab` opens in the background. |
+| `mark open <path> [--tab] [--anchor A\|--line N] [--json]` | A file opens in a tab; a **directory** roots the sidebar there. The reply says which. `--tab` opens in the background. `--anchor` (or `notes.md#install`) and `--line` put the reader at a heading or a source line once the page exists — `mark goto` without the race, and it works on a background tab too. |
 | `mark tab list [--json]` | Every open tab: index, title, open/total tasks, whether it holds a web view. |
 | `mark tab select\|close <index\|path> [--json]` | Move or close a tab. `close` with no argument closes the selected one. |
 | `mark goto <anchor> [--json]` | Scrolls the front document to a heading. Exits non-zero if there is no such anchor. |
@@ -538,8 +546,11 @@ per-stage timings to stderr, never to stdout, so it cannot corrupt `--json`.
 grew when `[/]`, `[-]` and `[?]` became markers. A document that gains one of
 those renumbers every task below it, so an index held across such an edit — in a
 script, or in a listing you printed a minute ago — is stale. Re-read
-`mark tasks` rather than carrying an index across a change to the file. Measured
-blast radius on documents that exist today: zero, since none of them use those
+`mark tasks` rather than carrying an index across a change to the file — or
+carry the marker's byte offset instead: `mark check --at <start>` names the
+task by where its `[ ]` is, resolves it against the same bytes it writes, and
+refuses with exit 3 if those bytes are no longer a marker. Measured blast
+radius on documents that exist today: zero, since none of them use those
 markers yet.
 
 **Writes take an `flock(2)`.** A window with unsaved edits holds an exclusive

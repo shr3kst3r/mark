@@ -28,12 +28,12 @@ struct CommandRouterTests {
             (
                 #"{"version":1,"command":"open","arguments":{"path":"/n.md"}}"#,
                 "mark://open?path=/n.md",
-                .open(path: "/n.md", background: false)
+                .open(path: "/n.md", background: false, anchor: nil, offset: nil)
             ),
             (
                 #"{"version":1,"command":"open","arguments":{"path":"/n.md","tab":true}}"#,
                 "mark://open?path=/n.md&tab=1",
-                .open(path: "/n.md", background: true)
+                .open(path: "/n.md", background: true, anchor: nil, offset: nil)
             ),
             (
                 #"{"version":1,"command":"tab-list","arguments":{}}"#,
@@ -137,12 +137,12 @@ struct CommandRouterTests {
         // `?tab` with no value at all, which is how a hand-written URL looks.
         let bare = try CommandRequest.decode(url: #require(URL(string: "mark://open?path=/n.md&tab")))
         #expect(try Command.make(name: bare.name, arguments: bare.arguments)
-            == .open(path: "/n.md", background: true))
+            == .open(path: "/n.md", background: true, anchor: nil, offset: nil))
 
         let explicitFalse = try CommandRequest.decode(
             line: #"{"version":1,"command":"open","arguments":{"path":"/n.md","tab":false}}"#)
         #expect(try Command.make(name: explicitFalse.name, arguments: explicitFalse.arguments)
-            == .open(path: "/n.md", background: false))
+            == .open(path: "/n.md", background: false, anchor: nil, offset: nil))
     }
 
     @Test("mark:open with no slashes decodes too")
@@ -237,6 +237,70 @@ struct CommandRouterTests {
 
     /// The other half of plan §5's test: not just "the same `Command`", but
     /// "the same thing happened".
+    @Test("open with an anchor scrolls the tab it made, and says so")
+    func openAtAnchor() async throws {
+        let target = FakeCommandTarget()
+        target.anchors = ["install"]
+        let router = CommandRouter(target: target)
+
+        let json = try decode(
+            await router.handle(
+                line: ##"{"version":1,"command":"open","arguments":{"path":"/a.md","anchor":"#install","tab":true}}"##
+            ))
+        #expect(json["ok"] as? Bool == true)
+        let result = try #require(json["result"] as? [String: Any])
+        #expect(result["anchor"] as? String == "install")
+        // Background: the scroll is addressed to the tab, not to the selection.
+        #expect(target.log == ["open /a.md background", "scroll /a.md #install"])
+
+        // A heading that is not there: the tab is open, the reply is the same
+        // refusal `goto` gives, and the CLI can exit 5 on it.
+        let missing = try decode(
+            await router.handle(
+                line: #"{"version":1,"command":"open","arguments":{"path":"/b.md","anchor":"nope"}}"#
+            ))
+        #expect(missing["ok"] as? Bool == false)
+        let error = try #require(missing["error"] as? [String: Any])
+        #expect(error["code"] as? String == "anchor-not-found")
+        #expect(target.tabs.contains { $0.path == "/b.md" })
+    }
+
+    @Test("open with a byte offset scrolls there, and a bad offset is refused")
+    func openAtOffset() async throws {
+        let target = FakeCommandTarget()
+        let router = CommandRouter(target: target)
+        let json = try decode(
+            await router.handle(
+                line: #"{"version":1,"command":"open","arguments":{"path":"/a.md","offset":"412"}}"#
+            ))
+        #expect(json["ok"] as? Bool == true)
+        let result = try #require(json["result"] as? [String: Any])
+        #expect(result["offset"] as? Int == 412)
+        #expect(target.log == ["open /a.md foreground", "scroll /a.md @412"])
+
+        let bad = try decode(
+            await router.handle(
+                line: #"{"version":1,"command":"open","arguments":{"path":"/a.md","offset":"-1"}}"#
+            ))
+        #expect(bad["ok"] as? Bool == false)
+        let error = try #require(bad["error"] as? [String: Any])
+        #expect(error["code"] as? String == "bad-arguments")
+    }
+
+    @Test("mark://open?anchor= and the socket's anchor argument are the same request")
+    func openAnchorViaURL() async throws {
+        let viaSocket = FakeCommandTarget()
+        let viaURL = FakeCommandTarget()
+        viaSocket.anchors = ["x"]
+        viaURL.anchors = ["x"]
+        _ = await CommandRouter(target: viaSocket).handle(
+            line: #"{"version":1,"command":"open","arguments":{"path":"/a.md","anchor":"x"}}"#)
+        _ = await CommandRouter(target: viaURL).handle(
+            url: try #require(URL(string: "mark://open?path=/a.md&anchor=x")))
+        #expect(viaSocket.log == viaURL.log)
+        #expect(viaSocket.log.last == "scroll /a.md #x")
+    }
+
     @Test("the socket and mark:// produce identical effects")
     func identicalEffects() async throws {
         let viaSocket = FakeCommandTarget()
@@ -612,6 +676,25 @@ final class FakeCommandTarget: CommandTarget {
                 detail: ["anchor": .string(anchor)])
         }
         return selected
+    }
+
+    func scrollDocument(at path: String, toAnchor anchor: String) async throws {
+        log.append("scroll \(path) #\(anchor)")
+        guard tabs.contains(where: { $0.path == path }) else {
+            throw CommandFailure(.noDocument, "\(path) is not open")
+        }
+        guard anchors.contains(anchor) else {
+            throw CommandFailure(
+                .anchorNotFound, "no anchor \"\(anchor)\"",
+                detail: ["anchor": .string(anchor)])
+        }
+    }
+
+    func scrollDocument(at path: String, toByte offset: Int) async throws {
+        log.append("scroll \(path) @\(offset)")
+        guard tabs.contains(where: { $0.path == path }) else {
+            throw CommandFailure(.noDocument, "\(path) is not open")
+        }
     }
 
     func reloadSelectedDocument() async throws -> Int {

@@ -67,18 +67,18 @@ _mark_complete() {
         toc|stats) options="--json" ;;
         tasks)
             options="--open --state --tag --priority --due-before --due-after"
-            options="${options} --overdue --no-due --sort --today --json --depth"
+            options="${options} --overdue --no-due --sort --today --json --depth --hidden"
             ;;
-        check) options="--item --on --off --toggle --state --stamp --today --json" ;;
+        check) options="--item --at --on --off --toggle --state --stamp --today --json" ;;
         # `normalize` writes to stdout unless --in-place; --check writes nowhere.
         normalize) options="--gfm --in-place --check" ;;
-        ls) options="--json --depth --all --git" ;;
-        grep) options="--json --ignore-case --depth" ;;
+        ls) options="--json --depth --all --hidden --git" ;;
+        grep) options="--json --ignore-case --limit --depth --hidden" ;;
         toc) options="--json --insert --min-level --max-level" ;;
-        links) options="--to --broken --images --json --depth" ;;
-        watch) options="--follow --interval --json --depth" ;;
+        links) options="--to --broken --images --json --depth --hidden" ;;
+        watch) options="--follow --interval --json --depth --hidden" ;;
         doctor|reload|sidebar) options="--json" ;;
-        open) options="--tab --json" ;;
+        open) options="--tab --anchor --line --json" ;;
         goto) options="--json" ;;
         nav) options="--up --parent --back --forward --json" ;;
         theme) options="--system --list --show --import --json" ;;

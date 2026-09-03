@@ -1656,6 +1656,60 @@ extension MainWindowController: CommandTarget {
         return summary(for: tab)
     }
 
+    /// The tab holding `path`, in this window or any other, with the
+    /// controller that owns it.
+    private func locateTab(at path: String) throws -> (MainWindowController, DocumentTab) {
+        let url = CommandRouter.fileURL(from: path)
+        if let tab = tab(for: url) { return (self, tab) }
+        if let owner = windows?.controllers.first(where: { $0.tab(for: url) != nil }),
+            let tab = owner.tab(for: url)
+        {
+            return (owner, tab)
+        }
+        throw CommandFailure(
+            .noDocument, "\(url.lastPathComponent) is not open",
+            detail: ["path": .string(url.path)])
+    }
+
+    /// The page of a tab `openDocument` just made, once it is there to be
+    /// scrolled. A tab opened in the background is hydrated too — the open
+    /// costs the web view either way — so this does not depend on selection.
+    private func readyView(of tab: DocumentTab) async throws -> DocumentView {
+        guard let view = tab.documentView else {
+            throw CommandFailure(
+                .noDocument, "\(tab.title) has no page to scroll",
+                detail: ["path": .string(tab.url.path)])
+        }
+        await view.awaitReady()
+        return view
+    }
+
+    public func scrollDocument(at path: String, toAnchor anchor: String) async throws {
+        let (_, tab) = try locateTab(at: path)
+        let view = try await readyView(of: tab)
+        let found: Bool
+        do {
+            found = try await view.scrollToAnchor(anchor)
+        } catch {
+            throw CommandFailure(
+                .internalError, "scrolling to \"\(anchor)\" failed: \(String(describing: error))")
+        }
+        guard found else {
+            throw CommandFailure(
+                .anchorNotFound, "\(tab.title) has no heading #\(anchor)",
+                detail: ["anchor": .string(anchor), "path": .string(tab.url.path)])
+        }
+    }
+
+    public func scrollDocument(at path: String, toByte offset: Int) async throws {
+        let (_, tab) = try locateTab(at: path)
+        let view = try await readyView(of: tab)
+        // The same route Find in Folder and the editor pane take: a byte, put
+        // at the top of the viewport, so a line inside a diagram or a table
+        // lands where the bytes say rather than where a percentage would guess.
+        view.follow(sourceByte: offset)
+    }
+
     public func closeTab(matching selector: TabSelector) throws -> TabSummary {
         let tab = try resolve(selector)
         // Captured before the close, because afterwards the tab has no index.
@@ -2625,6 +2679,34 @@ extension MainWindowController: NSMenuItemValidation {
         operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
+    /// **Edit ▸ Copy as HTML** — the rendered document, on the clipboard.
+    ///
+    /// The *fragment* rather than the standalone page Export writes: what is
+    /// pasted is going into something that already has a `<head>` — a CMS
+    /// field, an email, a web page — and a second one there is noise. Both
+    /// flavours are put up, so a rich-text target gets the markup interpreted
+    /// and a plain editor gets it as text, which is the case people mean when
+    /// they reach for this.
+    @objc public func copyAsHTML(_ sender: Any?) {
+        guard let tab = tabs.selected, let source = sourceForOutput(tab) else {
+            NSSound.beep()
+            return
+        }
+        do {
+            let html = try MarkCore.renderHTML(
+                source: source, theme: ThemeController.shared.name, standalone: false)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(html, forType: .html)
+            pasteboard.setString(html, forType: .string)
+            Log.app.info(
+                "copied \(tab.title, privacy: .public) as HTML: \(html.utf8.count) bytes")
+        } catch {
+            Log.app.error("copy as HTML failed: \(String(describing: error), privacy: .public)")
+            NSSound.beep()
+        }
+    }
+
     /// **File ▸ Export as HTML…** — the same bytes `mark render --html` writes.
     @objc public func exportAsHTML(_ sender: Any?) {
         guard let tab = tabs.selected, let source = sourceForOutput(tab) else {
@@ -2970,9 +3052,9 @@ extension MainWindowController: NSMenuItemValidation {
             // Both go through the page's layout, so both need a resident tab.
             // A dehydrated one has no web view and would print a blank sheet.
             return tabs.selected?.webView != nil
-        case #selector(exportAsHTML(_:)):
-            // This one does not: it renders from source through the core, so it
-            // works on a tab whose web view has been evicted.
+        case #selector(exportAsHTML(_:)), #selector(copyAsHTML(_:)):
+            // These do not: they render from source through the core, so they
+            // work on a tab whose web view has been evicted.
             return tabs.selected != nil
         case #selector(toggleEditorPane(_:)):
             item.title = isEditorVisible ? "Hide Editor" : "Show Editor"

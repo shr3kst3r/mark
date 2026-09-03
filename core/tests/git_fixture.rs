@@ -559,3 +559,25 @@ fn a_quiet_repository_costs_a_bounded_number_of_processes() {
          Spent {spent}"
     );
 }
+
+#[test]
+fn base_bytes_through_a_symlinked_directory_finds_the_tracked_file() {
+    needs_git!();
+    let temp = fixture();
+    let repo = git::discover(temp.path()).expect("repo");
+    // The repository as git spells it, so the lexical `strip_prefix` would
+    // succeed and hand back `linked/edit.md` — a path HEAD has never heard of.
+    let root = fs::canonicalize(temp.path()).expect("canonical root");
+    std::os::unix::fs::symlink(&root, root.join("linked")).expect("symlink");
+
+    let via_link = git::base_bytes(&repo, &root.join("linked/edit.md"), git::DEFAULT_TIMEOUT)
+        .expect("no error");
+    let direct = git::base_bytes(&repo, &root.join("edit.md"), git::DEFAULT_TIMEOUT)
+        .expect("no error");
+    assert_eq!(via_link.as_deref(), Some("1\n2\n3\n"));
+    assert_eq!(via_link, direct);
+    assert_eq!(
+        git::relative_to(&repo, &root.join("linked/edit.md")).as_deref(),
+        Some(Path::new("edit.md"))
+    );
+}

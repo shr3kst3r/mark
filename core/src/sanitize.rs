@@ -242,7 +242,7 @@ fn markup_at(html: &str, start: usize) -> Option<(String, usize)> {
     // which matters: `<img src=x` with no `>` must not fall through to the
     // text path, where the `<` would be escaped and the rest emitted as
     // markup by a later concatenation.
-    let close = html[name_end..].find('>').map(|i| name_end + i);
+    let close = tag_end(html, name_end);
     let (inside, after) = match close {
         Some(at) => (&html[name_end..at], at + 1),
         None => (&html[name_end..], html.len()),
@@ -274,6 +274,30 @@ fn markup_at(html: &str, start: usize) -> Option<(String, usize)> {
     }
     tag.push('>');
     Some((tag, after))
+}
+
+/// Where the tag whose name ends at `from` closes: the first `>` that is not
+/// inside a quoted attribute value. `None` for an unterminated tag.
+///
+/// Quote-aware because `>` is legal inside a value — `title="a > b"` — and a
+/// filter that stopped at the first one would drop every attribute after it
+/// and emit the remainder as text, which is what this used to do. A quote
+/// that is never closed swallows the rest of the fragment, exactly as a
+/// browser's tokenizer treats it, and the caller then handles the tag as
+/// unterminated.
+fn tag_end(html: &str, from: usize) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (offset, byte) in bytes[from..].iter().enumerate() {
+        match (quote, *byte) {
+            (Some(open), byte) if byte == open => quote = None,
+            (Some(_), _) => {}
+            (None, b'"' | b'\'') => quote = Some(*byte),
+            (None, b'>') => return Some(from + offset),
+            (None, _) => {}
+        }
+    }
+    None
 }
 
 /// Whether `attribute` may appear on `tag`.
@@ -486,6 +510,23 @@ mod tests {
         assert!(!out.contains("onerror"), "{out}");
         let out = fragment(r#"<a href='x' onclick='alert(1)'>x</a>"#);
         assert!(!out.contains("onclick"), "{out}");
+    }
+
+    #[test]
+    fn a_closing_bracket_inside_a_quoted_value_does_not_end_the_tag() {
+        let out = fragment(r#"<a title="a > b" href="https://e.com">x</a>"#);
+        assert_eq!(out, r#"<a title="a &gt; b" href="https://e.com">x</a>"#);
+        let out = fragment(r#"<span title='1 > 0'>x</span>"#);
+        assert_eq!(out, r#"<span title="1 &gt; 0">x</span>"#);
+    }
+
+    #[test]
+    fn an_unclosed_quote_runs_to_the_end_and_is_still_rebuilt() {
+        // The tokenizer never finds the closing quote, so the tag runs to the
+        // end of the fragment. It is rebuilt from what parsed, never copied.
+        let out = fragment(r#"<b class="x>bold</b>"#);
+        assert!(out.starts_with("<b"), "{out}");
+        assert!(!out.contains("</b>"), "{out}");
     }
 
     #[test]

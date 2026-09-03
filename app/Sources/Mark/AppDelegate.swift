@@ -544,6 +544,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        // Under Copy, because it is a copy: the rendered document's markup,
+        // for pasting into a page or a field that takes HTML. ⌥⇧⌘C rather than
+        // ⌥⌘C, which text views use for Copy Style.
+        editMenu.addItem(
+            withTitle: "Copy as HTML",
+            action: #selector(MainWindowController.copyAsHTML(_:)), keyEquivalent: "C"
+        ).keyEquivalentModifierMask = [.command, .option, .shift]
         editMenu.addItem(
             withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(
@@ -793,6 +800,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "Show Invisibles",
             action: #selector(MainWindowController.toggleInvisibles(_:)), keyEquivalent: "i"
         ).keyEquivalentModifierMask = [.command, .option]
+        // The margin's other switch, beside the one it shares a ruler with.
+        // ⌃⌘L, because ⌘L is Go to Line and the two belong together the way
+        // ⌘F and ⇧⌘F do. Until this item existed the only way to reach the
+        // setting was the checkbox in Settings, which the README did not say.
+        viewMenu.addItem(
+            withTitle: "Show Line Numbers",
+            action: #selector(MainWindowController.toggleLineNumbers(_:)), keyEquivalent: "l"
+        ).keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(.separator())
 
         // M8's sidebar toggles. Both are `NSMenuItem`s with a checkmark rather

@@ -50,7 +50,15 @@ If you only want the prose, read the file directly — that is cheaper.
 - **Task indices are 0-based, per file, in document order** — as reported by
   `mark tasks`. They renumber the moment a task is added or removed, so
   re-run `mark tasks` after anything else edits the file. Never carry an index
-  across an edit you did not make with `mark check`.
+  across an edit you did not make with `mark check`. **Prefer `--at <start>`**
+  — the `start` byte from `mark tasks --json` — when you hold a listing across
+  any other edit: it names the marker itself and exits 3 rather than ticking a
+  neighbour if the bytes moved.
+- **`-` is standard input** for every local command that only reads
+  (`render toc tasks grep links stats normalize`), so a document you just
+  generated does not need a temp file: `printf '%s' "$doc" | mark toc - --json`.
+  The writing commands (`check`, `toc --insert`, `normalize --in-place`) refuse
+  it with exit 1.
 - **`mark grep` exits 0 on no matches**, printing `[]`. Unlike `grep(1)`. Branch
   on the array being empty, never on `$?`.
 - **`mark check` writes to the user's file.** It is one byte and it is atomic,
@@ -58,7 +66,8 @@ If you only want the prose, read the file directly — that is cheaper.
   loop over `--toggle` to "clean up" tasks unasked.
 - **Depth defaults differ.** `tasks` and `grep` recurse 64 levels; `ls`
   descends **1** (pass `--depth N` for more). All three honour `.gitignore`,
-  skip hidden files, and treat `.md .markdown .mdown .mkd .mdx` as markdown.
+  skip hidden files unless given `--hidden`, follow symlinked directories, and
+  treat `.md .markdown .mdown .mkd .mdx` as markdown.
 - **`MARK_TRACE=1` writes to stderr only**, so it never corrupts `--json`. Use
   it to see per-stage timings.
 - **Piped `render` output is plain text**; a TTY gets ANSI. Force either with
@@ -70,7 +79,8 @@ If you only want the prose, read the file directly — that is cheaper.
 |---|---|
 | "outline this document" | `mark toc <f> --json` |
 | "what's left to do in my notes?" | `mark tasks <dir> --open --json` |
-| "tick the third box in TODO.md" | `mark tasks TODO.md --json` to find the index, then `mark check TODO.md --item <n> --on --json` |
+| "tick the third box in TODO.md" | `mark tasks TODO.md --json` to find it, then `mark check TODO.md --at <start> --on --json` (or `--item <n>` if nothing else has edited the file) |
+| "is X anywhere in my notes?" | `mark grep 'X' <dir> --limit 1 --json` — an empty array is no |
 | "uncheck / flip it" | `mark check <f> --item <n> --off` / `--toggle` (toggle is the default) |
 | "which of my notes have open tasks?" | `mark ls <dir> --depth 3 --json` — read `open`/`total` per row |
 | "find X in my notes, with context" | `mark grep 'X' <dir> --json` (`-i` for case-insensitive) |
@@ -84,6 +94,7 @@ If you only want the prose, read the file directly — that is cheaper.
 | "is mark set up? paste this in a bug report" | `mark doctor --json` |
 | "open this in mark" | `mark open <path> --json` (a **directory** roots the sidebar instead of opening a tab) |
 | "open it without pulling me off what I'm reading" | `mark open <f> --tab --json` |
+| "open it at the Install section / at line 40" | `mark open <f> --anchor install --json` (or `mark open <f>#install`) / `mark open <f> --line 40 --json` — no separate `goto`, and it works with `--tab` |
 | "what's open?" | `mark tab list --json` |
 | "switch to / close that tab" | `mark tab select <index\|path>` / `mark tab close [index\|path]` (bare `close` closes the selected tab) |
 | "close everything" | `mark tab close --all --json` (every tab in the window, both halves of a split; the window stays open) |
@@ -103,7 +114,7 @@ Scripted contract, not advice. Note `0` for a search with no hits.
 | 0 | success | — |
 | 1 | usage error, or a bad regex | no |
 | 2 | file missing or unreadable | no |
-| 3 | task index out of range, **or** the marker moved and the write was refused | no — re-run `mark tasks` |
+| 3 | task index out of range, no task marker at `--at`'s byte, **or** the marker moved and the write was refused | no — re-run `mark tasks` |
 | 4 | the app could not be reached (no socket, launch failed, no reply) | **yes** — the command never arrived |
 | 5 | the app was reached and refused (no such anchor, no such tab, dirty tab) | no |
 | 6 | another `mark` holds the document's `flock(2)` write lock | **yes**, once the holder exits |
@@ -270,6 +281,13 @@ done
   you go back to following macOS.
 - **`--prefix N` counts top-level blocks, not lines**, and applies to every
   format including `--plain`.
+- **`mark open notes.md#install` splits on the last `#`** only when no file of
+  that exact name exists; a filename with a `#` in it still opens. `--anchor`
+  is the unambiguous spelling. A heading that is not there is exit 5 with the
+  tab left open at the top.
+- **`mark watch <file>` survives the file being deleted** — it prints
+  `removed`, then `created` when it is back — but a watched *directory* that
+  disappears is still exit 2.
 - **A directory walk swallows one bad file rather than the whole listing.** An
   unreadable or non-UTF-8 file found by walking is skipped (with a `MARK_TRACE`
   line); the same file *named directly* is exit 2.

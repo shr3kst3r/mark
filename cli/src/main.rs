@@ -40,7 +40,7 @@ mod wire;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -201,6 +201,9 @@ enum Command {
         json: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
         depth: usize,
+        /// Include dotfiles and dot-directories.
+        #[arg(long)]
+        hidden: bool,
     },
     /// List every task in a file or directory.
     Tasks {
@@ -247,13 +250,31 @@ enum Command {
         json: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
         depth: usize,
+        /// Include dotfiles and dot-directories.
+        #[arg(long)]
+        hidden: bool,
     },
     /// Set, clear, or flip one task's checkbox, in place.
     Check {
         file: PathBuf,
         /// Task index in document order, as reported by `mark tasks`.
-        #[arg(long, value_name = "N")]
-        item: usize,
+        #[arg(
+            long,
+            value_name = "N",
+            required_unless_present = "at",
+            conflicts_with = "at"
+        )]
+        item: Option<usize>,
+        /// The task whose marker sits at this byte offset — the `start` that
+        /// `mark tasks --json` reports, or any byte inside its `[ ]`.
+        ///
+        /// The stable handle. An index is a position among the tasks mark
+        /// recognises, and it moves when a task is added above it or a `[-]`
+        /// becomes one; a byte offset names the marker itself, and if those
+        /// bytes are no longer a marker the write is refused rather than
+        /// redirected to whatever task now has that index.
+        #[arg(long, value_name = "BYTE")]
+        at: Option<usize>,
         #[command(flatten)]
         action: CheckAction,
         /// Append `@done(YYYY-MM-DD)` to the item when it becomes done.
@@ -297,6 +318,10 @@ enum Command {
         /// Include non-markdown files.
         #[arg(long)]
         all: bool,
+        /// Include dotfiles and dot-directories, which are skipped by default
+        /// — the CLI half of the sidebar's **Show Hidden Files**.
+        #[arg(long)]
+        hidden: bool,
         /// Add each file's changed lines against git HEAD, as `+12 -3`.
         ///
         /// One `git` query for the listing's repository, not one per file —
@@ -318,6 +343,14 @@ enum Command {
         ignore_case: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
         depth: usize,
+        /// Include dotfiles and dot-directories.
+        #[arg(long)]
+        hidden: bool,
+        /// Stop after this many matches across every file. The default is
+        /// every match, which is what a pipe into `wc -l` wants; a script
+        /// asking "is this anywhere?" wants `--limit 1`.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
     /// Every link and image, and whether its target is there.
     ///
@@ -349,6 +382,9 @@ enum Command {
         json: bool,
         #[arg(long, default_value_t = DEFAULT_RECURSIVE_DEPTH, value_name = "N")]
         depth: usize,
+        /// Include dotfiles and dot-directories.
+        #[arg(long)]
+        hidden: bool,
     },
     /// Per-stage timings and counters for one document.
     Stats {
@@ -378,6 +414,16 @@ enum Command {
         /// that raised the window afterwards would undo that.
         #[arg(long)]
         tab: bool,
+        /// Scroll to a heading once the document is open — `mark goto`
+        /// without the race, and without needing the tab to be the front one.
+        /// `PATH#anchor` says the same thing. A heading that is not there
+        /// leaves the reader at the top and exits 5.
+        #[arg(long, value_name = "ANCHOR")]
+        anchor: Option<String>,
+        /// Scroll to a source line once the document is open. 1-based, like
+        /// `mark grep` reports them.
+        #[arg(long, value_name = "N", conflicts_with = "anchor")]
+        line: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -650,6 +696,12 @@ enum CliError {
         source: io::Error,
     },
     Task(TaskError),
+    /// `mark check --at` named a byte that is not inside any task marker.
+    NoTaskAt {
+        path: PathBuf,
+        offset: usize,
+        total: usize,
+    },
     Tree(TreeError),
     Pattern(Box<regex::Error>),
     /// Writing to stdout failed. Broken pipe is handled in `main` and never
@@ -677,6 +729,9 @@ impl CliError {
             CliError::Task(TaskError::Io { .. }) => EXIT_FILE,
             CliError::Task(TaskError::IndexOutOfRange { .. }) => EXIT_TASK_RANGE,
             CliError::Task(TaskError::MarkerMoved { .. }) => EXIT_TASK_RANGE,
+            // The offset half of the same answer: the caller named a task that
+            // is not there.
+            CliError::NoTaskAt { .. } => EXIT_TASK_RANGE,
             CliError::Task(TaskError::Locked(_)) => EXIT_LOCKED,
             CliError::Pattern(_) | CliError::Output(_) => EXIT_USAGE,
             CliError::Ipc(error) => error.code(),
@@ -699,6 +754,16 @@ impl fmt::Display for CliError {
         match self {
             CliError::Read { path, source } => write!(f, "{}: {source}", path.display()),
             CliError::Task(error) => error.fmt(f),
+            CliError::NoTaskAt {
+                path,
+                offset,
+                total,
+            } => write!(
+                f,
+                "{}: no task marker at byte {offset}; the document has {total} task(s) — \
+                 re-read `mark tasks --json` for their `start` offsets",
+                path.display()
+            ),
             CliError::Tree(error) => error.fmt(f),
             CliError::Pattern(error) => write!(f, "bad pattern: {error}"),
             CliError::Output(error) => write!(f, "writing to stdout: {error}"),
@@ -720,7 +785,7 @@ impl std::error::Error for CliError {
             CliError::Ipc(error) => Some(error),
             CliError::Theme(error) => Some(error),
             CliError::Git(error) => Some(error),
-            CliError::Usage(_) => None,
+            CliError::NoTaskAt { .. } | CliError::Usage(_) => None,
         }
     }
 }
@@ -796,12 +861,38 @@ impl From<TreeError> for CliError {
     }
 }
 
+/// `-` on the command line is standard input, for every command that only
+/// reads. An agent that has just generated a document should not have to put
+/// it on disk to ask what its outline is.
+fn is_stdin(path: &Path) -> bool {
+    path == Path::new("-")
+}
+
+/// The refusal every writing command gives `-`: there is no file to write
+/// back to, and silently writing a file literally named `-` is worse.
+fn no_stdin_for(verb: &str) -> CliError {
+    CliError::Usage(format!(
+        "mark {verb} needs a file: standard input has nothing to write back to"
+    ))
+}
+
 fn read(path: &Path) -> Result<String, CliError> {
     let started = Instant::now();
-    let source = fs::read_to_string(path).map_err(|source| CliError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let source = if is_stdin(path) {
+        let mut buffer = String::new();
+        io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|source| CliError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        buffer
+    } else {
+        fs::read_to_string(path).map_err(|source| CliError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?
+    };
     trace(
         || format!("read {} ({} bytes)", path.display(), source.len()),
         started,
@@ -864,7 +955,17 @@ fn run(command: &Command) -> Result<(), CliError> {
             interval,
             json,
             depth,
-        } => cmd_watch(path.as_deref(), *follow, *interval, *json, *depth),
+            hidden,
+        } => cmd_watch(
+            path.as_deref(),
+            *follow,
+            *interval,
+            *json,
+            Walk {
+                depth: *depth,
+                hidden: *hidden,
+            },
+        ),
         Command::Tasks {
             path,
             open,
@@ -879,6 +980,7 @@ fn run(command: &Command) -> Result<(), CliError> {
             today,
             json,
             depth,
+            hidden,
         } => cmd_tasks(
             path.as_deref(),
             &TaskQuery::new(
@@ -894,18 +996,29 @@ fn run(command: &Command) -> Result<(), CliError> {
                 today.as_deref(),
             )?,
             *json,
-            *depth,
+            Walk {
+                depth: *depth,
+                hidden: *hidden,
+            },
         ),
         Command::Check {
             file,
             item,
+            at,
             action,
             stamp,
             today,
             json,
         } => cmd_check(
             file,
-            *item,
+            match (item, at) {
+                (_, Some(offset)) => TaskSelector::At(*offset),
+                (Some(index), None) => TaskSelector::Index(*index),
+                // clap's `required_unless_present` makes this unreachable.
+                (None, None) => {
+                    return Err(CliError::Usage("--item or --at is required".to_owned()));
+                }
+            },
             action.action()?,
             *stamp,
             today.as_deref(),
@@ -922,15 +1035,28 @@ fn run(command: &Command) -> Result<(), CliError> {
             json,
             depth,
             all,
+            hidden,
             git,
-        } => cmd_ls(dir.as_deref(), *json, *depth, *all, *git),
+        } => cmd_ls(dir.as_deref(), *json, *depth, *all, *hidden, *git),
         Command::Grep {
             pattern,
             path,
             json,
             ignore_case,
             depth,
-        } => cmd_grep(pattern, path.as_deref(), *json, *ignore_case, *depth),
+            hidden,
+            limit,
+        } => cmd_grep(
+            pattern,
+            path.as_deref(),
+            *json,
+            *ignore_case,
+            Walk {
+                depth: *depth,
+                hidden: *hidden,
+            },
+            limit.unwrap_or(0),
+        ),
         Command::Links {
             path,
             to,
@@ -938,13 +1064,26 @@ fn run(command: &Command) -> Result<(), CliError> {
             images,
             json,
             depth,
-        } => match to {
-            Some(target) => cmd_backlinks(path.as_deref(), target, *json, *depth),
-            None => cmd_links(path.as_deref(), *broken, *images, *json, *depth),
-        },
+            hidden,
+        } => {
+            let walk = Walk {
+                depth: *depth,
+                hidden: *hidden,
+            };
+            match to {
+                Some(target) => cmd_backlinks(path.as_deref(), target, *json, walk),
+                None => cmd_links(path.as_deref(), *broken, *images, *json, walk),
+            }
+        }
         Command::Stats { file, json } => cmd_stats(file, *json),
         Command::Doctor { json } => cmd_doctor(*json),
-        Command::Open { file, tab, json } => cmd_open(file, *tab, *json),
+        Command::Open {
+            file,
+            tab,
+            anchor,
+            line,
+            json,
+        } => cmd_open(file, *tab, anchor.as_deref(), *line, *json),
         Command::Tab { action } => cmd_tab(action),
         Command::Theme {
             name,
@@ -999,8 +1138,33 @@ fn call(request: Request) -> Result<serde_json::Value, CliError> {
     Ok(result?)
 }
 
-fn cmd_open(file: &Path, background: bool, json: bool) -> Result<(), CliError> {
-    let path = absolute(file)?;
+fn cmd_open(
+    file: &Path,
+    background: bool,
+    anchor: Option<&str>,
+    line: Option<usize>,
+    json: bool,
+) -> Result<(), CliError> {
+    // `notes.md#install` is how a link is written, so it is accepted here too
+    // — but only when the whole string is not itself a file, because `#` is
+    // legal in a filename and the file on disk wins over the reading of it.
+    let (file, anchor) = match (file.exists(), anchor, file.to_str()) {
+        (false, None, Some(text)) if text.contains('#') => {
+            let (path, fragment) = text.rsplit_once('#').unwrap_or((text, ""));
+            (PathBuf::from(path), Some(fragment.to_owned()))
+        }
+        _ => (file.to_path_buf(), anchor.map(str::to_owned)),
+    };
+    let anchor = anchor
+        .map(|anchor| anchor.trim_start_matches('#').to_owned())
+        .filter(|anchor| !anchor.is_empty());
+    if line == Some(0) {
+        return Err(CliError::Usage(
+            "--line counts from 1, the way `mark grep` reports lines".to_owned(),
+        ));
+    }
+
+    let path = absolute(&file)?;
     // Checked here as well as in the app, so a typo does not launch a GUI to
     // be told about itself. The app keeps its own check: `mark://` reaches it
     // without passing through this function at all.
@@ -1013,11 +1177,36 @@ fn cmd_open(file: &Path, background: bool, json: bool) -> Result<(), CliError> {
         });
     }
 
-    let result = call(
-        Request::new("open")
-            .arg("path", path.to_string_lossy())
-            .flag("tab", background),
-    )?;
+    let mut request = Request::new("open")
+        .arg("path", path.to_string_lossy())
+        .flag("tab", background);
+    if let Some(anchor) = &anchor {
+        request = request.arg("anchor", anchor);
+    }
+    if let Some(line) = line {
+        // Turned into a byte here rather than in the app: the CLI has the file
+        // and the core's line index, and a byte is what the page scrolls to —
+        // the same unit Find in Folder and the editor's follow use. A line
+        // past the end is refused, as ⌘L refuses it, rather than clamped to
+        // the last line, which is indistinguishable from the document being
+        // shorter than you thought.
+        if path.is_dir() {
+            return Err(CliError::Usage(
+                "--line needs a file: a directory has no lines".to_owned(),
+            ));
+        }
+        let source = read(&path)?;
+        let total = source.lines().count().max(1);
+        let Some(offset) = line_start(&source, line) else {
+            return Err(CliError::Usage(format!(
+                "line {line} is past the end: {} has {total} line{}",
+                file.display(),
+                if total == 1 { "" } else { "s" }
+            )));
+        };
+        request = request.arg("offset", offset.to_string());
+    }
+    let result = call(request)?;
 
     if json {
         return print_json(&result);
@@ -1033,15 +1222,39 @@ fn cmd_open(file: &Path, background: bool, json: bool) -> Result<(), CliError> {
         return out.finish();
     }
     let tab = &result["tab"];
+    // Where the reader was put, when they asked to be put somewhere.
+    let landed = match (result["anchor"].as_str(), line) {
+        (Some(anchor), _) => format!(" at #{anchor}"),
+        (None, Some(line)) => format!(" at line {line}"),
+        (None, None) => String::new(),
+    };
     emitln!(
         out,
-        "{} -> tab {} of {}{}",
+        "{} -> tab {} of {}{}{}",
         tab["path"].as_str().unwrap_or_default(),
         tab["index"].as_i64().unwrap_or(-1),
         result["tabs"].as_i64().unwrap_or(0),
+        landed,
         if background { " (background)" } else { "" }
     )?;
     out.finish()
+}
+
+/// Byte offset where 1-based `line` begins, or `None` past the last line. A
+/// document's final newline does not start a line here, matching `mark grep`
+/// and the editor's gutter rather than `wc -l`.
+fn line_start(source: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut offset = 0;
+    for (index, text) in source.split_inclusive('\n').enumerate() {
+        if index + 1 == line {
+            return Some(offset);
+        }
+        offset += text.len();
+    }
+    None
 }
 
 /// The sidebar, in the shape `mark sidebar`, `mark nav`, and `mark open <dir>`
@@ -1629,24 +1842,59 @@ const TOC_CLOSE: &str = "<!-- /toc -->";
 /// The write goes through `tasks::write_atomically`, which is the same locked,
 /// temp-file-plus-rename path `mark check` uses — so this cannot clobber a
 /// document a window holds unsaved changes to.
-fn cmd_toc_insert(path: &Path, min_level: u8, max_level: u8) -> Result<(), CliError> {
-    let source = read(path)?;
+/// The byte offsets of `<!-- toc -->` and, after it, `<!-- /toc -->`.
+///
+/// Found in the document's HTML **blocks** rather than by searching the bytes,
+/// so a fenced example of the markers — in a document explaining this very
+/// feature — is text and not the place the list goes. That was a real bug:
+/// `find` took the first spelling in the file, which in a README was the one
+/// inside the code fence, and the real markers below it were left alone.
+fn toc_markers(doc: &Document<'_>) -> Option<(usize, usize)> {
+    let source = doc.source();
+    let mut open: Option<usize> = None;
+    for (event, span) in doc.events() {
+        let pulldown_cmark::Event::Html(_) = event else {
+            continue;
+        };
+        let text = &source[span.clone()];
+        match open {
+            None => {
+                let Some(at) = text.find(TOC_OPEN) else {
+                    continue;
+                };
+                let start = span.start + at;
+                open = Some(start);
+                // Both markers on one line are one HTML block.
+                let rest = at + TOC_OPEN.len();
+                if let Some(close) = text[rest..].find(TOC_CLOSE) {
+                    return Some((start, span.start + rest + close));
+                }
+            }
+            Some(start) => {
+                if let Some(at) = text.find(TOC_CLOSE) {
+                    return Some((start, span.start + at));
+                }
+            }
+        }
+    }
+    None
+}
 
-    let (Some(open), Some(close)) = (source.find(TOC_OPEN), source.find(TOC_CLOSE)) else {
+fn cmd_toc_insert(path: &Path, min_level: u8, max_level: u8) -> Result<(), CliError> {
+    if is_stdin(path) {
+        return Err(no_stdin_for("toc --insert"));
+    }
+    let source = read(path)?;
+    let doc = Document::parse(&source);
+
+    let Some((open, close)) = toc_markers(&doc) else {
         return Err(CliError::Usage(format!(
             "{} has no {TOC_OPEN} … {TOC_CLOSE} markers. Add them where the contents list \
              should go; they are HTML comments, so they do not render.",
             path.display()
         )));
     };
-    if close < open {
-        return Err(CliError::Usage(format!(
-            "{} has {TOC_CLOSE} before {TOC_OPEN}",
-            path.display()
-        )));
-    }
 
-    let doc = Document::parse(&source);
     let mut list = String::new();
     for heading in doc.headings() {
         if heading.level < min_level || heading.level > max_level {
@@ -1694,17 +1942,34 @@ fn cmd_watch(
     follow: bool,
     interval: f64,
     json: bool,
-    depth: usize,
+    walk: Walk,
 ) -> Result<(), CliError> {
     let root = path.unwrap_or_else(|| Path::new("."));
+    if is_stdin(root) {
+        return Err(CliError::Usage(
+            "mark watch needs a path: standard input cannot change".to_owned(),
+        ));
+    }
     // A floor, because a zero or negative interval is a busy loop on somebody's
     // battery rather than a faster answer.
     let interval = std::time::Duration::from_secs_f64(interval.max(0.05));
 
+    // Decided once. A watched *file* that goes away is a change to report —
+    // `removed`, and `created` when it comes back — not a failure that ends a
+    // `--follow` loop; a watched directory that goes away has nothing left to
+    // watch and is still the error it always was.
+    let single_file = root.is_file();
+
     let snapshot =
         || -> Result<std::collections::BTreeMap<PathBuf, std::time::SystemTime>, CliError> {
             let mut seen = std::collections::BTreeMap::new();
-            for file in markdown_targets(root, depth)? {
+            if single_file {
+                if let Ok(modified) = fs::metadata(root).and_then(|meta| meta.modified()) {
+                    seen.insert(root.to_path_buf(), modified);
+                }
+                return Ok(seen);
+            }
+            for file in markdown_targets(root, walk)? {
                 let modified = fs::metadata(&file)
                     .and_then(|meta| meta.modified())
                     .unwrap_or(std::time::UNIX_EPOCH);
@@ -2116,13 +2381,13 @@ fn cmd_tasks(
     path: Option<&Path>,
     query: &TaskQuery,
     json: bool,
-    depth: usize,
+    walk: Walk,
 ) -> Result<(), CliError> {
     let root = path.unwrap_or_else(|| Path::new("."));
     let mut rows = Vec::new();
 
     let started = Instant::now();
-    let targets = markdown_targets(root, depth)?;
+    let targets = markdown_targets(root, walk)?;
     trace(
         || format!("walk {} -> {} files", root.display(), targets.len()),
         started,
@@ -2202,21 +2467,60 @@ struct CheckedTask<'a> {
     stamped: Option<String>,
 }
 
+/// Which task `mark check` means.
+#[derive(Debug, Clone, Copy)]
+enum TaskSelector {
+    /// `--item N`: position in document order.
+    Index(usize),
+    /// `--at BYTE`: the task whose marker spans that byte.
+    At(usize),
+}
+
+/// The index of the task whose marker contains `offset`, in `source`.
+fn index_at(source: &str, path: &Path, offset: usize) -> Result<usize, CliError> {
+    let tasks = tasks::enumerate_source(source);
+    tasks
+        .iter()
+        .position(|task| task.start <= offset && offset < task.end)
+        .ok_or_else(|| CliError::NoTaskAt {
+            path: path.to_path_buf(),
+            offset,
+            total: tasks.len(),
+        })
+}
+
 fn cmd_check(
     path: &Path,
-    index: usize,
+    selector: TaskSelector,
     action: Action,
     stamp: bool,
     today: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
+    if is_stdin(path) {
+        return Err(no_stdin_for("check"));
+    }
     let started = Instant::now();
-    let (toggled, stamped) = if stamp {
-        stamped_toggle(path, index, action, today)?
-    } else {
+    let (toggled, stamped) = match selector {
         // The plain path is untouched: one read, one byte, one atomic write.
-        (tasks::toggle_file(path, index, action)?, None)
+        TaskSelector::Index(index) if !stamp => (tasks::toggle_file(path, index, action)?, None),
+        TaskSelector::Index(index) => stamped_toggle(path, index, action, today)?,
+        // By offset, the index is resolved against the *same bytes* the toggle
+        // is applied to — one read — so there is no window in which the file
+        // can renumber between finding the task and changing it.
+        TaskSelector::At(offset) => {
+            let source = read(path)?;
+            let index = index_at(&source, path, offset)?;
+            if stamp {
+                stamped_toggle_source(path, &source, index, action, today)?
+            } else {
+                let toggled = tasks::toggle(&source, index, action)?;
+                tasks::write_atomically(path, &toggled.source).map_err(tasks::TaskError::from)?;
+                (toggled, None)
+            }
+        }
     };
+    let index = toggled.index;
     trace(
         || {
             format!(
@@ -2270,6 +2574,18 @@ fn stamped_toggle(
     action: Action,
     today: Option<&str>,
 ) -> Result<(tasks::Toggled, Option<String>), CliError> {
+    let source = read(path)?;
+    stamped_toggle_source(path, &source, index, action, today)
+}
+
+/// [`stamped_toggle`] on bytes already in hand.
+fn stamped_toggle_source(
+    path: &Path,
+    source: &str,
+    index: usize,
+    action: Action,
+    today: Option<&str>,
+) -> Result<(tasks::Toggled, Option<String>), CliError> {
     let date = match today {
         Some(given) => {
             if tasks::parse_iso_date(given).is_none() {
@@ -2282,8 +2598,7 @@ fn stamped_toggle(
         None => today_local(),
     };
 
-    let source = read(path)?;
-    let mut toggled = tasks::toggle(&source, index, action)?;
+    let mut toggled = tasks::toggle(source, index, action)?;
 
     // Only a task that has *become* done gets a date, and only once: stamping
     // an already-stamped item twice is the failure mode this checks for.
@@ -2327,6 +2642,9 @@ fn cmd_normalize(path: &Path, gfm: bool, in_place: bool, check: bool) -> Result<
         ));
     }
 
+    if in_place && is_stdin(path) {
+        return Err(no_stdin_for("normalize --in-place"));
+    }
     let source = read(path)?;
     let started = Instant::now();
     let normalized = normalize_to_gfm(&source);
@@ -2539,6 +2857,11 @@ fn cmd_diff(
     theme: Option<&str>,
 ) -> Result<(), CliError> {
     let target = path.unwrap_or_else(|| Path::new("."));
+    if is_stdin(target) {
+        return Err(CliError::Usage(
+            "mark diff needs a path in a repository: standard input has no HEAD".to_owned(),
+        ));
+    }
 
     let Some(repo) = git::discover(target) else {
         // Not an error. See the `Diff` variant's own documentation for why.
@@ -2620,7 +2943,7 @@ fn cmd_diff(
         emitln!(
             out,
             "{}  {}",
-            paint.counts(row.added, row.removed),
+            paint.counts_for(&repo.root.join(&row.path), row.added, row.removed),
             row.path.display()
         )?;
     }
@@ -2716,19 +3039,13 @@ fn diff_one_file(
     out.finish()
 }
 
-/// `target` as a repository-relative path, if it is inside `repo`.
-///
-/// Compared canonically, because `$TMPDIR` on macOS is a symlink into
-/// `/private` and git reports the resolved spelling — so a plain
-/// `strip_prefix` misses on exactly the paths the tests use.
+/// `target` as a repository-relative path, if it is inside `repo`. The core
+/// owns the resolution — canonical first, so a path through a symlinked
+/// directory names the file git tracks — because `base_bytes` has to agree
+/// with it, and two answers to "which file is this" is how `mark diff` once
+/// reported a one-line edit as a whole new file.
 fn relative_in(repo: &git::Repo, target: &Path) -> Option<PathBuf> {
-    let absolute = std::path::absolute(target).ok()?;
-    if let Ok(relative) = absolute.strip_prefix(&repo.root) {
-        return Some(relative.to_path_buf());
-    }
-    let root = fs::canonicalize(&repo.root).ok()?;
-    let real = fs::canonicalize(&absolute).ok()?;
-    real.strip_prefix(&root).ok().map(Path::to_path_buf)
+    git::relative_to(repo, target)
 }
 
 /// Colours for `mark diff`'s terminal output.
@@ -2779,8 +3096,22 @@ impl DiffPaint {
             ),
             // A binary file. `+0 -0` would be a lie, so it says nothing
             // numeric at all.
-            _ => format!("{}binary{}", self.dim, self.reset),
+            _ => self.uncountable("binary"),
         }
+    }
+
+    /// [`Self::counts`], but a path with no line counts is named for what it
+    /// is: an untracked symlink has no lines to count and is not a binary
+    /// file either, and calling it one sent people looking for a picture.
+    fn counts_for(&self, path: &Path, added: Option<u32>, removed: Option<u32>) -> String {
+        if (added.is_none() || removed.is_none()) && is_symlink(path) {
+            return self.uncountable("symlink");
+        }
+        self.counts(added, removed)
+    }
+
+    fn uncountable(&self, label: &str) -> String {
+        format!("{}{label}{}", self.dim, self.reset)
     }
 
     fn hunk_header(&self, hunk: &lines::Hunk) -> String {
@@ -2822,6 +3153,7 @@ fn cmd_ls(
     json: bool,
     depth: usize,
     all: bool,
+    hidden: bool,
     git_columns: bool,
 ) -> Result<(), CliError> {
     let root = dir.unwrap_or_else(|| Path::new("."));
@@ -2829,7 +3161,7 @@ fn cmd_ls(
         max_depth: depth.max(1),
         with_stats: true,
         markdown_only: !all,
-        hidden: false,
+        hidden,
     };
     let entries = tree::list_dir(root, &options)?;
 
@@ -2886,6 +3218,7 @@ fn cmd_ls(
         // two halves of the product read alike.
         let changed = match (row.added, row.removed) {
             (Some(added), Some(removed)) => format!("  +{added} \u{2212}{removed}"),
+            _ if row.git.is_some() && is_symlink(&row.path) => "  symlink".to_owned(),
             _ if row.git.is_some() => "  binary".to_owned(),
             _ => String::new(),
         };
@@ -2912,7 +3245,8 @@ fn cmd_grep(
     path: Option<&Path>,
     json: bool,
     ignore_case: bool,
-    depth: usize,
+    walk: Walk,
+    limit: usize,
 ) -> Result<(), CliError> {
     let root = path.unwrap_or_else(|| Path::new("."));
 
@@ -2922,24 +3256,39 @@ fn cmd_grep(
     // implementation to drift — `NSRegularExpression` in Swift would have been
     // a different regex dialect for `\d`, `(?i)`, and lookaround.
     let started = Instant::now();
-    let results = search::search(
-        root,
-        pattern,
-        &search::Options {
-            ignore_case,
-            max_depth: depth,
-            // No cap. A script piping to `wc -l` wants the truth; the window is
-            // the caller that passes a limit.
-            limit: 0,
-            ..search::Options::default()
-        },
-    )
-    .map_err(|error| match error {
-        search::SearchError::Pattern(error) => CliError::Pattern(Box::new(error)),
-        search::SearchError::Tree(error) => CliError::Tree(error),
-        // Exit 2, like every other "you named a file I cannot read".
-        search::SearchError::Read { path, source } => CliError::Read { path, source },
-    })?;
+    let results = if is_stdin(root) {
+        // One document from the pipe: the same engine, without the walk.
+        let regex = search::compile(pattern, ignore_case)
+            .map_err(|error| CliError::Pattern(Box::new(error)))?;
+        let source = read(root)?;
+        let doc = Document::parse(&source);
+        let mut matches = search::matches_in(&doc, root, &regex, limit.saturating_add(1));
+        let truncated = limit > 0 && matches.len() > limit;
+        matches.truncate(if limit > 0 { limit } else { usize::MAX });
+        search::Results {
+            matches,
+            truncated,
+            files: 1,
+        }
+    } else {
+        search::search(
+            root,
+            pattern,
+            &search::Options {
+                ignore_case,
+                max_depth: walk.depth,
+                hidden: walk.hidden,
+                // Zero is no cap — a script piping to `wc -l` wants the truth.
+                limit,
+            },
+        )
+        .map_err(|error| match error {
+            search::SearchError::Pattern(error) => CliError::Pattern(Box::new(error)),
+            search::SearchError::Tree(error) => CliError::Tree(error),
+            // Exit 2, like every other "you named a file I cannot read".
+            search::SearchError::Read { path, source } => CliError::Read { path, source },
+        })?
+    };
     trace(
         || {
             format!(
@@ -2977,6 +3326,14 @@ fn cmd_grep(
             )?;
         }
     }
+    if results.truncated {
+        // stderr, so the rows on stdout stay exactly the rows asked for.
+        eprintln!(
+            "mark grep: stopped after {} match{}; there are more (--limit)",
+            results.matches.len(),
+            if results.matches.len() == 1 { "" } else { "es" }
+        );
+    }
     out.finish()
 }
 
@@ -3012,19 +3369,12 @@ fn cmd_backlinks(
     path: Option<&Path>,
     target: &Path,
     json: bool,
-    depth: usize,
+    walk: Walk,
 ) -> Result<(), CliError> {
     let root = path.unwrap_or_else(|| Path::new("."));
 
     let started = Instant::now();
-    let found = links::backlinks(
-        root,
-        target,
-        &tree::Options {
-            max_depth: depth.max(1),
-            ..tree::Options::default()
-        },
-    )?;
+    let found = links::backlinks(root, target, &walk.options())?;
     trace(
         || format!("backlinks to {} -> {}", target.display(), found.len()),
         started,
@@ -3073,12 +3423,12 @@ fn cmd_links(
     broken: bool,
     images: bool,
     json: bool,
-    depth: usize,
+    walk: Walk,
 ) -> Result<(), CliError> {
     let root = path.unwrap_or_else(|| Path::new("."));
 
     let started = Instant::now();
-    let targets = markdown_targets(root, depth)?;
+    let targets = markdown_targets(root, walk)?;
     trace(
         || format!("walk {} -> {} files", root.display(), targets.len()),
         started,
@@ -3161,13 +3511,36 @@ fn cmd_links(
     out.finish()
 }
 
-/// A single file, or every markdown file below a directory.
-fn markdown_targets(root: &Path, depth: usize) -> Result<Vec<PathBuf>, CliError> {
-    let options = tree::Options {
-        max_depth: depth.max(1),
-        ..tree::Options::default()
-    };
-    Ok(tree::markdown_files(root, &options)?)
+/// How far, and into what, a walking command looks.
+#[derive(Debug, Clone, Copy)]
+struct Walk {
+    depth: usize,
+    /// Dotfiles and dot-directories too. Off by default everywhere, the way
+    /// the sidebar's **Show Hidden Files** is.
+    hidden: bool,
+}
+
+impl Walk {
+    fn options(self) -> tree::Options {
+        tree::Options {
+            max_depth: self.depth.max(1),
+            hidden: self.hidden,
+            ..tree::Options::default()
+        }
+    }
+}
+
+/// A single file, standard input, or every markdown file below a directory.
+fn markdown_targets(root: &Path, walk: Walk) -> Result<Vec<PathBuf>, CliError> {
+    if is_stdin(root) {
+        return Ok(vec![root.to_path_buf()]);
+    }
+    Ok(tree::markdown_files(root, &walk.options())?)
+}
+
+/// Whether `path` is itself a symlink — the link, not what it points at.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Read one file found by walking `root`.
@@ -3178,6 +3551,9 @@ fn markdown_targets(root: &Path, depth: usize) -> Result<Vec<PathBuf>, CliError>
 /// directory, one bad file must not cost them the rest of the listing — skip
 /// it, but leave a trace so the silence is explicable.
 fn read_walked(root: &Path, file: &Path) -> Result<String, CliError> {
+    if is_stdin(file) {
+        return read(file);
+    }
     match fs::read_to_string(file) {
         Ok(source) => Ok(source),
         Err(source) if root == file => Err(CliError::Read {

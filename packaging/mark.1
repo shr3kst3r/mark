@@ -10,7 +10,7 @@
 .\"
 .\" Preview it with:  man packaging/mark.1
 .\" Lint it with:     mandoc -T lint packaging/mark.1
-.TH MARK 1 "2026-09-01" "mark 0.4.0" "User Commands"
+.TH MARK 1 "2026-09-03" "mark 0.5.0" "User Commands"
 .SH NAME
 mark \- fast native markdown viewer for macOS, and its CLI
 .SH SYNOPSIS
@@ -138,9 +138,11 @@ uses.
 .TP
 .BI "tasks " [path] " [--open] [--state " name "] [--tag " tag "] [--priority " N "] \
 [--due-before " when "] [--due-after " when "] [--overdue] [--no-due] [--sort " key "] \
-[--today " YYYY-MM-DD "] [--json] [--depth " N ]
+[--today " YYYY-MM-DD "] [--json] [--depth " N "] [--hidden]"
 Every task in a file or directory: path, index in document order, state, text,
 and byte span.
+.B --hidden
+includes dotfiles and dot-directories, which every walk skips by default.
 .IP
 There are five states \(em
 .BR [\ ] " open, " [/] " in progress, " [x] " done, " [-] " cancelled, " [?] " blocked"
@@ -204,13 +206,30 @@ where a date comparison reads a clock \(em rendering never does, so
 output is reproducible. Naming it explicitly is what makes a filter testable
 without freezing the machine's clock.
 .TP
-.BI "check " file " --item " N " [--on|--off|--toggle|--state " name "] [--stamp] \
-[--today " YYYY-MM-DD "] [--json]"
+.BI "check " file " --item " N "|--at " BYTE " [--on|--off|--toggle|--state " name "] \
+[--stamp] [--today " YYYY-MM-DD "] [--json]"
 Flip one checkbox in place. Exactly one byte changes \(em the character between
 the brackets \(em and the write is temp-file-plus-rename through the real file
-behind any symlink. The document is re-parsed immediately before the write, and
-if the target span no longer holds a task marker the write is refused rather
-than guessed.
+behind any symlink, carrying the file's extended attributes and ACL \(em Finder
+tags included \(em onto the new inode. The document is re-parsed immediately
+before the write, and if the target span no longer holds a task marker the write
+is refused rather than guessed.
+.IP
+.B --item
+is the task's index in document order, as
+.B mark tasks
+reports it.
+.B --at
+names the task by a byte offset inside its marker \(em the
+.B start
+that
+.B "mark tasks --json"
+reports \(em and is the stable handle: an index moves when a task is added above
+it or a
+.B [-]
+becomes one, a byte names the marker itself. The index is resolved against the
+same bytes the toggle is applied to, and a byte that is not inside any marker
+exits 3 and writes nothing.
 .B --toggle
 is the default: open becomes done, done becomes open, and any other state
 becomes done, because ticking a box ticks it. That makes a toggle a one-way exit
@@ -279,7 +298,7 @@ the reverse later cannot change what a bare
 does. Running it twice is a no-op: an already-struck item is not struck again,
 and a tag it would have added is not added twice.
 .TP
-.BI "ls " [dir] " [--json] [--depth " N "] [--all] [--git]"
+.BI "ls " [dir] " [--json] [--depth " N "] [--all] [--hidden] [--git]"
 Markdown files with titles and outstanding/active task counts \(em where
 .I active
 excludes cancelled items, so a list you abandoned two of seven items in reads
@@ -289,7 +308,10 @@ With
 every state is counted separately. Honours
 .IR .gitignore .
 .B --all
-includes non-markdown files.
+includes non-markdown files, and
+.B --hidden
+dotfiles and dot-directories \(em the CLI half of the sidebar's
+.BR "Show Hidden Files" .
 .B --git
 adds each file's changed lines against git
 .BR HEAD ,
@@ -301,10 +323,15 @@ count. One
 query for the listing's repository, not one per file. A directory that is not in
 a repository simply gains no column.
 .TP
-.BI "grep " pattern " " [path] " [--json] [-i|--ignore-case] [--depth " N ]
+.BI "grep " pattern " " [path] " [--json] [-i|--ignore-case] [--limit " N "] \
+[--depth " N "] [--hidden]"
 Regular-expression search reporting the heading each match sits under.
+.B --limit
+stops after that many matches across every file and says so on stderr, so the
+rows on stdout are exactly the rows asked for; the default is every match.
 .TP
-.BI "links " [path] " [--to " FILE ] " [--broken] [--images] [--json] [--depth " N ]
+.BI "links " [path] " [--to " FILE ] " [--broken] [--images] [--json] [--depth " N "] \
+[--hidden]"
 Every link and image, and whether its target is there. A
 .I file
 reports its own references; a
@@ -350,7 +377,8 @@ already in the argument.
 Exits 0 whether or not anything is broken. The finding is on stdout; a non\(hyzero
 exit is reserved for not being able to answer.
 .TP
-.BI "watch " [path] " [--follow] [--interval " SECONDS "] [--json] [--depth " N ]
+.BI "watch " [path] " [--follow] [--interval " SECONDS "] [--json] [--depth " N "] \
+[--hidden]"
 Block until a file or directory changes, then say what changed and exit \(em for
 the shell loop an agent actually writes:
 .IP
@@ -440,7 +468,7 @@ not tabs: the markdown reference's window holds one and owns no tab, and the
 line names it when it is open.
 .SS Remote
 .TP
-.BI "open " path " [--tab] [--json]"
+.BI "open " path " [--tab] [--anchor " anchor "|--line " N "] [--json]"
 A file opens in a tab. A
 .B directory
 roots the sidebar there, exactly as
@@ -449,6 +477,20 @@ does, and the reply says which of the two happened.
 .B --tab
 adds the tab without moving the reader off the current document. Neither form
 activates the app.
+.IP
+.B --anchor
+puts the reader at a heading once the page exists \(em what
+.B goto
+does, without racing the render and without needing the tab to be the front
+one, so it works with
+.BR --tab .
+.IB path # anchor
+says the same thing, unless a file of exactly that name exists.
+.B --line
+puts a source line at the top of the viewport, 1-based as
+.B grep
+reports them; a line past the end is refused rather than clamped. A heading
+that is not there leaves the tab open at the top and exits 5.
 .TP
 .BR "tab list" " [--json]"
 Every open tab, in every window: index, title, open/total tasks, and whether it
@@ -691,10 +733,24 @@ those. A document on an NFS or SMB mount, where
 .BR flock (2)
 is unreliable, is effectively unlocked.
 .PP
+Wherever a local command takes a file,
+.B \-
+is standard input:
+.IR "generate | mark toc \- \-\-json" .
+The commands that write \(em
+.BR check ", " "toc \-\-insert" ", " "normalize \-\-in\-place"
+\(em refuse it, since there is nothing to write back to.
+.PP
+Every command that walks a directory follows a symlinked directory inside the
+tree, lists a symlink cycle once and never descends into it again, and skips
+dotfiles unless
+.B \-\-hidden
+is given.
+.PP
 .B mark://
 URLs are registered with LaunchServices as the cold-launch and Finder path, and
 carry the same commands:
-.IR mark://open?path=/n.md&tab=1 .
+.IR mark://open?path=/n.md&tab=1 ", " mark://open?path=/n.md&anchor=install .
 .SH SEE ALSO
 The decision records under
 .IR docs/adrs/ ,

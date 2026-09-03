@@ -231,6 +231,36 @@ struct MenuBarTests {
     /// browser has meant by History for twenty years.
     ///
     /// `keyEquivalentsAreUnique` above is what guarantees ⌘Y was free.
+    @Test("View ▸ Show Line Numbers is under Show Invisibles, on ⌃⌘L")
+    func lineNumbersItem() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let view = try #require(
+            menu.items.compactMap(\.submenu).first { $0.title == "View" })
+        let item = try #require(view.items.first { $0.title == "Show Line Numbers" })
+        #expect(item.action == #selector(MainWindowController.toggleLineNumbers(_:)))
+        #expect(item.keyEquivalent == "l")
+        #expect(item.keyEquivalentModifierMask == [.command, .control])
+        let order = view.items.map(\.title)
+        let invisibles = try #require(order.firstIndex(of: "Show Invisibles"))
+        #expect(order.firstIndex(of: "Show Line Numbers") == invisibles + 1)
+    }
+
+    @Test("Edit ▸ Copy as HTML sits under Copy, on ⌥⇧⌘C")
+    func copyAsHTMLItem() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let edit = try #require(
+            menu.items.compactMap(\.submenu).first { $0.title == "Edit" })
+        let item = try #require(edit.items.first { $0.title == "Copy as HTML" })
+        #expect(item.action == #selector(MainWindowController.copyAsHTML(_:)))
+        #expect(item.keyEquivalent == "C")
+        #expect(item.keyEquivalentModifierMask == [.command, .option, .shift])
+        let order = edit.items.map(\.title)
+        let copy = try #require(order.firstIndex(of: "Copy"))
+        #expect(order.firstIndex(of: "Copy as HTML") == copy + 1)
+    }
+
     @Test("File ▸ History is under Open…, on ⌘Y")
     func historyItem() throws {
         let delegate = AppDelegate()

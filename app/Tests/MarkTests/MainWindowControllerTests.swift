@@ -589,3 +589,43 @@ struct MainWindowHistoryTests {
         #expect(history.entries.map(\.url.lastPathComponent) == ["a.md"])
     }
 }
+
+/// **Edit ▸ Copy as HTML.** The clipboard gets the rendered fragment, twice:
+/// as HTML for a rich-text target and as the same text for a plain one.
+@Suite("Copy as HTML", .serialized)
+@MainActor
+struct CopyAsHTMLTests {
+    @Test("the rendered fragment lands on the pasteboard as HTML and as text")
+    func copiesRenderedFragment() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        controller.open(fixture.file(named: "a.md"))
+        let source = try String(contentsOf: fixture.file(named: "a.md"), encoding: .utf8)
+        let expected = try MarkCore.renderHTML(
+            source: source, theme: ThemeController.shared.name, standalone: false)
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        controller.copyAsHTML(nil)
+
+        let html = try #require(pasteboard.string(forType: .html))
+        #expect(html == expected)
+        #expect(pasteboard.string(forType: .string) == expected)
+        // A fragment, not a page: what is pasted goes into something that
+        // already has a head.
+        #expect(!html.contains("<!doctype"), "\(html.prefix(80))")
+        #expect(!html.contains("<html"), "\(html.prefix(80))")
+    }
+
+    @Test("with no document there is nothing to copy, and nothing is written")
+    func nothingWithoutADocument() throws {
+        let fixture = try TabFixture()
+        let controller = MainWindowController(root: fixture.directory, session: fixture.session)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString("untouched", forType: .string)
+        controller.copyAsHTML(nil)
+        #expect(pasteboard.string(forType: .string) == "untouched")
+        #expect(pasteboard.string(forType: .html) == nil)
+    }
+}

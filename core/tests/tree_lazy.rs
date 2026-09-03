@@ -400,3 +400,107 @@ fn an_unreadable_subdirectory_does_not_fail_the_listing() {
     let entries = entries.expect("root is still listable");
     assert!(entries.iter().any(|e| e.name == "guide.md"));
 }
+
+#[test]
+fn a_symlinked_directory_is_a_directory_and_is_descended_into() {
+    let _serial = measuring();
+    let dir = fixture();
+    // `~/notes/projects -> ~/vault/projects` is the ordinary shape of a
+    // notes tree kept in a dotfiles repository; the sidebar and `mark tasks`
+    // both used to drop it, because `DirEntry::file_type` describes the link.
+    std::os::unix::fs::symlink(dir.path().join("docs"), dir.path().join("linked"))
+        .expect("symlink");
+
+    let entries = tree::list_dir(
+        dir.path(),
+        &Options {
+            max_depth: 64,
+            ..Options::default()
+        },
+    )
+    .expect("listing");
+
+    let linked = entries
+        .iter()
+        .find(|e| e.name == "linked")
+        .expect("the symlinked directory is listed");
+    assert!(linked.is_dir, "a symlink to a directory is a directory");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.path == dir.path().join("linked/guide.md")),
+        "its contents are listed under the link's own name: {:?}",
+        names(&entries)
+    );
+
+    let files = tree::markdown_files(
+        dir.path(),
+        &Options {
+            max_depth: 64,
+            ..Options::default()
+        },
+    )
+    .expect("files");
+    assert!(files.contains(&dir.path().join("linked/guide.md")));
+}
+
+#[test]
+fn a_symlink_cycle_is_listed_once_and_never_descended_into_again() {
+    let _serial = measuring();
+    let dir = fixture();
+    // Three shapes of cycle: a link to the directory holding it, a link to
+    // an ancestor, and two links pointing at each other's parents.
+    std::os::unix::fs::symlink(".", dir.path().join("docs/self")).expect("symlink");
+    std::os::unix::fs::symlink("..", dir.path().join("docs/nested/up")).expect("symlink");
+    fs::create_dir_all(dir.path().join("x")).expect("mkdir");
+    fs::create_dir_all(dir.path().join("y")).expect("mkdir");
+    std::os::unix::fs::symlink("../y", dir.path().join("x/to-y")).expect("symlink");
+    std::os::unix::fs::symlink("../x", dir.path().join("y/to-x")).expect("symlink");
+
+    let before = tree::dir_reads();
+    let entries = tree::list_dir(
+        dir.path(),
+        &Options {
+            max_depth: 64,
+            ..Options::default()
+        },
+    )
+    .expect("a cyclic tree still lists");
+    let reads = tree::dir_reads() - before;
+
+    // Every real directory read once, every link listed as a directory row,
+    // and `guide.md` appears exactly once rather than at sixty-four depths.
+    let guides = entries.iter().filter(|e| e.name == "guide.md").count();
+    assert_eq!(guides, 1, "{:?}", names(&entries));
+    assert!(entries.iter().any(|e| e.name == "self" && e.is_dir));
+    assert!(entries.iter().any(|e| e.name == "up" && e.is_dir));
+    // root, docs, docs/nested, docs/nested/deeper, x, y — plus at most one
+    // read *through* each of the two mutual links before the guard catches
+    // the return trip.
+    assert!(
+        reads <= 8,
+        "read {reads} directories for a six-directory tree"
+    );
+}
+
+#[test]
+fn a_dangling_symlink_is_neither_a_directory_nor_a_crash() {
+    let _serial = measuring();
+    let dir = fixture();
+    std::os::unix::fs::symlink("nowhere", dir.path().join("gone.md")).expect("symlink");
+    std::os::unix::fs::symlink("nowhere-dir", dir.path().join("gone")).expect("symlink");
+
+    let entries = tree::list_dir(
+        dir.path(),
+        &Options {
+            max_depth: 64,
+            markdown_only: false,
+            ..Options::default()
+        },
+    )
+    .expect("listing");
+    assert!(!entries.iter().any(|e| e.name == "gone" && e.is_dir));
+    // A dangling `.md` link is still a name in the directory; `stats` on it
+    // yields nothing rather than failing the listing.
+    assert!(entries.iter().any(|e| e.name == "gone.md" && !e.is_dir));
+}

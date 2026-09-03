@@ -137,7 +137,22 @@ pub fn list_dir(root: &Path, options: &Options) -> Result<Vec<Entry>, TreeError>
     let ignore = Ignores::collect(&base, options.hidden);
 
     let mut out = Vec::new();
-    walk(root, &base, 1, options, &ignore, &mut out).map_err(|source| TreeError {
+    // The canonical spelling of the root is what the symlink-cycle guard in
+    // `walk` compares against; a regular subdirectory extends it by name and
+    // costs no syscall, so only a symlinked directory ever pays a `realpath`.
+    let real = fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+    let mut ancestors = Vec::new();
+    walk(
+        root,
+        &base,
+        &real,
+        1,
+        options,
+        &ignore,
+        &mut ancestors,
+        &mut out,
+    )
+    .map_err(|source| TreeError {
         path: root.to_path_buf(),
         source,
     })?;
@@ -162,12 +177,22 @@ pub fn markdown_files(root: &Path, options: &Options) -> Result<Vec<PathBuf>, Tr
 /// are matched against. They are carried separately rather than derived,
 /// because deriving one from the other per entry would mean a syscall each on a
 /// tree research 2.8 measured at 608k files.
+///
+/// `real` is the directory with every symlink resolved, and `ancestors` the
+/// `real` of every directory on the way down. Together they are the cycle
+/// guard: a symlinked directory whose target is already on the path
+/// (`notes/loop -> ..`, or two links pointing at each other's parents) is
+/// listed but not descended into, because descending would repeat the same
+/// files at every level until `max_depth` ran out.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     dir: &Path,
     absolute: &Path,
+    real: &Path,
     depth: usize,
     options: &Options,
     ignore: &Ignores,
+    ancestors: &mut Vec<PathBuf>,
     out: &mut Vec<Entry>,
 ) -> io::Result<()> {
     DIR_READS.fetch_add(1, Ordering::Relaxed);
@@ -182,12 +207,23 @@ fn walk(
         if name == ".git" || (!options.hidden && name.starts_with('.')) {
             continue;
         }
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        // `DirEntry::file_type` describes the link, not what it points at.
+        // A symlinked directory inside a notes tree — `projects ->
+        // ../vault/projects` — would otherwise be a "file" with no markdown
+        // extension and silently vanish from every listing, the sidebar
+        // included. Only a symlink pays the extra `stat`.
+        let (is_dir, is_link) = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                (fs::metadata(&path).is_ok_and(|meta| meta.is_dir()), true)
+            }
+            Ok(kind) => (kind.is_dir(), false),
+            Err(_) => (false, false),
+        };
         if ignore.is_ignored(&absolute.join(&name), is_dir) {
             continue;
         }
         if is_dir {
-            dirs.push((path, name));
+            dirs.push((path, name, is_link));
         } else if !options.markdown_only || is_markdown(&path) {
             files.push((path, name));
         }
@@ -196,8 +232,18 @@ fn walk(
     dirs.sort_by(|a, b| a.1.cmp(&b.1));
     files.sort_by(|a, b| a.1.cmp(&b.1));
 
-    for (path, name) in dirs {
+    ancestors.push(real.to_path_buf());
+    for (path, name, is_link) in dirs {
         let child = absolute.join(&name);
+        // A regular subdirectory's real path is its parent's plus its name —
+        // no syscall. A symlink has to be resolved to know where it goes, and
+        // one that cannot be resolved (a dangling link that `metadata` said was
+        // a directory a moment ago) is listed but not entered.
+        let real_child = if is_link {
+            fs::canonicalize(&path).ok()
+        } else {
+            Some(real.join(&name))
+        };
         out.push(Entry {
             name,
             is_dir: true,
@@ -206,11 +252,29 @@ fn walk(
             tasks: None,
             path: path.clone(),
         });
+        let Some(real_child) = real_child else {
+            continue;
+        };
+        if ancestors.contains(&real_child) {
+            // A cycle. The directory is already on the way down; listing it
+            // again at every level would be the same files forever.
+            continue;
+        }
         if depth < options.max_depth {
             // A subdirectory we cannot read is skipped, not fatal.
-            let _ = walk(&path, &child, depth + 1, options, ignore, out);
+            let _ = walk(
+                &path,
+                &child,
+                &real_child,
+                depth + 1,
+                options,
+                ignore,
+                ancestors,
+                out,
+            );
         }
     }
+    ancestors.pop();
     for (path, name) in files {
         let (title, counts) = if options.with_stats {
             stats(&path)

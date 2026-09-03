@@ -780,9 +780,15 @@ pub fn write_atomically(path: &Path, contents: &str) -> Result<(), WriteError> {
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        // Preserve the mode the user had; a rename would otherwise silently
-        // reset it to the process umask.
-        if let Some(existing) = existing {
+        if let Some(existing) = &existing {
+            // Finder tags, and every other extended attribute and ACL the
+            // document carried, live on the inode — and the rename below
+            // replaces the inode. Move them onto the new one first. Best
+            // effort by design: the bytes are what the write is for, and a
+            // volume that cannot hold an xattr must not refuse a save.
+            copy_metadata(&target, &temp);
+            // Preserve the mode the user had; a rename would otherwise
+            // silently reset it to the process umask.
             fs::set_permissions(&temp, existing.permissions())?;
         }
         fs::rename(&temp, &target)
@@ -796,6 +802,35 @@ pub fn write_atomically(path: &Path, contents: &str) -> Result<(), WriteError> {
         source,
     })
 }
+
+/// Copy `from`'s extended attributes and ACL onto `to`, leaving both files'
+/// bytes alone. `copyfile(3)` with the metadata flags is the system's own way
+/// of doing this — it is what Finder uses — and a failure is deliberately not
+/// reported: see [`write_atomically`].
+#[cfg(target_os = "macos")]
+fn copy_metadata(from: &Path, to: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(from), Ok(to)) = (
+        CString::new(from.as_os_str().as_bytes()),
+        CString::new(to.as_os_str().as_bytes()),
+    ) else {
+        return;
+    };
+    // SAFETY: both strings are valid, NUL-terminated, and outlive the call; a
+    // null state asks for no progress callbacks.
+    unsafe {
+        libc::copyfile(
+            from.as_ptr(),
+            to.as_ptr(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_XATTR | libc::COPYFILE_ACL,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_metadata(_from: &Path, _to: &Path) {}
 
 /// What one task item's inline events say: its text, its label, and its
 /// metadata.

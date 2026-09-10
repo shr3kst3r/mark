@@ -13,7 +13,9 @@
 use std::cell::OnceCell;
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    CodeBlockKind, CowStr, Event, MetadataBlockKind, Options, Parser, Tag, TagEnd,
+};
 use serde::Serialize;
 
 use crate::block::{Block, BlockId, BlockKind, OrdinalCounter, block_hash};
@@ -22,9 +24,12 @@ use crate::block::{Block, BlockId, BlockKind, OrdinalCounter, block_hash};
 ///
 /// `ENABLE_MATH` yields `Event::InlineMath` / `Event::DisplayMath` carrying raw
 /// TeX with a byte range, which is what [`crate::rich`] feeds to
-/// `pulldown-latex` (ADR-5). It is narrower than it looks: `$5 and $10` and
-/// `a $ b $ c` both stay literal text, so enabling it does not turn currency
-/// in prose into mathematics.
+/// `pulldown-latex` (ADR-5). It is **not** narrow enough on its own: a space
+/// before the second `$` saves `$5 and $10`, but `~$7`, `$5-$10` and
+/// `US$5 … US$10` all parse as mathematics and typeset the prose between the
+/// two amounts as italic identifiers. [`demote_currency`] is what actually
+/// keeps currency out of the math path; see
+/// `docs/adrs/2026-09-10-currency-is-not-math.md`.
 ///
 /// The two metadata options are not optional in practice. Without them a
 /// document's closing `---` parses as a setext H2 underline, so YAML
@@ -75,6 +80,11 @@ impl<'a> Document<'a> {
         let mut meta_open: Option<(MetadataKind, Range<usize>, usize)> = None;
 
         for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+            // Before segmentation, so every consumer downstream — both
+            // renderers, `plain_text`, headings and their anchors, task
+            // labels, the word count — sees one `Text` event and none of them
+            // has to know this rule exists.
+            let event = demote_currency(source, event, &range);
             let index = events.len();
             match &event {
                 Event::Start(Tag::MetadataBlock(kind)) if depth == 0 => {
@@ -324,6 +334,57 @@ pub struct Heading {
     pub block: BlockId,
 }
 
+/// Two prices in one sentence, not one expression: `$4.50 vs ~$7`.
+///
+/// `pulldown-cmark` opens inline math at a `$` followed by a non-space and
+/// closes it at the next `$` preceded by a non-space, so whether a sentence
+/// about money survives depends entirely on the character sitting in front of
+/// its second dollar sign. A space saves `$5 or $10`. An approximation sign, a
+/// range hyphen, or a currency prefix does not, and `Coffee is $4.50 vs a
+/// fancy latte at ~$7` becomes one `<math>` element whose prose is typeset as
+/// italic identifiers.
+///
+/// The rule, per `docs/adrs/2026-09-10-currency-is-not-math.md`: when the
+/// opening `$` **and** the closing `$` are both followed immediately by an
+/// ASCII digit, the span is two currency amounts, and it becomes a single
+/// `Event::Text` carrying its own source slice with the delimiters still in
+/// it. That pair of conditions is not the signature of one expression — a real
+/// expression's closing delimiter is followed by prose, punctuation, or the end
+/// of the line, never by a digit belonging to a second number. `$2x$` stays
+/// math; `$5-$10` does not.
+///
+/// `Event::DisplayMath` is deliberately not considered: `$$…$$` is
+/// unambiguous, and nobody writes a price with two dollar signs.
+///
+/// The range is passed through untouched. Rewriting the event is allowed;
+/// rewriting the offsets is not, because ADR-1's one-byte checkbox writes and
+/// ADR-2's incremental patching both index the file through them.
+fn demote_currency<'a>(source: &'a str, event: Event<'a>, range: &Range<usize>) -> Event<'a> {
+    if matches!(event, Event::InlineMath(_)) && is_currency_pair(source, range) {
+        return Event::Text(CowStr::Borrowed(&source[range.clone()]));
+    }
+    event
+}
+
+/// Whether both `$` delimiters of the span at `range` are followed by a digit.
+///
+/// `range` is an `Event::InlineMath` range, so it includes both delimiters and
+/// starts with a single `$`.
+fn is_currency_pair(source: &str, range: &Range<usize>) -> bool {
+    let opens_on_digit = source[range.clone()]
+        .strip_prefix('$')
+        .and_then(|after| after.bytes().next())
+        .is_some_and(|byte| byte.is_ascii_digit());
+    // A span that ends the file has nothing after its closing `$`, so it is
+    // not a price.
+    let closes_on_digit = source[range.end..]
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit());
+
+    opens_on_digit && closes_on_digit
+}
+
 fn build(
     source: &str,
     kind: BlockKind,
@@ -564,8 +625,12 @@ mod tests {
     #[test]
     fn a_dollar_sign_in_prose_is_still_a_dollar_sign() {
         // The regression enabling ENABLE_MATH could plausibly introduce: a
-        // price list turning into mathematics. `pulldown-cmark` needs the
-        // delimiters to hug their content, so these stay text.
+        // price list turning into mathematics. Both shapes here are saved by
+        // the space in front of the second `$`, and for a long time this test
+        // and its neighbour in `render` were the whole guard — which is why
+        // they only ever asserted on shapes that were never at risk. The
+        // shapes that are at risk are in the next test; do not add another
+        // passing one here and call currency covered.
         for source in ["That costs $5 and $10 total.\n", "a $ b $ c\n"] {
             let doc = Document::parse(source);
             assert!(
@@ -575,6 +640,83 @@ mod tests {
                 "{source:?} parsed as math"
             );
         }
+    }
+
+    #[test]
+    fn currency_pairs_that_hug_their_delimiters_are_not_math() {
+        // Every shape here parsed as one inline math span before
+        // `demote_currency`, with the prose between the two amounts typeset as
+        // italic identifiers. The first is the sentence that was reported.
+        let sources = [
+            "Coffee is $4.50 vs\na fancy latte at ~$7).\n",
+            "coffee $4.50 vs latte ~$7.\n",
+            "costs $5 or ~$10.\n",
+            "a range of $5-$10 today.\n",
+            "US$5 and US$10.\n",
+            "fees are $2/share vs $3/share.\n",
+        ];
+
+        for source in sources {
+            let doc = Document::parse(source);
+            assert!(
+                doc.events()
+                    .iter()
+                    .all(|(e, _)| !matches!(e, Event::InlineMath(_) | Event::DisplayMath(_))),
+                "{source:?} parsed as math"
+            );
+            // Not merely "not math": every character of the source, both
+            // dollar signs included, has to survive into the text.
+            let text = plain_text(doc.events());
+            for amount in source.split('$').skip(1) {
+                let amount = amount.split_whitespace().next().unwrap_or_default();
+                assert!(
+                    text.contains(&format!("${amount}")),
+                    "{source:?} lost ${amount}: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_currency_rule_leaves_real_inline_math_alone() {
+        // A closing `$` followed by a digit is what the rule keys on, and none
+        // of these has one: an expression's closing delimiter is followed by
+        // prose, punctuation, or the end of the line.
+        for source in [
+            "Area is $x^2$ exactly.\n",
+            "Twice is $2x$ exactly.\n",
+            "$2$ then $3$ then $4$.\n",
+            "Ends the line with $2n$\n",
+            "$$2x$$ is display.\n",
+        ] {
+            let doc = Document::parse(source);
+            assert!(
+                doc.events()
+                    .iter()
+                    .any(|(e, _)| matches!(e, Event::InlineMath(_) | Event::DisplayMath(_))),
+                "{source:?} lost its math"
+            );
+        }
+    }
+
+    #[test]
+    fn a_demoted_currency_span_keeps_the_range_it_was_given() {
+        // ADR-1's checkbox writes and ADR-2's patching both index the file
+        // through these offsets, so the rewritten event must still describe
+        // exactly the bytes it replaced.
+        let src = "coffee $4.50 vs ~$7.\n";
+        let doc = Document::parse(src);
+        let demoted = doc
+            .events()
+            .iter()
+            .find_map(|(event, range)| match event {
+                Event::Text(text) if text.starts_with('$') => Some((text.clone(), range.clone())),
+                _ => None,
+            })
+            .expect("the demoted span");
+
+        assert_eq!(demoted.0.as_ref(), "$4.50 vs ~$");
+        assert_eq!(&src[demoted.1], "$4.50 vs ~$");
     }
 
     #[test]

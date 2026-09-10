@@ -1238,6 +1238,18 @@ mod tests {
     }
 
     #[test]
+    fn two_amounts_hugging_their_delimiters_are_left_alone_too() {
+        // The reported sentence. Before the currency rule this rendered as one
+        // `<math>` element holding a row of `<mi>` nodes, which read on
+        // screen as "Coffee is 4.50vsa fancy latte at 7".
+        let html = html_of("Coffee is $4.50 vs\na fancy latte at ~$7).\n");
+        assert!(!html.contains("<math"), "{html}");
+        assert!(html.contains("$4.50"), "{html}");
+        assert!(html.contains("~$7)"), "{html}");
+        assert!(html.contains("a fancy latte at"), "{html}");
+    }
+
+    #[test]
     fn rich_counters_separate_diagrams_from_code_blocks() {
         let source = "$x$ and $$y$$\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n\
                       ```rust\nfn f() {}\n```\n\n```mermaid\nnot a diagram\n```\n";

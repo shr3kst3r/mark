@@ -235,8 +235,36 @@ fn render_math(latex: &str, display: MathDisplay) -> Result<String, String> {
     // parser diagnostics and reports success.
     match merror_message(&mathml) {
         Some(message) => Err(message),
-        None => Ok(mathml),
+        None => Ok(unescape_nbsp(mathml)),
     }
+}
+
+/// Undo `pulldown-latex` 0.8 escaping its own non-breaking space.
+///
+/// `~` and `\ ` are LaTeX's control spaces. The writer emits both as an
+/// `<mtext>` holding the literal `&nbsp;`, then escapes the `&` on the way out
+/// along with everything it copies from the source — so a correct expression
+/// renders with the six characters `&nbsp;` sitting in the middle of it. Every
+/// other spacing command (`\,`, `\;`, `\quad`, `\qquad`, `\!`) goes through
+/// `<mspace>` and is unaffected.
+///
+/// The replacement is the numeric character reference, which is valid in both
+/// the HTML and XML serialisations, so it holds regardless of `xml` in
+/// [`RenderConfig`]. The pattern is a whole element, so the only user text it
+/// can also match is a hand-written `\text{&nbsp;}` — which wanted a
+/// non-breaking space anyway.
+///
+/// Delete this when upstream stops doing it.
+fn unescape_nbsp(mathml: String) -> String {
+    const BROKEN: &str = "<mtext>&amp;nbsp;</mtext>";
+    const FIXED: &str = "<mtext>&#160;</mtext>";
+
+    // Guarded because `replace` allocates unconditionally, and almost no
+    // expression contains a control space.
+    if mathml.contains(BROKEN) {
+        return mathml.replace(BROKEN, FIXED);
+    }
+    mathml
 }
 
 /// Mermaid → SVG in the given palette. `Ok(None)` is `NoDiagram`: not a
@@ -629,6 +657,39 @@ mod tests {
         assert!(!out.failed(), "{out:?}");
         assert!(out.html.starts_with("<math display=\"inline\""), "{out:?}");
         assert!(out.html.contains("<msup>"), "{out:?}");
+    }
+
+    #[test]
+    fn a_control_space_does_not_leak_an_escaped_entity() {
+        // `pulldown-latex` 0.8 writes `<mtext>&amp;nbsp;</mtext>` for `~` and
+        // for `\ `, so a correct expression rendered with the six characters
+        // `&nbsp;` in the middle of it.
+        for latex in ["a~b", "a\\ b", "\\int_0^1 f(x)~dx = y"] {
+            let out = math(latex, MathDisplay::Inline);
+            assert!(!out.failed(), "{out:?}");
+            assert!(
+                !out.html.contains("&amp;nbsp;"),
+                "{latex} leaked the entity: {}",
+                out.html
+            );
+            assert!(
+                out.html.contains("&#160;"),
+                "{latex} lost the space: {}",
+                out.html
+            );
+        }
+    }
+
+    #[test]
+    fn the_other_spacing_commands_were_never_affected() {
+        // These go through `<mspace>`, so `unescape_nbsp` must not be the
+        // thing keeping them correct.
+        for latex in ["a\\,b", "a\\;b", "a\\quad b", "a\\!b"] {
+            let out = math(latex, MathDisplay::Inline);
+            assert!(!out.failed(), "{out:?}");
+            assert!(out.html.contains("<mspace"), "{latex}: {}", out.html);
+            assert!(!out.html.contains("nbsp"), "{latex}: {}", out.html);
+        }
     }
 
     #[test]

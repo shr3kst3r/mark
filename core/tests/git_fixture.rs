@@ -572,8 +572,8 @@ fn base_bytes_through_a_symlinked_directory_finds_the_tracked_file() {
 
     let via_link = git::base_bytes(&repo, &root.join("linked/edit.md"), git::DEFAULT_TIMEOUT)
         .expect("no error");
-    let direct = git::base_bytes(&repo, &root.join("edit.md"), git::DEFAULT_TIMEOUT)
-        .expect("no error");
+    let direct =
+        git::base_bytes(&repo, &root.join("edit.md"), git::DEFAULT_TIMEOUT).expect("no error");
     assert_eq!(via_link.as_deref(), Some("1\n2\n3\n"));
     assert_eq!(via_link, direct);
     assert_eq!(

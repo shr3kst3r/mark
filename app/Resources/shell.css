@@ -74,21 +74,39 @@ html {
 }
 
 body.mk-doc {
+  /* The measure: the widest a line of prose is allowed to get. 43rem is the
+     46rem this file used to cap the container at, less its 1.5rem gutters, so
+     every paragraph keeps the width it has always had. */
+  --mk-measure: 43rem;
   margin: 0;
   padding: 0;
   font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
+/*
+ * The measure caps each block, not the column the blocks sit in.
+ *
+ * It used to cap `.mk-container`, which made it a cap on *everything*: a
+ * twelve-column table had 43rem to live in no matter how wide the window was,
+ * so it scrolled sideways inside a narrow column with several hundred empty
+ * pixels either side of it — the window was big enough and the table still
+ * would not fit. So the container is full-width now and each block carries the
+ * cap itself. For prose that is the same layout to the pixel; for a block with
+ * a reason to be wider, the window is there to ask for.
+ *
+ * The `auto` side margins are what hold the blocks in one column, and they are
+ * also what centres a wide table on that column rather than letting it lean
+ * off to the right.
+ */
 .mk-container {
   display: block;
-  margin: 0 auto;
   padding: 2rem 1.5rem 6rem;
-  max-width: 46rem;
 }
 
 .mk-blk {
-  margin: 0 0 1rem;
+  margin: 0 auto 1rem;
+  max-width: var(--mk-measure);
 }
 
 /*
@@ -329,10 +347,68 @@ blockquote {
   margin-bottom: 0;
 }
 
+/*
+ * Tables — the block that is allowed past the measure.
+ *
+ * A table that is a block of its own gets the whole window: the block drops
+ * the measure and becomes the scroll container, and the table inside it takes
+ * exactly what its columns need — no narrower than `--mk-measure`, so a
+ * two-column table still lines up with the prose instead of shrink-wrapping
+ * to a stub, and no wider than the window can give. The last resort, a table
+ * wider than the window itself, is then a scrollbar under that one table
+ * rather than a sideways scroll of the whole document.
+ *
+ * The scroll container has to be the block rather than the `<table>`, and that
+ * is the whole fix: a table can only scroll if it is `display: block`, and a
+ * block-level table fills its parent rather than sizing to its columns — so
+ * every table used to be as wide as the column it sat in and no wider,
+ * whatever the window had spare.
+ *
+ * Which is why the bare `table` rule keeps that older behaviour: a table
+ * nested inside a blockquote or a list item is not a block of its own, so
+ * there is nothing there to hand the window to, and scrolling inside whatever
+ * contains it is still the best it can do.
+ */
 table {
   border-collapse: collapse;
   display: block;
   overflow-x: auto;
+}
+
+.mk-blk.mk-table {
+  max-width: none;
+  overflow-x: auto;
+}
+
+.mk-blk.mk-table > table {
+  display: table;
+  overflow-x: visible;
+  margin: 0 auto;
+  min-width: min(var(--mk-measure), 100%);
+}
+
+/*
+ * `View ▸ Use Full Window Width` (`DocumentWidth`), which is the measure
+ * switched off.
+ *
+ * A class on `<body>` rather than a second stylesheet or a rewritten document:
+ * nothing the core emits mentions width, so the setting costs one `classList`
+ * call per open page and no re-render. `shell.js`'s `setFullWidth` is the
+ * whole application of it.
+ *
+ * The table rules go with it. With no measure to line up against, a
+ * two-column table floored at 43rem and centred would be a stub floating in
+ * the middle of a wide window, so it shrink-wraps to its columns and takes the
+ * left gutter the prose is now using — which is exactly what `@media print`
+ * does, and for the same reason.
+ */
+body.mk-full-width .mk-blk {
+  max-width: none;
+}
+
+body.mk-full-width .mk-blk.mk-table > table {
+  min-width: 0;
+  margin-inline: 0;
 }
 
 th,
@@ -652,7 +728,17 @@ math[display="block"] {
     --mk-border: #cccccc; --mk-link: #0000ee;
   }
   html, body.mk-doc { background: #ffffff; color: #000000; }
-  body.mk-doc { max-width: none; padding: 0; font-size: 11pt; }
+  body.mk-doc { padding: 0; font-size: 11pt; }
+  /* The measure is a screen decision as well: paper has margins of its own,
+     and a 43rem column inside them leaves a third of the sheet empty. The
+     container's 6rem scroll runway goes for the same reason, and `min-width`
+     with it — on a sheet narrower than the measure it would push a small
+     table off the edge. Centring goes too: on paper there is no wide window
+     to centre a table in, and a left edge shared with the prose is what a
+     reader expects. */
+  .mk-container { padding: 0; }
+  .mk-blk { max-width: none; }
+  .mk-blk.mk-table > table { min-width: 0; margin-inline: 0; }
   /* Page breaks. A heading at the foot of a page, or a code block or table
      split down the middle, is the difference between a printout someone can
      read and one they reprint. */

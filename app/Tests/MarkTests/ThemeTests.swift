@@ -92,7 +92,7 @@ struct ThemeTests {
     /// `shell.css` and `core/src/render.rs` are two hand-written copies of the
     /// same colour contract — the app loads one, `mark render --html` inlines
     /// the other. Nothing makes them agree except this.
-    @Test("every variable shell.css uses is one a theme defines")
+    @Test("every colour shell.css uses is one a theme defines")
     func stylesheetVariablesExist() throws {
         let css = try #require(ShellAssets.data(named: "shell.css")).utf8String
         let theme = try MarkCore.theme(named: "default-dark")
@@ -107,7 +107,18 @@ struct ThemeTests {
         }
         #expect(used.count > 10, "found only \(used.count) variables in shell.css")
 
+        // Custom properties the stylesheet declares for itself rather than
+        // reading from a theme. `--mk-measure` is a length — the width prose is
+        // held to — and a theme has no say in it, which is the point: the
+        // contract this test protects is that every *colour* comes from the
+        // theme, so a layout token has to be named here to stay out of it.
+        let stylesheetsOwn: Set<String> = ["--mk-measure"]
+
         for name in used.sorted() {
+            if stylesheetsOwn.contains(name) {
+                #expect(css.contains("\(name):"), "\(name) is used but never declared")
+                continue
+            }
             // `--mk-s10` … `--mk-s17` are base24's extra eight. shell.css has
             // rules for them so a *user* theme can use them; no shipped theme
             // defines any, and a `var()` with no value simply inherits.

@@ -106,9 +106,11 @@ struct PreferencesTests {
         Preferences.setAutosaveDelay(1.5, store)
         Invisibles.isShowing = false
         LineNumbers.isShowing = true
+        DocumentWidth.isFull = true
         defer {
             Invisibles.isShowing = true
             LineNumbers.isShowing = false
+            DocumentWidth.isFull = false
         }
 
         let controller = PreferencesWindowController(defaults: store)
@@ -118,6 +120,22 @@ struct PreferencesTests {
         #expect(controller.autosaveSlider.doubleValue == 1.5)
         #expect(controller.invisiblesButton.state == .off)
         #expect(controller.lineNumbersButton.state == .on)
+        #expect(controller.fullWidthButton.state == .on)
+    }
+
+    @Test("the width switch drives the same app-wide setting the View menu does")
+    func fullWidthSwitch() {
+        DocumentWidth.isFull = false
+        defer { DocumentWidth.isFull = false }
+
+        let controller = PreferencesWindowController(defaults: defaults())
+        defer { controller.tearDown() }
+        _ = controller.window
+
+        controller.fullWidthButton.state = .on
+        _ = controller.fullWidthButton.target?.perform(
+            controller.fullWidthButton.action, with: controller.fullWidthButton)
+        #expect(DocumentWidth.isFull, "the switch did not reach the app-wide setting")
     }
 
     @Test("the two mirrored switches drive the same app-wide state the menu does")

@@ -396,6 +396,16 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// 100% writes nothing.
     public var textZoom: Double?
 
+    /// Whether documents use the whole window rather than the measure —
+    /// ``DocumentWidth``.
+    ///
+    /// Top-level, beside ``theme`` and ``textZoom``, rather than on
+    /// ``SessionWindow``: it is one choice about how a document looks, not one
+    /// per window. Optional and additive like the fields around it, so
+    /// ``currentVersion`` does not move; absent means the measure, which is
+    /// the default, so the common case writes nothing.
+    public var documentFullWidth: Bool?
+
     /// Whether the editor's margin numbers its lines — ``LineNumbers``.
     ///
     /// Optional and additive like the fields around it. Absent means off,
@@ -472,6 +482,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         editorVisible: Bool? = nil,
         editorInvisibles: Bool? = nil,
         textZoom: Double? = nil,
+        documentFullWidth: Bool? = nil,
         editorLineNumbers: Bool? = nil,
         windows: [SessionWindow]? = nil,
         history: [SessionHistoryEntry]? = nil
@@ -488,6 +499,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.editorVisible = editorVisible
         self.editorInvisibles = editorInvisibles
         self.textZoom = textZoom
+        self.documentFullWidth = documentFullWidth
         self.editorLineNumbers = editorLineNumbers
         self.windows = windows
         self.history = history

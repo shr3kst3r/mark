@@ -233,6 +233,30 @@ public struct ShellProbe: Sendable, Equatable {
 }
 
 
+/// What `mark.setFullWidth` did, and what the page resolved afterwards.
+///
+/// ``blockMaxWidth`` is the point of it: "the class is set" is a claim about
+/// the DOM, and the claim worth asserting is that a block is no longer capped.
+/// `"none"` is the setting in force; a length is the measure still holding.
+/// Empty when the page has no blocks yet, which is every page between `ready`
+/// and its first document.
+public struct FullWidthReport: Sendable, Equatable {
+    public let fullWidth: Bool
+    /// False when the page was already this way — a rehydrated tab being told
+    /// the setting it was already showing.
+    public let changed: Bool
+    /// The `max-width` the first block resolved to, read out of
+    /// `getComputedStyle`.
+    public let blockMaxWidth: String
+
+    public init?(_ value: Any?) {
+        guard let d = value as? [String: Any] else { return nil }
+        fullWidth = (d["fullWidth"] as? Bool) ?? false
+        changed = (d["changed"] as? Bool) ?? false
+        blockMaxWidth = (d["blockMaxWidth"] as? String) ?? ""
+    }
+}
+
 /// What `mark.setTheme` did, and what the page resolved afterwards.
 ///
 /// The counters are here because "applying a theme did not re-render the

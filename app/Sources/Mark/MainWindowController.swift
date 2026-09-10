@@ -1120,6 +1120,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         // reason — see ``SessionState/editorInvisibles``.
         state.editorInvisibles = Invisibles.isShowing
         state.textZoom = TextZoom.persistedScale
+        // And the measure, which is one choice about how a document looks.
+        state.documentFullWidth = DocumentWidth.persisted
         state.editorLineNumbers = LineNumbers.isShowing ? true : nil
         return state
     }
@@ -1169,6 +1171,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
             appearance: state.themeAppearance.flatMap(ThemeAppearance.init(argument:)))
         Invisibles.restore(state.editorInvisibles)
         TextZoom.restore(state.textZoom)
+        DocumentWidth.restore(state.documentFullWidth)
         LineNumbers.restore(state.editorLineNumbers)
         guard let window = state.effectiveWindows.first else { return }
         restore(window, sidebarRoot: sidebarRoot)
@@ -2529,6 +2532,18 @@ extension MainWindowController: NSMenuItemValidation {
         saveSessionSoon()
     }
 
+    /// `View ▸ Use Full Window Width` — the measure, off or on.
+    ///
+    /// App-wide, like the theme and the text size: ``DocumentWidth/isFull``
+    /// posts, and every open page sets one class on its own `<body>`. A menu
+    /// item reaches the focused window through the responder chain, and a
+    /// second window still holding its column would read as the toggle
+    /// half-working.
+    @objc public func toggleFullWidth(_ sender: Any?) {
+        DocumentWidth.isFull.toggle()
+        saveSessionSoon()
+    }
+
     /// The Sort By submenu, dispatched by `tag` in ``TreeSort/allCases`` order.
     @objc public func sortSidebar(_ sender: Any?) {
         guard let item = sender as? NSMenuItem,
@@ -3118,6 +3133,14 @@ extension MainWindowController: NSMenuItemValidation {
             // repository: it is a setting the next editor to open will honour,
             // and greying it out would say the setting does not exist.
             item.state = Invisibles.isShowing ? .on : .off
+            return true
+        case #selector(toggleFullWidth(_:)):
+            // A checkmark rather than a pair of titles, like the sidebar's
+            // switches: it is app-wide, persisted, and the state has to be
+            // visible somewhere. Never disabled — it is a setting about how
+            // documents are drawn, and it holds for the next one to open even
+            // with no tab in front of it.
+            item.state = DocumentWidth.isFull ? .on : .off
             return true
         case #selector(zoomTextIn(_:)):
             return TextZoom.scale < TextZoom.steps.last!

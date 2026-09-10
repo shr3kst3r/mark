@@ -246,6 +246,25 @@ struct MenuBarTests {
         #expect(order.firstIndex(of: "Show Line Numbers") == invisibles + 1)
     }
 
+    @Test("View ▸ Use Full Window Width sits under Actual Size, with no shortcut")
+    func fullWidthItem() throws {
+        let delegate = AppDelegate()
+        let menu = try #require(delegate.buildMainMenu())
+        let view = try #require(
+            menu.items.compactMap(\.submenu).first { $0.title == "View" })
+        let item = try #require(view.items.first { $0.title == "Use Full Window Width" })
+        #expect(item.action == #selector(MainWindowController.toggleFullWidth(_:)))
+        // Deliberately unbound: it is a setting someone flips once for a
+        // screen, and the ⌘ combinations left are worth more to something you
+        // press often. Asserted rather than left to chance, because adding one
+        // here is exactly the change that should have to think about the
+        // collision test above.
+        #expect(item.keyEquivalent == "")
+        let order = view.items.map(\.title)
+        let actualSize = try #require(order.firstIndex(of: "Actual Size"))
+        #expect(order.firstIndex(of: "Use Full Window Width") == actualSize + 1)
+    }
+
     @Test("Edit ▸ Copy as HTML sits under Copy, on ⌥⇧⌘C")
     func copyAsHTMLItem() throws {
         let delegate = AppDelegate()

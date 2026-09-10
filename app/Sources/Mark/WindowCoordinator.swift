@@ -250,6 +250,7 @@ public final class WindowCoordinator {
         // one choice about how source looks, not one per window.
         state.editorInvisibles = Invisibles.isShowing
         state.textZoom = TextZoom.persistedScale
+        state.documentFullWidth = DocumentWidth.persisted
         state.editorLineNumbers = LineNumbers.isShowing ? true : nil
         // App-wide for the same reason, and written even when empty so that
         // clearing the history is a change the file records rather than one an
@@ -282,6 +283,7 @@ public final class WindowCoordinator {
         // the marks rather than drawing itself twice.
         Invisibles.restore(state.editorInvisibles)
         TextZoom.restore(state.textZoom)
+        DocumentWidth.restore(state.documentFullWidth)
         LineNumbers.restore(state.editorLineNumbers)
         // Before the windows, so that a file named on the command line — which
         // opens as those windows come up — is recorded on *top* of the restored

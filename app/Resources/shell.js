@@ -1359,6 +1359,39 @@
     };
   };
 
+  /*
+   * `View ▸ Use Full Window Width` — the measure, off or on.
+   *
+   * One class on `<body>`; every rule that reads it is in `shell.css`. The
+   * document is untouched, which is the whole point: nothing in the HTML the
+   * core emits mentions width, so this is not a re-render, not a core call,
+   * and not a patch — it is the same shape of change as `setTheme`.
+   *
+   * Called on every `ready` as well as on every toggle, because a web view
+   * that has just been rehydrated has a fresh `<body>` and no memory of the
+   * setting.
+   */
+  mark.setFullWidth = function (full) {
+    var was = document.body.classList.contains("mk-full-width");
+    document.body.classList.toggle("mk-full-width", !!full);
+    return {
+      fullWidth: !!full,
+      changed: was !== !!full,
+      /* Read back rather than assumed, the way `setTheme` reads its colours
+       * back: what a block is actually capped at now. `none` is the setting
+       * applied; a length is the measure still in force. */
+      blockMaxWidth: blockMaxWidth()
+    };
+  };
+
+  /* The `max-width` the first block resolved to, or "" when the document is
+   * empty. Used only by the report above and the tests that read it. */
+  function blockMaxWidth() {
+    var block = container.firstElementChild;
+    if (!block) return "";
+    return window.getComputedStyle(block).maxWidth;
+  }
+
   /* The theme CSS currently installed, for a test that wants to compare. */
   mark.themeCSS = function () {
     var style = document.getElementById("mk-theme");

@@ -206,6 +206,12 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             name: TextZoom.didChangeNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(documentWidthChanged),
+            name: DocumentWidth.didChangeNotification,
+            object: nil
+        )
         webView.load(URLRequest(url: ShellAssets.shellURL))
         Log.signposter.endInterval("shell load", state)
     }
@@ -772,6 +778,33 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
         webView?.pageZoom = TextZoom.scale
     }
 
+    /// `View ▸ Use Full Window Width`, from any window.
+    ///
+    /// One class on the page's `<body>`, for the reasons ``DocumentWidth``
+    /// gives: no re-render, no core call, nothing from ADR-2's budget. A
+    /// dehydrated tab has no web view and needs nothing — it reads
+    /// ``DocumentWidth/isFull`` when it rehydrates, in the `ready` handler.
+    @objc private func documentWidthChanged() {
+        applyFullWidth(DocumentWidth.isFull)
+    }
+
+    /// Push the setting at the page, and report what it resolved to.
+    ///
+    /// The report is what a test asserts on: "the class is set" is a claim
+    /// about the DOM, and "a block is no longer capped" is the claim that
+    /// matters, so the page reads its own computed `max-width` back the way
+    /// ``applyTheme(_:)`` reads its colours back.
+    @discardableResult
+    public func applyFullWidth(_ full: Bool) -> _Concurrency.Task<FullWidthReport?, Never> {
+        needsDisplay = true
+        return _Concurrency.Task { @MainActor in
+            guard self.isShellReady else { return nil }
+            let result = try? await self.call(
+                "return window.mark.setFullWidth(full);", arguments: ["full": full])
+            return FullWidthReport(result)
+        }
+    }
+
     /// Tell the asset handler which images this document may load, and return
     /// the base URL relative sources resolve against.
     ///
@@ -1206,6 +1239,11 @@ public final class DocumentView: NSView, ScriptBridgeDelegate, WKNavigationDeleg
             // is already in the right colours rather than flashing the
             // stylesheet's fallback palette.
             applyTheme(ThemeController.shared.active)
+            // Beside the theme, and before the deferred open for the same
+            // reason: a page that paints as soon as it has blocks paints them
+            // at the width the setting asks for rather than at the measure and
+            // then reflowing.
+            applyFullWidth(DocumentWidth.isFull)
             onShellReady?()
             // Before the waiters are released, so anyone in `awaitReady()`
             // sees the deferred open's task rather than a nil one and returns

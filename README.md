@@ -330,6 +330,18 @@ editor by scaling its type, so the change ruler and the whitespace marks stay
 where they belong. It is app-wide and remembered, like the theme: two windows
 disagreeing about how big text is is not a state anyone means to be in.
 
+**How wide a document gets.** Prose is held to a comfortable line length —
+about 43rem — however wide the window is, because nothing about reading a
+paragraph improves by making the line longer. A **table** is the exception: one
+that is a block of its own takes as much of the window as its columns need, so
+a fourteen-column table on a wide screen is read rather than scrolled sideways
+inside a narrow column, and only a table wider than the window itself keeps a
+scrollbar. If you would rather have the whole window for everything,
+**View ▸ Use Full Window Width** turns the column off — app-wide, remembered,
+and mirrored as a checkbox in Settings. It costs one class on the page: no
+re-render, and nothing in the document's HTML mentions width. Printing is
+unaffected either way, since paper has margins of its own.
+
 **A markdown reference, rendered by the renderer it documents.** ⇧⌘/ — or
 **Help ▸ Markdown Reference** — opens every construct mark supports, with the
 source next to the result: headings and their anchors, task lists, tables,
@@ -484,7 +496,8 @@ disagree about which task you clicked.
 **Settings** on ⌘, holds the two things that could previously be changed only
 by editing a constant or exporting an environment variable: how long autosave
 waits after you stop typing, and how many tabs keep a live web view (about
-52 MB each) — and a checkbox for the line numbers, which ⌃⌘L also flips.
+52 MB each) — plus checkboxes for the line numbers, which ⌃⌘L also flips, and
+for the full window width, which **View ▸ Use Full Window Width** also flips.
 Everything else stays where it is — the theme is in **View ▸
 Theme** because you want to see it applied as you arrow through it, and the
 sidebar's switches are beside the tree they change. `MARK_RESIDENT_TABS` still
@@ -492,8 +505,9 @@ wins when it is set, and the window says so rather than showing a control that
 does nothing.
 
 **Session.** Tabs, order, selection, scroll offsets, sidebar root and history,
-the theme and which half of it is on screen, and whether the editor was open all
-come back on relaunch, from our own JSON file rather than `NSWindowRestoration`.
+the theme and which half of it is on screen, the text size and whether
+documents use the full window width, and whether the editor was open all come
+back on relaunch, from our own JSON file rather than `NSWindowRestoration`.
 
 ## The CLI
 

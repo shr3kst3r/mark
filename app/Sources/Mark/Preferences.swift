@@ -19,9 +19,9 @@ import Foundation
 /// * **How many tabs keep a live web view.** `MARK_RESIDENT_TABS`, which is a
 ///   real control over how much memory mark uses (~52 MB each) and which
 ///   nobody discovers from a menu.
-/// * The two editor marks, mirrored, because someone who has opened this window
-///   is looking for exactly this kind of switch and should not have to be told
-///   they live in View.
+/// * The two editor marks and the document's width, mirrored, because someone
+///   who has opened this window is looking for exactly this kind of switch and
+///   should not have to be told they live in View.
 ///
 /// Stored in `UserDefaults` rather than the session file, for the reason
 /// `DocumentPaneController` gives about its own tab: these are preferences —
@@ -115,18 +115,22 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
     public private(set) var isTornDown = false
     private let defaults: UserDefaults
 
+    let fullWidthButton = NSButton()
     let invisiblesButton = NSButton()
     let lineNumbersButton = NSButton()
     let autosaveSlider = NSSlider()
     let autosaveLabel = NSTextField(labelWithString: "")
     let residentStepper = NSStepper()
     let residentLabel = NSTextField(labelWithString: "")
-    private let residentNote = NSTextField(labelWithString: "")
+    /// Built through ``note(_:)`` so the two pieces of small grey explanatory
+    /// text in this window cannot drift apart. Its string is set in
+    /// ``updateLabels()``, which is why it is a property and the other is not.
+    private lazy var residentNote = note("")
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 280),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 330),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -149,7 +153,7 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
     }
 
     private func buildContent() {
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 280))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 330))
 
         func heading(_ text: String) -> NSTextField {
             let label = NSTextField(labelWithString: text)
@@ -157,6 +161,12 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
             label.textColor = .secondaryLabelColor
             return label
         }
+
+        fullWidthButton.setButtonType(.switch)
+        fullWidthButton.title = "Use the full window width"
+        fullWidthButton.state = DocumentWidth.isFull ? .on : .off
+        fullWidthButton.target = self
+        fullWidthButton.action = #selector(fullWidthChanged)
 
         invisiblesButton.setButtonType(.switch)
         invisiblesButton.title = "Show invisibles in the editor"
@@ -185,13 +195,15 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
         residentStepper.action = #selector(residentChanged)
         residentStepper.isEnabled = !Preferences.residentTabsIsOverridden
 
-        residentNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
-        residentNote.textColor = .secondaryLabelColor
-        residentNote.maximumNumberOfLines = 3
-        residentNote.lineBreakMode = .byWordWrapping
-        residentNote.preferredMaxLayoutWidth = 420
-
         let rows = NSStackView(views: [
+            heading("Document"),
+            fullWidthButton,
+            note(
+                """
+                Off, a line of prose is held to a comfortable length and a wide \
+                table is the one thing allowed past it. On, every block uses \
+                the whole window.
+                """),
             heading("Editor"),
             invisiblesButton,
             lineNumbersButton,
@@ -213,6 +225,18 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
 
         window?.contentView = content
         updateLabels()
+    }
+
+    /// Small grey explanatory text under a switch, for a setting whose title
+    /// cannot say what it does on its own.
+    private func note(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 3
+        label.lineBreakMode = .byWordWrapping
+        label.preferredMaxLayoutWidth = 420
+        return label
     }
 
     private func labelled(_ title: String, _ control: NSView, _ value: NSTextField) -> NSView {
@@ -239,6 +263,10 @@ public final class PreferencesWindowController: NSWindowController, NSWindowDele
     }
 
     // MARK: - Actions
+
+    @objc private func fullWidthChanged() {
+        DocumentWidth.isFull = fullWidthButton.state == .on
+    }
 
     @objc private func invisiblesChanged() {
         Invisibles.isShowing = invisiblesButton.state == .on

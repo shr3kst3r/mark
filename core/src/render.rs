@@ -693,9 +693,13 @@ pub fn document_css() -> String {
     let mut css = String::from(
         "\
 html { background: var(--mk-background); color: var(--mk-foreground); }
-body.mk-doc { margin: 0 auto; padding: 2rem 1.5rem; max-width: 46rem;
+/* `--mk-measure` is the widest a line of prose gets: the 46rem this used to
+   cap the body at, less its 1.5rem gutters, so a paragraph keeps the width it
+   has always had. It caps each block rather than the body, because a cap on
+   the body is a cap on the widest table too -- see `.mk-blk.mk-table`. */
+body.mk-doc { --mk-measure: 43rem; margin: 0; padding: 2rem 1.5rem;
   font: 16px/1.6 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; }
-.mk-blk { margin: 0 0 1rem; }
+.mk-blk { margin: 0 auto 1rem; max-width: var(--mk-measure); }
 .mk-h { line-height: 1.25; margin: 1.8rem 0 0.6rem; color: var(--mk-heading); }
 a { color: var(--mk-link); }
 pre.mk-code { background: var(--mk-surface); border-radius: 6px; padding: 0.8rem 1rem;
@@ -704,7 +708,20 @@ code { font-family: 'SF Mono', ui-monospace, monospace; }
 :not(pre) > code { background: var(--mk-surface); border-radius: 4px; padding: 0.1em 0.35em; }
 blockquote { margin: 0; padding-left: 1rem; border-left: 3px solid var(--mk-accent);
   color: var(--mk-subtle); }
-table { border-collapse: collapse; }
+/* A table that is a block of its own is the one block allowed past the
+   measure: the block drops the cap and becomes the scroll container, and the
+   table takes what its columns need -- floored at the measure so a small
+   table still lines up with the prose, with scrolling inside the block as the
+   last resort. The scroll container has to be the block, because a table can
+   only scroll if it is `display: block` and a block-level table fills its
+   parent rather than sizing to its columns; that is what left a twelve-column
+   table stuck in a 43rem column however wide the page was. The bare rule
+   keeps that older behaviour for a table nested in a blockquote or a list
+   item, which is not a block of its own and has nothing to be handed. */
+table { border-collapse: collapse; display: block; overflow-x: auto; }
+.mk-blk.mk-table { max-width: none; overflow-x: auto; }
+.mk-blk.mk-table > table { display: table; overflow-x: visible; margin: 0 auto;
+  min-width: min(var(--mk-measure), 100%); }
 th, td { border: 1px solid var(--mk-rule); padding: 0.35rem 0.7rem; }
 th { background: var(--mk-surface); }
 hr { border: none; border-top: 1px solid var(--mk-rule); }
@@ -827,7 +844,14 @@ math[display='block'] { display: block; margin: 0.6rem 0; overflow-x: auto; }
     --mk-border: #cccccc; --mk-link: #0000ee;
   }
   html, body.mk-doc { background: #ffffff; color: #000000; }
-  body.mk-doc { max-width: none; padding: 0; font-size: 11pt; }
+  body.mk-doc { padding: 0; font-size: 11pt; }
+  /* The measure is a screen decision as well: paper has margins of its own,
+     and a 43rem column inside them leaves a third of the sheet empty.
+     `min-width` goes with it -- on a sheet narrower than the measure it would
+     push a small table off the edge -- and so does the centring, since on
+     paper there is no wide window to centre a table in. */
+  .mk-blk { max-width: none; }
+  .mk-blk.mk-table > table { min-width: 0; margin-inline: 0; }
   /* Page breaks. A heading at the foot of a page, or a code block or table
      split down the middle, is the difference between a printout someone can
      read and one they reprint. */

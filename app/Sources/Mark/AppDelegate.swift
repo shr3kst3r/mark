@@ -786,6 +786,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "Actual Size", action: #selector(MainWindowController.zoomTextReset(_:)),
             keyEquivalent: "0"
         ).keyEquivalentModifierMask = [.command]
+        // The measure, off or on (``DocumentWidth``). In this group because it
+        // is the third thing here that changes how the *document* looks rather
+        // than which panes are around it, and a checkmark item because it is
+        // app-wide and persisted like the other two.
+        //
+        // No key equivalent: it is a setting someone flips once for a screen
+        // and leaves, not a thing to reach for while reading — and every
+        // free ⌘ combination is worth more to something you press often. The
+        // collision test in `MenuBarTests` is what keeps that honest if one is
+        // ever added.
+        viewMenu.addItem(
+            withTitle: "Use Full Window Width",
+            action: #selector(MainWindowController.toggleFullWidth(_:)), keyEquivalent: "")
         viewMenu.addItem(.separator())
 
         // The editor's whitespace marks: a dot for a space, an arrow across a

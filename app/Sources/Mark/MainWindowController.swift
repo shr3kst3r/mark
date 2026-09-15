@@ -762,14 +762,16 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard visible != isEditorVisible else { return }
         editor.isHidden = !visible
         if visible {
-            if let tab = tabs.selected {
-                bindEditor(to: tab)
-            }
             // A first opening with no divider position yet: give the editor a
             // sensible share rather than whatever `adjustSubviews` invents.
             if editor.frame.width < 80 {
                 let width = editorSplit.bounds.width
                 editorSplit.setPosition(width * 0.55, ofDividerAt: 0)
+            }
+            editorSplit.adjustSubviews()
+            editorSplit.needsLayout = true
+            if let tab = tabs.selected {
+                bindEditor(to: tab)
             }
         } else {
             editor.window?.makeFirstResponder(nil)

@@ -886,4 +886,31 @@ struct EditorRoundTripTests {
             try await harness.previewOffset(in: tab) == settled,
             "the preview moved again after the editor followed it")
     }
+
+    /// The text view must take the scroll view's width when opened rather than
+    /// staying at width 0. A zero-width text view leaves `_NSTextContentView`
+    /// clipped to 0 points, making the entire document's glyphs invisible.
+    @Test("opening the editor pane lays out the text view with positive width")
+    func editorTextViewHasValidGeometryWhenOpened() async throws {
+        let harness = try EditorHarness()
+        let tab = try await harness.open("# Hello\n\nSome body text here.\n")
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        let textView = pane.textView
+
+        harness.controller.window?.layoutIfNeeded()
+        #expect(pane.frame.width > 80)
+        #expect(textView.frame.width > 80)
+        #expect(textView.bounds.width > 80)
+
+        guard let layoutManager = textView.textLayoutManager else {
+            Issue.record("no text layout manager")
+            return
+        }
+        let usage = layoutManager.usageBoundsForTextContainer
+        #expect(usage.width > 0, "usage bounds has zero width")
+        let firstFragment = layoutManager.textLayoutFragment(for: CGPoint(x: 0, y: 0))
+        #expect(firstFragment != nil, "first text layout fragment was nil")
+        #expect((firstFragment?.layoutFragmentFrame.width ?? 0) > 0)
+    }
 }

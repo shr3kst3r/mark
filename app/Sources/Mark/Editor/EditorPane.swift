@@ -308,11 +308,13 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     public override init(frame: NSRect) {
         textView = NSTextView(usingTextLayoutManager: true)
         scrollView = NSScrollView(frame: frame)
+        let contentSize = scrollView.contentSize
+        textView.frame = NSRect(origin: .zero, size: contentSize)
         ruler = ChangeRuler(scrollView: scrollView)
         invisibles = InvisiblesOverlay(textView: textView)
         super.init(frame: frame)
 
-        Self.configure(textView)
+        Self.configure(textView, contentSize: contentSize)
         textView.delegate = self
         textView.textStorage?.delegate = self
 
@@ -417,7 +419,18 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// (`isAutomaticTextReplacementEnabled`) stay on, as do spellcheck,
     /// grammar, undo, and Find & Replace. Only the two typographic rewrites
     /// that corrupt markdown source are off.
-    private static func configure(_ textView: NSTextView) {
+    public override func layout() {
+        super.layout()
+        let contentWidth = scrollView.contentSize.width
+        if contentWidth > 0 && textView.frame.width != contentWidth {
+            textView.frame.size.width = contentWidth
+        }
+        if invisibles.frame != textView.bounds {
+            invisibles.frame = textView.bounds
+        }
+    }
+
+    private static func configure(_ textView: NSTextView, contentSize: NSSize) {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
@@ -431,13 +444,15 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.smartInsertDeleteEnabled = false
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainerInset = NSSize(width: 8, height: 10)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(
-            width: 0, height: CGFloat.greatestFiniteMagnitude)
+            width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
         textView.font = Self.bodyFont
         textView.setAccessibilityLabel("Markdown source")
         textView.setAccessibilityRoleDescription("markdown editor")
@@ -675,6 +690,9 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// one, or the pane changed width and the text rewrapped. Either way every
     /// mark below the change is somewhere else now.
     @objc private func textViewFrameChanged() {
+        if invisibles.frame != textView.bounds {
+            invisibles.frame = textView.bounds
+        }
         invisibles.needsDisplay = true
     }
 

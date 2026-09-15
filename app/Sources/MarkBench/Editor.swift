@@ -783,6 +783,172 @@ func measureThePreviewFollowingTheEditor(_ harness: EditorBenchHarness) async {
     print("")
 }
 
+// MARK: - Typing below soft-wrapped lines
+
+/// `2026-09-15`: the editor shifted up and down as you typed, and left a band
+/// of whitespace marks over blank space where two lines of text should have
+/// been.
+///
+/// The document it was reported against had a run of task lines just above
+/// the reader's caret, each carrying an unbreakable 130-character URL, each
+/// soft-wrapping to seven or eight rows. Every parse — one per 200 ms while
+/// typing — dropped the painted span and rewrote the attributes of the whole
+/// padded viewport, and an attribute edit invalidates layout whether or not
+/// it changed anything. TextKit 2 replaced the real heights of those wrapped
+/// lines with estimates and then with real heights again, and the text below
+/// them moved twice per parse. The unit suite can assert on
+/// ``EditorPane/highlightWrites``; what it cannot see is the viewport moving,
+/// because a test window is never on screen and never gets the viewport
+/// layout pass that resizes the text view. This has the window.
+///
+/// The picture is saved alongside the numbers: the blank band is a rendering
+/// fault, and a bitmap is the only assertion that can see it.
+@MainActor
+func measureTypingBelowWrappedLines(_ harness: EditorBenchHarness) async {
+    print("Typing below soft-wrapped lines:")
+
+    var source = "# Report\n\n"
+    for index in 0..<40 {
+        source += "Paragraph \(index) above the tasks, short enough to sit on one row.\n\n"
+    }
+    source += "## Action items\n\n"
+    for index in 0..<8 {
+        source +=
+            "- [ ] [WEB-\(2000 + index)](https://issues.example.com/WEB-\(2000 + index)/"
+            + "a-very-long-slug-that-does-not-break-anywhere-and-keeps-going-for-a-while-\(index)) "
+            + "Add a timeout to the task — headroom over the normal runtime, and matches how "
+            + "every sibling is configured @data !! @proj(example)\n"
+    }
+    source += "\n## Lessons\n\n"
+    for index in 0..<12 {
+        source +=
+            "**Lesson \(index).** The stall lasted some unknown number of seconds or minutes; "
+            + "the incident lasted three hours, entirely because nothing was willing to give up.\n\n"
+    }
+    do {
+        try harness.write(source, to: "wrapped.md")
+    } catch {
+        require(false, "the wrapped-lines document could not be written: \(error)")
+        return
+    }
+    guard let tab = await harness.open("wrapped.md"), let view = tab.documentView else {
+        require(false, "the wrapped-lines document did not open")
+        return
+    }
+    harness.controller.setEditorVisible(true)
+    await view.ensureFullyRendered()
+    let pane = harness.controller.editor
+    let textView = pane.textView
+    _ = await waitUntilTrue(seconds: 5) { pane.highlightPasses > 0 }
+    await harness.settle(milliseconds: 300)
+
+    // Laid out to the end first, so the first highlight pass reaches the end
+    // too. TextKit 2 estimates the height of what it has not laid out, the
+    // pass clamps its probes into that estimate, and a tail left unpainted
+    // here would be painted — legitimately — partway through the typing below
+    // and be counted as the rewrite this gate is about.
+    if let layoutManager = textView.textLayoutManager,
+        let contentManager = layoutManager.textContentManager
+    {
+        layoutManager.ensureLayout(for: contentManager.documentRange)
+    }
+    // The heading at the top of the viewport, so the wrapped lines sit just
+    // above it — inside the highlight's padding and outside the reader's view,
+    // which is where an estimate can replace a real height unseen.
+    let heading = (source as NSString).range(of: "## Lessons").location
+    pane.follow(previewByte: heading)
+    await harness.settle(milliseconds: 300)
+    // The caret at the end of the first lesson's bold lead-in.
+    let caret = NSMaxRange((source as NSString).range(of: "**Lesson 0.**"))
+    textView.setSelectedRange(NSRange(location: caret, length: 0))
+    harness.controller.window?.makeFirstResponder(textView)
+    await harness.settle(milliseconds: 500)
+
+    /// Where the caret's line is on screen, in points from the top of the
+    /// viewport. This is the number the reader's eye is on.
+    func caretRowOnScreen() -> CGFloat? {
+        guard let layoutManager = textView.textLayoutManager,
+            let contentManager = layoutManager.textContentManager,
+            let location = contentManager.location(
+                contentManager.documentRange.location, offsetBy: textView.selectedRange().location),
+            let fragment = layoutManager.textLayoutFragment(for: location)
+        else { return nil }
+        return fragment.layoutFragmentFrame.minY + textView.textContainerOrigin.y - pane.scrollOffset
+    }
+
+    let writesBefore = pane.highlightWrites
+    let passesBefore = pane.highlightPasses
+    let offsetBefore = pane.scrollOffset
+    guard let rowBefore = caretRowOnScreen() else {
+        require(false, "the caret's line could not be placed on screen")
+        return
+    }
+    // Reported, not required: the paragraph being typed into legitimately
+    // grows by a row now and then. What must not happen is the text *above*
+    // the caret changing height, and the caret-row check is that.
+    var heights: Set<Int> = [Int(textView.frame.height)]
+    var worstViewportShift: CGFloat = 0
+    var worstRowShift: CGFloat = 0
+
+    func sample() {
+        heights.insert(Int(textView.frame.height))
+        worstViewportShift = max(worstViewportShift, abs(pane.scrollOffset - offsetBefore))
+        if let row = caretRowOnScreen() {
+            worstRowShift = max(worstRowShift, abs(row - rowBefore))
+        }
+    }
+
+    // Thirty characters at a typist's pace, sampled between keystrokes as
+    // well as after them: the parse lands on its own throttle, and a shift
+    // that happens and is corrected between two keystrokes is still a shift
+    // the reader saw.
+    for character in "the retry worked, three hours late" {
+        textView.insertText(String(character), replacementRange: textView.selectedRange())
+        sample()
+        for _ in 0..<6 {
+            try? await _Concurrency.Task.sleep(for: .milliseconds(15))
+            sample()
+        }
+    }
+    _ = await waitUntilTrue(seconds: 3) { pane.highlightPasses > passesBefore }
+    await harness.settle(milliseconds: 600)
+    sample()
+
+    let writes = pane.highlightWrites - writesBefore
+    line("highlight passes while typing", "\(pane.highlightPasses - passesBefore)")
+    line("storage rewrites while typing", "\(writes)")
+    line(
+        "document view heights seen",
+        heights.sorted().map(String.init).joined(separator: " → "))
+    line("worst viewport shift", String(format: "%.1f pt", worstViewportShift))
+    line("worst caret-row shift", String(format: "%.1f pt", worstRowShift))
+    require(
+        writes == 0,
+        "typing inside a paragraph never rewrote the storage's attributes (\(writes) rewrites)")
+    require(
+        worstRowShift <= 1,
+        String(format: "the caret's line stayed where it was on screen (moved %.1f pt)", worstRowShift))
+
+    // The editor pane, as a picture, for the blank band no number can see.
+    pane.layoutSubtreeIfNeeded()
+    if pane.bounds.width > 1, pane.bounds.height > 1,
+        let rep = pane.bitmapImageRepForCachingDisplay(in: pane.bounds)
+    {
+        pane.cacheDisplay(in: pane.bounds, to: rep)
+        let directory = ProcessInfo.processInfo.environment["MARK_BENCH_SNAPSHOT_DIR"] ?? "target"
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("mark-editor-typing.png")
+        if let png = rep.representation(using: .png, properties: [:]) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? png.write(to: url)
+            line("snapshot", url.path)
+        }
+    }
+
+    harness.controller.tabs.close(tab)
+    print("")
+}
+
 // MARK: - Entry point
 
 @MainActor
@@ -809,6 +975,8 @@ func runEditorGates(corpus: URL) async {
     await measureEditorFollowingThePreview(harness)
 
     await measureThePreviewFollowingTheEditor(harness)
+
+    await measureTypingBelowWrappedLines(harness)
 
     // A small document for the picture: a megabyte of generated corpus makes an
     // unreadable screenshot, and what the snapshot is evidence *of* is the

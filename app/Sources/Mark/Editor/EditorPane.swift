@@ -224,6 +224,24 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// change its own relayout provokes does not re-enter it.
     private var isHighlighting = false
 
+    /// Stamped on every run ``applyHighlight()`` writes: the block kind its
+    /// attributes were derived from, and the palette they were derived under.
+    ///
+    /// This is what lets a pass tell "already right" from "needs writing"
+    /// without comparing fonts and colours — the colours are dynamic
+    /// `NSColor`s that do not compare equal to themselves. A private key, so
+    /// nothing else reads it and it is not one of the attributes AppKit acts
+    /// on. It does not arrive on typed text by itself — this is a plain-text
+    /// view, and plain text gives a typed character the view's own font and
+    /// colour and nothing else — so ``inheritBlockTag(_:editedRange:)`` puts
+    /// it there.
+    static let blockKey = NSAttributedString.Key("dev.mark.editorBlock")
+
+    /// Bumped when what a tag *stands for* changes — a theme, a zoom level —
+    /// so every run stops matching and is written once more. Part of the tag,
+    /// so the comparison falls out rather than being special-cased.
+    private var paletteGeneration = 0
+
     /// How far past the viewport, in points, the highlight reaches, so a small
     /// scroll does not reveal unpainted text before the next pass.
     private static let highlightPadding: CGFloat = 2_000
@@ -254,6 +272,11 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// edit arrived while it was.
     private var isParsing = false
     private var parseAgainWhenIdle = false
+
+    /// The edits that landed while that parse was running, in order, so its
+    /// result can be slid to where the text is now rather than thrown away.
+    /// See ``shift(_:by:)``.
+    private var editsDuringParse: [StorageEdit] = []
 
     /// Instrumentation for the typing-latency gate: how long the last
     /// highlight pass took, end to end, and how many have run.
@@ -613,6 +636,18 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         // `editedRange` is in the *new* text; the range it replaced is the same
         // location, `delta` shorter.
         let replacedLength = editedRange.length - delta
+        if replacedLength >= 0 {
+            let edit = (location: editedRange.location, replacedLength: replacedLength, delta: delta)
+            highlightRanges = Self.shift(highlightRanges, by: edit)
+            // A parse in flight was taken from text that no longer has this
+            // shape. Its block boundaries would land one character off below
+            // the caret, and a boundary one character off is a one-character
+            // write at every block below the caret — each a paragraph re-laid
+            // out for nothing. The edit is kept so the result can be slid
+            // into place when it lands.
+            if isParsing { editsDuringParse.append(edit) }
+        }
+        inheritBlockTag(storage, editedRange: editedRange)
         // `attributedSubstring(from:)`, **not** `mutableString.substring(with:)`.
         // The latter measured **8.7 ms per keystroke** on the 1 MB corpus:
         // `NSTextStorage.mutableString` hands back a proxy that reports its
@@ -648,6 +683,91 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         // viewport-bounded draw is affordable at typing cadence; the parse the
         // throttle protects is not.
         invisibles.needsDisplay = true
+    }
+
+    /// One edit to the storage, as the highlight ranges need to know it: what
+    /// was replaced, and by how much the text after it moved.
+    typealias StorageEdit = (location: Int, replacedLength: Int, delta: Int)
+
+    /// Move the block boundaries with the text they belong to.
+    ///
+    /// ``highlightRanges`` is a parse of the text as it was; the storage has
+    /// just changed under it. Until the next parse lands — 200 ms, or longer
+    /// while someone types — everything below the edit has moved by `delta`,
+    /// and a block boundary that did not move with it is a newline tagged as
+    /// the wrong kind, written on the next pass, and a paragraph re-laid out
+    /// for a change nobody made. The edit is folded into the ranges instead:
+    /// blocks after it slide, the block containing it grows or shrinks, and
+    /// the pass finds every tag where it expects it.
+    ///
+    /// The *structure* may of course have changed too — a `#` typed at the
+    /// start of a line makes a heading — and that is what the parse is for.
+    /// This only keeps a structure aligned with text that has moved on from it.
+    private static func shift(
+        _ ranges: [(range: NSRange, kind: String, level: Int?)], by edit: StorageEdit
+    ) -> [(range: NSRange, kind: String, level: Int?)] {
+        guard edit.delta != 0, !ranges.isEmpty else { return ranges }
+        let replacedEnd = edit.location + edit.replacedLength
+        var shifted = ranges
+        for index in shifted.indices {
+            var range = shifted[index].range
+            if range.location >= replacedEnd {
+                range.location += edit.delta
+            } else if NSMaxRange(range) >= edit.location {
+                // Inclusive at the end, to agree with ``inheritBlockTag``: a
+                // character typed at the very end of a block takes its tag
+                // from the character before it, so the block it joins is the
+                // one it follows.
+                range.length = max(0, range.length + edit.delta)
+            }
+            shifted[index].range = range
+        }
+        return shifted
+    }
+
+    /// Give freshly typed characters the block tag of the text they were typed
+    /// into.
+    ///
+    /// The editor is plain text, and in plain text `NSTextView` gives a typed
+    /// character its own `font` and `textColor` rather than the attributes of
+    /// its neighbours — so a character typed into a heading arrives 13-point
+    /// and untagged, and the next ``applyHighlight()`` would find it, write it,
+    /// and invalidate the paragraph's layout 200 ms after the keystroke that
+    /// already had. Stamping it *here*, inside the storage's own editing pass,
+    /// rides the invalidation the keystroke is already paying for, and the
+    /// highlight pass then finds nothing to do. When the guess is wrong — the
+    /// first character of a new paragraph under a heading — the parse corrects
+    /// it, once, which is the write it would have made anyway.
+    ///
+    /// Attributes only, never characters: that is the contract of
+    /// `didProcessEditing`, and the one thing that keeps this from recursing.
+    private func inheritBlockTag(_ storage: NSTextStorage, editedRange: NSRange) {
+        guard editedRange.length > 0 else { return }
+        let neighbour: Int
+        if editedRange.location > 0 {
+            neighbour = editedRange.location - 1
+        } else if NSMaxRange(editedRange) < storage.length {
+            neighbour = NSMaxRange(editedRange)
+        } else {
+            return
+        }
+        var inherited = storage.attributes(at: neighbour, effectiveRange: nil)
+        guard let tag = inherited[Self.blockKey] as? String else { return }
+        // Only the attributes this pane writes. Anything else on the neighbour
+        // — a spelling underline, a marked-text clause — is that character's
+        // business and not the typed one's.
+        inherited = inherited.filter { key, _ in
+            key == Self.blockKey || key == .font || key == .foregroundColor
+                || key == .backgroundColor
+        }
+        var runs: [NSRange] = []
+        storage.enumerateAttribute(Self.blockKey, in: editedRange, options: []) {
+            value, subrange, _ in
+            if (value as? String) != tag { runs.append(subrange) }
+        }
+        for run in runs {
+            storage.addAttributes(inherited, range: run)
+        }
     }
 
     /// The escape hatch: take the text view's whole contents and replace the
@@ -912,6 +1032,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// wrong place on 16pt text.
     @objc private func zoomChanged() {
         textView.font = Self.bodyFont
+        paletteGeneration += 1
         highlightedRange = NSRange(location: 0, length: 0)
         applyHighlight()
         invisibles.needsDisplay = true
@@ -1037,6 +1158,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             return
         }
         isParsing = true
+        editsDuringParse = []
         parseGeneration += 1
         let generation = parseGeneration
         // Rides the same throttle as the source highlighting rather than having
@@ -1082,6 +1204,14 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
                     }
                 }
                 guard generation == self.parseGeneration else { return }
+                // Typed under the parse: the text moved on while the parse
+                // ran, so its offsets are slid the same way before they are
+                // trusted. The parse the throttle already owes will bring the
+                // structure up to date; this keeps the boundaries on the right
+                // characters until it does.
+                var ranges = ranges
+                for edit in self.editsDuringParse { ranges = Self.shift(ranges, by: edit) }
+                self.editsDuringParse = []
                 self.highlightRanges = ranges
                 self.lastHighlightSeconds = seconds
                 self.highlightPasses += 1
@@ -1127,6 +1257,25 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
     /// created. The span is cleared — and the next pass repaints in full —
     /// whenever the attributes themselves stop being valid: a new parse, a
     /// theme change, or a wholesale replacement of the text.
+    ///
+    /// # Why the tag exists
+    ///
+    /// The span is dropped on every parse, because a parse is exactly the
+    /// event that can make the painted attributes wrong — and until
+    /// `2026-09-15` the pass then rewrote the whole padded viewport, correct
+    /// attributes and all, once per parse: five times a second while someone
+    /// typed. Rewriting an attribute to the value it already has still
+    /// invalidates layout, and TextKit 2 answers an invalidation above the
+    /// viewport with an estimate first and the real height second. A run of
+    /// soft-wrapped lines above the caret shrank and grew twice per parse, and
+    /// the caret's line moved 192 points on screen under the reader's hands —
+    /// with, some frames, the text below it not drawn at all.
+    ///
+    /// So every run this writes is tagged (``blockKey``) with the kind it was
+    /// painted as, and a pass writes only the runs whose tag disagrees with
+    /// the parse. After a keystroke inside a paragraph that is nothing:
+    /// `mark-bench`'s wrapped-lines gate measures 17 parses and 0 writes
+    /// across 34 keystrokes, and the caret's line does not move.
     private func applyHighlight() {
         // Painting is what posts the bounds change that lands back here. The
         // coverage check below already makes that re-entry a no-op, but not
@@ -1173,28 +1322,100 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
             }
         }
 
+        // What the storage should carry across the gaps, run by run, against
+        // what it does carry. Only a run whose tag disagrees is written: after
+        // a keystroke inside a paragraph that is no run at all, because the
+        // typed character arrived carrying the paragraph's own tag.
+        //
+        // Collected first and written after, rather than written from inside
+        // the enumeration: mutating the storage under an enumeration of it is
+        // permitted but is exactly the kind of cleverness that turns into a
+        // skipped run.
+        var stale: [(range: NSRange, attributes: [NSAttributedString.Key: Any])] = []
+        for gap in gaps {
+            for run in desiredRuns(in: gap) {
+                let tag = self.tag(kind: run.kind, level: run.level)
+                storage.enumerateAttribute(Self.blockKey, in: run.range, options: []) {
+                    value, subrange, _ in
+                    guard (value as? String) != tag else { return }
+                    var attributes =
+                        run.kind.map { Self.attributes(for: $0, level: run.level) }
+                        ?? Self.baseAttributes
+                    attributes[Self.blockKey] = tag
+                    stale.append((subrange, attributes))
+                }
+            }
+        }
+        // Contiguous by construction: a gap always abuts the painted span, and
+        // a viewport that landed clear of it replaces it outright.
+        defer { highlightedRange = adjoins ? NSUnionRange(visible, painted) : visible }
+        guard !stale.isEmpty else { return }
+
         highlightWrites += 1
         isHighlighting = true
         storage.beginEditing()
-        for gap in gaps {
-            storage.setAttributes(Self.baseAttributes, range: gap)
-            for entry in highlightRanges {
-                guard entry.range.location + entry.range.length <= length else { continue }
-                let clipped = NSIntersectionRange(entry.range, gap)
-                guard clipped.length > 0 else { continue }
-                storage.addAttributes(
-                    Self.attributes(for: entry.kind, level: entry.level), range: clipped)
-            }
+        for run in stale {
+            storage.setAttributes(run.attributes, range: run.range)
         }
         storage.endEditing()
         isHighlighting = false
-        // Contiguous by construction: a gap always abuts the painted span, and
-        // a viewport that landed clear of it replaces it outright.
-        highlightedRange = adjoins ? NSUnionRange(visible, painted) : visible
         // The marks are positioned from the laid-out text, and this pass has
         // just changed a heading's font size and a code block's background.
         // Repainting them here covers scrolling and re-parsing in one place.
         invisibles.needsDisplay = true
+    }
+
+    /// The runs `range` should be painted as, in order and without gaps: a
+    /// block's own attributes where a block is, and the body's between them.
+    ///
+    /// ``highlightRanges`` is the core's block list, which is top-level only
+    /// (`BlockKind` is "what kind of top-level construct a block is") and in
+    /// document order — so the blocks are disjoint and ascending, and one walk
+    /// from the first block that reaches into `range` is the whole job.
+    private func desiredRuns(in range: NSRange)
+        -> [(range: NSRange, kind: String?, level: Int?)]
+    {
+        var runs: [(range: NSRange, kind: String?, level: Int?)] = []
+        let end = NSMaxRange(range)
+        var cursor = range.location
+
+        // The first block that ends after the range begins, by bisection: the
+        // list is every block in the document and this runs at scroll cadence.
+        var low = 0
+        var high = highlightRanges.count
+        while low < high {
+            let middle = (low + high) / 2
+            if NSMaxRange(highlightRanges[middle].range) <= range.location {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+
+        for entry in highlightRanges[low...] {
+            if entry.range.location >= end { break }
+            // Clipped to the range, and to the cursor: a block that a stale
+            // parse has overlapping its neighbour is painted where the
+            // neighbour left off rather than twice.
+            let start = max(entry.range.location, cursor)
+            let stop = min(NSMaxRange(entry.range), end)
+            guard stop > start else { continue }
+            if start > cursor {
+                runs.append((NSRange(location: cursor, length: start - cursor), nil, nil))
+            }
+            runs.append((NSRange(location: start, length: stop - start), entry.kind, entry.level))
+            cursor = stop
+        }
+        if end > cursor {
+            runs.append((NSRange(location: cursor, length: end - cursor), nil, nil))
+        }
+        return runs
+    }
+
+    /// The tag for a run of `kind`, under the current palette. The body is
+    /// `nil`, and gets a tag too — an untagged run is one nothing has painted.
+    private func tag(kind: String?, level: Int?) -> String {
+        "\(paletteGeneration)/\(kind ?? "-")/\(level ?? 0)"
     }
 
     /// The character range on screen, plus a margin so a small scroll does not
@@ -1516,6 +1737,7 @@ public final class EditorPane: NSView, NSTextViewDelegate, @MainActor NSTextStor
         // Attributes carry resolved colours, so they are repainted rather than
         // re-derived — and every one of them is now stale, which is what makes
         // this a full repaint rather than the incremental pass a scroll gets.
+        paletteGeneration += 1
         highlightedRange = NSRange(location: 0, length: 0)
         applyHighlight()
     }

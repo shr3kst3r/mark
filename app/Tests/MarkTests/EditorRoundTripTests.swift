@@ -667,6 +667,67 @@ struct EditorRoundTripTests {
             "text scrolled into view for the first time was never highlighted")
     }
 
+    /// `2026-09-15`: the editor shifted up and down as you typed.
+    ///
+    /// Every parse dropped the painted span and rewrote the padded viewport,
+    /// and an attribute rewritten to the value it already had still
+    /// invalidates layout: TextKit 2 gave the soft-wrapped lines above the
+    /// caret an estimated height and then a real one, twice per parse, and the
+    /// line being typed on moved 192 points under the reader's hands. The
+    /// real-window half of that is `mark-bench`'s wrapped-lines gate; what a
+    /// test without a screen can hold onto is the cause. A parse after a
+    /// keystroke inside a paragraph must find nothing to write — and a
+    /// keystroke that *does* change the structure must still be painted, so
+    /// the check is not simply the highlighting switched off.
+    @Test("typing inside a paragraph does not rewrite the storage")
+    func typingDoesNotRewriteTheAttributes() async throws {
+        let harness = try EditorHarness()
+        let source = numberedParagraphs(60)
+        let tab = try await harness.open(source)
+        _ = try harness.edit(tab)
+        let pane = harness.controller.editor
+        let storage = try #require(pane.textView.textStorage)
+        #expect(await harness.waitUntil("the editor to parse its buffer") { pane.highlightPasses > 0 })
+
+        let layoutManager = try #require(pane.textView.textLayoutManager)
+        let contentManager = try #require(layoutManager.textContentManager)
+        layoutManager.ensureLayout(for: contentManager.documentRange)
+        // One pass over the whole thing — sixty short paragraphs sit well
+        // inside the padded viewport — so everything below is already painted.
+        let first = (source as NSString).range(of: "Paragraph 20 of the document.").location
+        harness.reportScroll(400, source: first, on: tab)
+        let painted = pane.highlightWrites
+        #expect(painted > 0, "the editor never painted anything to begin with")
+
+        // A word typed into the middle of a paragraph. The parse it provokes
+        // must agree with every tag already in the storage, the typed
+        // characters' included.
+        let inside = NSMaxRange((source as NSString).range(of: "Paragraph 20 of the"))
+        var passes = pane.highlightPasses
+        harness.type(" edited", at: inside)
+        #expect(await harness.waitUntil("the parse after typing") { pane.highlightPasses > passes })
+        #expect(
+            pane.highlightWrites == painted,
+            "typing inside a paragraph rewrote the storage \(pane.highlightWrites - painted) time(s)")
+        let tag = storage.attribute(EditorPane.blockKey, at: inside, effectiveRange: nil) as? String
+        #expect(tag?.hasSuffix("/paragraph/0") == true, "the typed run carries \(tag ?? "no tag")")
+
+        // `# ` in front of a paragraph makes it a heading. That is a change
+        // of structure, and it is painted — once, and as a heading.
+        let text = pane.textView.string as NSString
+        let line = text.range(of: "Paragraph 30 of the document.").location
+        passes = pane.highlightPasses
+        harness.type("# ", at: line)
+        #expect(await harness.waitUntil("the parse after the heading") { pane.highlightPasses > passes })
+        #expect(
+            pane.highlightWrites == painted + 1,
+            "the new heading took \(pane.highlightWrites - painted) write(s) rather than one")
+        let font = storage.attribute(.font, at: line + 2, effectiveRange: nil) as? NSFont
+        #expect(
+            (font?.pointSize ?? 0) > EditorPane.bodyFont.pointSize,
+            "the new heading is drawn at \(font?.pointSize ?? 0) pt, the body's size")
+    }
+
     // MARK: - The preview follows the editor
 
     /// The reverse mapping on its own: scroll the pane, and see what it says it

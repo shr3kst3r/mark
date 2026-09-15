@@ -4,12 +4,13 @@
 
 # ADR index
 
-20 active · 5 superseded
+21 active · 5 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-09-15-markdown-highlighting-and-priority-colors](2026-09-15-markdown-highlighting-and-priority-colors.md) | Support double-equal markdown text highlighting and assign visual colors to task priorities | Accepted | core, render, cli, app | — | 2026-09-15 |
 | [2026-09-10-currency-is-not-math](2026-09-10-currency-is-not-math.md) | Demote an inline math span to literal text when both of its delimiters are followed by a digit | Proposed | core, render, cli, app | — | 2026-09-10 |
 | [2026-09-01-sidebar-poll-gates-the-tick-not-the-timer](2026-09-01-sidebar-poll-gates-the-tick-not-the-timer.md) | The sidebar poll's visibility check gates each tick's work, not the timer's existence | Accepted | app, sidebar | — | 2026-09-01 |
 | [2026-09-01-search-in-the-core](2026-09-01-search-in-the-core.md) | Move search into the core, and replace the ABI's function-count ceiling with the rule it was standing in for | Proposed | core, cli, app, ipc | — | 2026-09-01 |

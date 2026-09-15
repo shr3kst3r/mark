@@ -416,12 +416,13 @@ ask to edit it, and the app remembers that you asked.
 
 **The editor knows it is markdown.** ⏎ in a list starts the next item, keeping
 the indentation and counting an ordered list on; ⏎ on an *empty* item ends the
-list rather than making another. **Format** has Bold (⌘B), Italic (⌘I), Code
-(⌃⌘E), Strikethrough, Link (⌘K — a URL already on the clipboard goes straight
-into the parentheses), and heading levels on ⌃⌘1 to ⌃⌘6, with ⌃⌘0 for body text.
-Each one toggles: ⌘B on bold text unbolds it. Everything else about the pane is
-still the system's — undo, spellcheck, Find & Replace and accessibility are
-`NSTextView`'s, and these override exactly one key.
+list rather than making another. **Format** has Bold (⌘B), Italic (⌘I),
+Highlight (⇧⌘H), Code (⌃⌘E), Strikethrough, Link (⌘K — a URL already on the
+clipboard goes straight into the parentheses), and heading levels on ⌃⌘1 to
+⌃⌘6, with ⌃⌘0 for body text. Each one toggles: ⌘B on bold text unbolds it.
+Everything else about the pane is still the system's — undo, spellcheck, Find &
+Replace and accessibility are `NSTextView`'s, and these override exactly one
+key.
 
 **How long is it.** A line under the editor says words, characters, lines and
 an estimated reading time, and `mark stats` prints the same numbers. Counted

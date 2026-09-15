@@ -546,6 +546,28 @@ li:has(> input.mk-task) {
   background: color-mix(in srgb, var(--mk-warning) 14%, transparent);
 }
 
+.mk-tag[data-mk-priority="1"] {
+  color: var(--mk-subtle);
+  background: color-mix(in srgb, var(--mk-subtle) 14%, transparent);
+}
+
+.mk-tag[data-mk-priority="2"] {
+  color: var(--mk-s09);
+  background: color-mix(in srgb, var(--mk-s09) 14%, transparent);
+}
+
+.mk-tag[data-mk-priority="3"] {
+  color: var(--mk-error);
+  background: color-mix(in srgb, var(--mk-error) 14%, transparent);
+}
+
+mark {
+  background-color: var(--mk-s0A);
+  color: var(--mk-s00);
+  border-radius: 2px;
+  padding: 0.05em 0.2em;
+}
+
 img {
   max-width: 100%;
 }

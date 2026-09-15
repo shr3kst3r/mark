@@ -148,6 +148,7 @@ struct MarkdownReferenceTests {
         #expect(html.contains("footnote-definition"), "footnotes")
         #expect(html.contains("<table>"), "tables")
         #expect(html.contains("<del>"), "strikethrough")
+        #expect(html.contains("<mark>"), "highlight")
         // A *highlighted* block, not merely a fenced one: the section lists the
         // languages syntect knows and `rust` is the example it shows.
         #expect(html.contains("data-lang=\"rust\""), "the highlighted Rust example")

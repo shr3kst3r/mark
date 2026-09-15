@@ -2915,6 +2915,10 @@ extension MainWindowController: NSMenuItemValidation {
         formattingEditor?.wrapSelection(with: "*")
     }
 
+    @objc public func toggleHighlight(_ sender: Any?) {
+        formattingEditor?.wrapSelection(with: "==")
+    }
+
     @objc public func toggleInlineCode(_ sender: Any?) {
         formattingEditor?.wrapSelection(with: "`")
     }
@@ -3059,6 +3063,7 @@ extension MainWindowController: NSMenuItemValidation {
             item.state = LineNumbers.isShowing ? .on : .off
             return true
         case #selector(toggleBold(_:)), #selector(toggleItalic(_:)),
+            #selector(toggleHighlight(_:)),
             #selector(toggleInlineCode(_:)), #selector(toggleStrikethrough(_:)),
             #selector(insertLink(_:)), #selector(setHeadingLevel(_:)):
             // Greyed out with the editor hidden rather than silently doing

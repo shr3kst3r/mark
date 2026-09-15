@@ -96,11 +96,12 @@ Three or more `-`, `*` or `_` on their own line is a horizontal rule:
 **bold** and __bold__
 ***bold italic***
 ~~struck through~~
+==highlighted==
 `inline code`
 ````
 
 *italic* and _italic_ · **bold** and __bold__ · ***bold italic*** ·
-~~struck through~~ · `inline code`
+~~struck through~~ · ==highlighted== · `inline code`
 
 Inside `inline code` nothing is interpreted, so `**this**` stays as you wrote
 it. If the code itself contains a backtick, fence it with two:
@@ -220,19 +221,22 @@ still ordinary markdown that every other tool shows as prose:
 ````markdown
 - [ ] Draft the invoice @work @due(2026-09-01) !!
 - [/] Chase the reply @waiting-on-legal @start(2026-08-27)
+- [ ] Emergency fix @ops !!!
 - [x] File it @done(2026-08-26) !
 ````
 
 - [ ] Draft the invoice @work @due(2026-09-01) !!
 - [/] Chase the reply @waiting-on-legal @start(2026-08-27)
+- [ ] Emergency fix @ops !!!
 - [x] File it @done(2026-08-26) !
 
 `@due`, `@start` and `@done` take an ISO `YYYY-MM-DD` date; any other name is a
-tag with a value. `!`, `!!` and `!!!` are priority, low to high. A token counts
-only when it stands alone as a word, so `bob@example.com` is an email address
-and `ship it!!!` in the middle of a sentence is prose. Metadata inside a code
-span is documentation rather than metadata, which is why writing `@due(x)` in
-this sentence describes the syntax instead of using it.
+tag with a value. `!`, `!!` and `!!!` are priority, low to high, rendered with
+gray, orange, and red chips. A token counts only when it stands alone as a word,
+so `bob@example.com` is an email address and `ship it!!!` in the middle of a
+sentence is prose. Metadata inside a code span is documentation rather than
+metadata, which is why writing `@due(x)` in this sentence describes the syntax
+instead of using it.
 
 An overdue date is coloured in the app. It is deliberately *not* coloured by
 `mark render --html`: that output is a pure function of your file, so the same

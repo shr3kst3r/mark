@@ -403,6 +403,29 @@ struct DocumentPaneTests {
         #expect(undated.task.text.contains("printer"))
     }
 
+    @Test("priority marks are coloured by level: gray, orange, red")
+    func priorityMarksAreColoured() {
+        let p1 = TaskRowNode(task(0, .open, "low priority", priority: 1, due: "2026-09-01"))
+        let p2 = TaskRowNode(task(1, .open, "med priority", priority: 2, due: "2026-09-01"))
+        let p3 = TaskRowNode(task(2, .open, "high priority", priority: 3, due: "2026-09-01"))
+
+        let (cell1, _) = Self.laidOutCell({ $0.show(p1) }, width: 340)
+        let (cell2, _) = Self.laidOutCell({ $0.show(p2) }, width: 340)
+        let (cell3, _) = Self.laidOutCell({ $0.show(p3) }, width: 340)
+
+        let color1 = cell1.fields[2].attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        let color2 = cell2.fields[2].attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        let color3 = cell3.fields[2].attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+
+        #expect(color1 == NSColor.secondaryLabelColor)
+        #expect(color2 == NSColor.systemOrange)
+        #expect(color3 == NSColor.systemRed)
+
+        // The date remains tertiaryLabelColor
+        let dateColor = cell2.fields[2].attributedStringValue.attribute(.foregroundColor, at: 4, effectiveRange: nil) as? NSColor
+        #expect(dateColor == NSColor.tertiaryLabelColor)
+    }
+
     // MARK: The summary line, as laid out
 
     /// The breakdown wraps past two lines in a narrow sidebar. It was capped at

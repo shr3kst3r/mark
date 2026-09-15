@@ -315,6 +315,10 @@ struct ShellAssetsTests {
 
         var selectors = [
             "input.mk-task", "input.mk-task:focus-visible", ".mk-tag",
+            ".mk-tag[data-mk-priority=\"1\"]",
+            ".mk-tag[data-mk-priority=\"2\"]",
+            ".mk-tag[data-mk-priority=\"3\"]",
+            "mark",
             "li:has(> input.mk-task[data-mk-state=\"cancelled\"])",
         ]
         // Open is the bare box — the base rule *is* its rule — so it is the one

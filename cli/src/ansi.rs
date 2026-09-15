@@ -339,9 +339,15 @@ impl Writer {
                 true,
             ),
             Event::Html(html) | Event::InlineHtml(html) => {
-                self.style("2");
-                self.text(html.trim_end());
-                self.reset();
+                if html.as_ref() == "<mark>" {
+                    self.style("7");
+                } else if html.as_ref() == "</mark>" {
+                    self.reset();
+                } else {
+                    self.style("2");
+                    self.text(html.trim_end());
+                    self.reset();
+                }
             }
             Event::FootnoteReference(name) => {
                 self.style("2");

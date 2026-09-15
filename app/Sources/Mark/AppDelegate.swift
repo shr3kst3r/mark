@@ -647,6 +647,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValid
             withTitle: "Italic", action: #selector(MainWindowController.toggleItalic(_:)),
             keyEquivalent: "i")
         formatMenu.addItem(
+            withTitle: "Highlight", action: #selector(MainWindowController.toggleHighlight(_:)),
+            keyEquivalent: "H"
+        ).keyEquivalentModifierMask = [.command, .shift]
+        formatMenu.addItem(
             withTitle: "Code", action: #selector(MainWindowController.toggleInlineCode(_:)),
             keyEquivalent: "e"
         ).keyEquivalentModifierMask = [.command, .control]

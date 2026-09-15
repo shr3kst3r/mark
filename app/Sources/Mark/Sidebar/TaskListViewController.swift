@@ -458,6 +458,36 @@ public final class TaskCellView: NSTableCellView {
     /// depends on a width, and a width is not known until layout.
     private var decoration = ""
     private var priority = ""
+    private var taskPriority = 0
+
+    private static func priorityColor(for priority: Int) -> NSColor? {
+        switch priority {
+        case 1: return .secondaryLabelColor
+        case 2: return .systemOrange
+        case 3...: return .systemRed
+        default: return nil
+        }
+    }
+
+    private func attributedTrailing(for candidate: String) -> NSAttributedString {
+        guard !candidate.isEmpty else { return NSAttributedString() }
+        let font = trailing.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let defaultColor = NSColor.tertiaryLabelColor
+        guard let pColor = Self.priorityColor(for: taskPriority),
+            !priority.isEmpty,
+            candidate.hasPrefix(priority)
+        else {
+            return NSAttributedString(
+                string: candidate,
+                attributes: [.font: font, .foregroundColor: defaultColor])
+        }
+        let attributed = NSMutableAttributedString(
+            string: candidate,
+            attributes: [.font: font, .foregroundColor: defaultColor])
+        let priorityRange = NSRange(location: 0, length: (priority as NSString).length)
+        attributed.addAttribute(.foregroundColor, value: pColor, range: priorityRange)
+        return attributed
+    }
 
     /// The three fields as laid out, in drawing order, for the tests and for
     /// `mark-bench`: what a row *shows* and where, which is the half of this
@@ -529,6 +559,7 @@ public final class TaskCellView: NSTableCellView {
         marker.isHidden = true
         decoration = ""
         priority = ""
+        taskPriority = 0
         trailing.stringValue = ""
         title.attributedStringValue = NSAttributedString(
             string: group.title,
@@ -552,7 +583,8 @@ public final class TaskCellView: NSTableCellView {
         marker.textColor = state.isTerminal ? .tertiaryLabelColor : .secondaryLabelColor
         decoration = row.decoration ?? ""
         priority = row.priorityMark ?? ""
-        trailing.stringValue = decoration
+        taskPriority = row.task.priority
+        trailing.stringValue = ""
 
         var attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize - 1),
@@ -609,7 +641,9 @@ public final class TaskCellView: NSTableCellView {
     /// Assigned only when it changes: `fitDecoration` runs from `layout`, and a
     /// string or a constant set every pass would ask for another one.
     private func showTrailing(_ text: String, width: CGFloat) {
-        if trailing.stringValue != text { trailing.stringValue = text }
+        if trailing.stringValue != text {
+            trailing.attributedStringValue = attributedTrailing(for: text)
+        }
         if trailingWidth.constant != width { trailingWidth.constant = width }
     }
 

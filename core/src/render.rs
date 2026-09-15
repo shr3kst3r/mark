@@ -765,6 +765,14 @@ li:has(> input.mk-task[data-mk-state='cancelled']) {
 .mk-tag { color: var(--mk-subtle); background: var(--mk-surface);
   border-radius: 4px; padding: 0.05em 0.35em; margin-left: 0.25em;
   font-size: 0.85em; white-space: nowrap; }
+.mk-tag[data-mk-priority='1'] { color: var(--mk-subtle);
+  background: color-mix(in srgb, var(--mk-subtle) 14%, transparent); }
+.mk-tag[data-mk-priority='2'] { color: var(--mk-s09);
+  background: color-mix(in srgb, var(--mk-s09) 14%, transparent); }
+.mk-tag[data-mk-priority='3'] { color: var(--mk-error);
+  background: color-mix(in srgb, var(--mk-error) 14%, transparent); }
+mark { background-color: var(--mk-s0A); color: var(--mk-s00);
+  border-radius: 2px; padding: 0.05em 0.2em; }
 ::selection { background: var(--mk-selection); }
 /* ADR-5. No font or stylesheet is fetched for either: MathML resolves to the
    system `math` font and inherits `currentColor`, and merman's SVG carries its

@@ -78,6 +78,7 @@ impl<'a> Document<'a> {
         // rendered body nor the table of contents.
         let mut metadata: Option<Metadata> = None;
         let mut meta_open: Option<(MetadataKind, Range<usize>, usize)> = None;
+        let mut pending_block: Option<(BlockKind, Range<usize>, usize)> = None;
 
         for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
             // Before segmentation, so every consumer downstream — both
@@ -112,24 +113,30 @@ impl<'a> Document<'a> {
                                 end: span.end,
                             });
                         } else if let Some((kind, span, first)) = open.take() {
-                            blocks.push(build(source, kind, span, first..index + 1, &mut ordinals));
+                            pending_block = Some((kind, span, first));
                         }
                     }
                 }
                 _ => {
                     if depth == 0 {
                         let kind = leaf_kind(&event);
-                        blocks.push(build(
-                            source,
-                            kind,
-                            range.clone(),
-                            index..index + 1,
-                            &mut ordinals,
-                        ));
+                        pending_block = Some((kind, range.clone(), index));
                     }
                 }
             }
             events.push((event, range));
+            if let Some((kind, span, first)) = pending_block.take() {
+                if source[span.clone()].contains("==") {
+                    resolve_highlights(source, &mut events, first);
+                }
+                blocks.push(build(
+                    source,
+                    kind,
+                    span,
+                    first..events.len(),
+                    &mut ordinals,
+                ));
+            }
         }
 
         Document {
@@ -383,6 +390,235 @@ fn is_currency_pair(source: &str, range: &Range<usize>) -> bool {
         .is_some_and(|byte| byte.is_ascii_digit());
 
     opens_on_digit && closes_on_digit
+}
+
+/// What an inline delimiter candidate looks like.
+#[derive(Debug, Clone)]
+struct DelimCandidate {
+    event_idx: usize,
+    offset: usize,
+    abs_offset: usize,
+    can_open: bool,
+    can_close: bool,
+}
+
+/// A delimiter that has been matched with its partner.
+#[derive(Debug, Clone, Copy)]
+struct MatchedDelim {
+    event_idx: usize,
+    offset: usize,
+    is_open: bool,
+}
+
+/// Transform paired `==...==` delimiters in a block's events into
+/// `<mark>` / `</mark>` inline HTML events.
+///
+/// Delimiters inside code blocks, inline code, math, and raw HTML are skipped.
+/// Isolated occurrences like `a == b` (delimited by whitespace) and escaped `\==`
+/// are kept as literal text.
+fn resolve_highlights<'a>(
+    source: &'a str,
+    events: &mut Vec<(Event<'a>, Range<usize>)>,
+    block_start: usize,
+) {
+    if block_start >= events.len() {
+        return;
+    }
+
+    let mut candidates: Vec<DelimCandidate> = Vec::new();
+    let mut in_code_block = false;
+
+    for i in block_start..events.len() {
+        match &events[i].0 {
+            Event::Start(Tag::CodeBlock(_)) => {
+                in_code_block = true;
+                continue;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                continue;
+            }
+            _ if in_code_block => continue,
+            Event::Text(cow_str) => {
+                let text = cow_str.as_ref();
+                let span = &events[i].1;
+                let bytes = text.as_bytes();
+                let mut idx = 0;
+                while idx + 1 < bytes.len() {
+                    if bytes[idx] == b'=' && bytes[idx + 1] == b'=' {
+                        // Must not be part of a longer run of '=' like '==='
+                        let prev_is_eq = idx > 0 && bytes[idx - 1] == b'=';
+                        let next_is_eq = idx + 2 < bytes.len() && bytes[idx + 2] == b'=';
+                        if prev_is_eq || next_is_eq {
+                            idx += 1;
+                            continue;
+                        }
+
+                        let abs_offset = span.start + idx;
+                        // Must not be backslash-escaped
+                        let is_escaped = span.len() == text.len()
+                            && abs_offset > 0
+                            && source.as_bytes().get(abs_offset - 1) == Some(&b'\\');
+                        if is_escaped {
+                            idx += 2;
+                            continue;
+                        }
+
+                        // Left-flanking (can open)
+                        let can_open = if idx + 2 < text.len() {
+                            text[idx + 2..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| !c.is_whitespace())
+                        } else {
+                            // At end of this text event: followed by non-whitespace inline content
+                            i + 1 < events.len()
+                                && match &events[i + 1].0 {
+                                    Event::Text(t) => {
+                                        t.chars().next().is_some_and(|c| !c.is_whitespace())
+                                    }
+                                    Event::Start(
+                                        Tag::Emphasis
+                                        | Tag::Strong
+                                        | Tag::Strikethrough
+                                        | Tag::Link { .. },
+                                    )
+                                    | Event::Code(_) => true,
+                                    _ => false,
+                                }
+                        };
+
+                        // Right-flanking (can close)
+                        let can_close = if idx > 0 {
+                            text[..idx]
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| !c.is_whitespace())
+                        } else {
+                            // At start of this text event: preceded by non-whitespace inline content
+                            i > block_start
+                                && match &events[i - 1].0 {
+                                    Event::Text(t) => {
+                                        t.chars().next_back().is_some_and(|c| !c.is_whitespace())
+                                    }
+                                    Event::End(
+                                        TagEnd::Emphasis
+                                        | TagEnd::Strong
+                                        | TagEnd::Strikethrough
+                                        | TagEnd::Link,
+                                    )
+                                    | Event::Code(_) => true,
+                                    _ => false,
+                                }
+                        };
+
+                        if can_open || can_close {
+                            candidates.push(DelimCandidate {
+                                event_idx: i,
+                                offset: idx,
+                                abs_offset,
+                                can_open,
+                                can_close,
+                            });
+                        }
+                        idx += 2;
+                    } else {
+                        idx += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut openers: Vec<DelimCandidate> = Vec::new();
+    let mut matched: Vec<MatchedDelim> = Vec::new();
+
+    for cand in candidates {
+        if cand.can_close {
+            // Match with the most recent open delimiter
+            if let Some(pos) = openers
+                .iter()
+                .rposition(|op| cand.abs_offset > op.abs_offset + 2)
+            {
+                let op = openers.remove(pos);
+                matched.push(MatchedDelim {
+                    event_idx: op.event_idx,
+                    offset: op.offset,
+                    is_open: true,
+                });
+                matched.push(MatchedDelim {
+                    event_idx: cand.event_idx,
+                    offset: cand.offset,
+                    is_open: false,
+                });
+                continue;
+            }
+        }
+        if cand.can_open {
+            openers.push(cand);
+        }
+    }
+
+    if matched.is_empty() {
+        return;
+    }
+
+    matched.sort_by_key(|m| (m.event_idx, m.offset));
+
+    let mut new_events = Vec::with_capacity(events.len() - block_start + matched.len() * 2);
+    let mut delim_iter = matched.into_iter().peekable();
+
+    for (i, (event, span)) in events[block_start..].iter().enumerate() {
+        let abs_i = block_start + i;
+        if delim_iter.peek().is_some_and(|m| m.event_idx == abs_i) {
+            let Event::Text(cow_str) = event else {
+                new_events.push((event.clone(), span.clone()));
+                continue;
+            };
+            let text = cow_str.as_ref();
+            let mut cursor = 0;
+            while let Some(m) = delim_iter.next_if(|m| m.event_idx == abs_i) {
+                if cursor < m.offset {
+                    let sub_start = span.start + cursor;
+                    let sub_end = span.start + m.offset;
+                    let chunk = if span.len() == text.len() {
+                        CowStr::Borrowed(&source[sub_start..sub_end])
+                    } else {
+                        CowStr::Boxed(text[cursor..m.offset].to_string().into_boxed_str())
+                    };
+                    new_events.push((Event::Text(chunk), sub_start..sub_end));
+                }
+                let tag_start = span.start + m.offset;
+                let tag_end = tag_start + 2;
+                let html_tag = if m.is_open {
+                    CowStr::Borrowed("<mark>")
+                } else {
+                    CowStr::Borrowed("</mark>")
+                };
+                new_events.push((Event::InlineHtml(html_tag), tag_start..tag_end));
+                cursor = m.offset + 2;
+            }
+            if cursor < text.len() {
+                let sub_start = span.start + cursor;
+                let sub_end = span.end;
+                let chunk = if span.len() == text.len() {
+                    CowStr::Borrowed(&source[sub_start..sub_end])
+                } else {
+                    CowStr::Boxed(text[cursor..].to_string().into_boxed_str())
+                };
+                new_events.push((Event::Text(chunk), sub_start..sub_end));
+            }
+        } else {
+            new_events.push((event.clone(), span.clone()));
+        }
+    }
+
+    events.splice(block_start.., new_events);
 }
 
 fn build(
@@ -789,5 +1025,71 @@ mod tests {
     #[test]
     fn slugify_drops_punctuation() {
         assert_eq!(slugify("Hello, World! (v2)"), "hello-world-v2");
+    }
+
+    #[test]
+    fn simple_highlight_resolves_to_mark_elements() {
+        let doc = Document::parse("This is ==highlighted== text.\n");
+        let events = doc.events();
+        let mark_open = events
+            .iter()
+            .any(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "<mark>"));
+        let mark_close = events
+            .iter()
+            .any(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "</mark>"));
+        assert!(mark_open, "opening <mark> missing: {events:?}");
+        assert!(mark_close, "closing </mark> missing: {events:?}");
+        assert_eq!(plain_text(events), "This is highlighted text.");
+    }
+
+    #[test]
+    fn multiple_highlights_and_nested_styling() {
+        let doc = Document::parse("==first== and ==*italic* and **bold**==\n");
+        let events = doc.events();
+        let mark_count = events
+            .iter()
+            .filter(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "<mark>"))
+            .count();
+        assert_eq!(mark_count, 2);
+        assert_eq!(plain_text(events), "first and italic and bold");
+    }
+
+    #[test]
+    fn equality_operators_and_empty_are_not_highlights() {
+        let doc = Document::parse("if a == b and c == d { ==== }\n");
+        let events = doc.events();
+        let has_mark = events
+            .iter()
+            .any(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "<mark>"));
+        assert!(!has_mark, "equality was treated as highlight: {events:?}");
+    }
+
+    #[test]
+    fn code_and_math_are_immune_to_highlight_delimiters() {
+        let doc = Document::parse("`==code==` and $a == b$\n\n```\n==fence==\n```\n");
+        let events = doc.events();
+        let has_mark = events
+            .iter()
+            .any(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "<mark>"));
+        assert!(!has_mark, "code/math was highlighted: {events:?}");
+    }
+
+    #[test]
+    fn heading_with_highlight_slugifies_cleanly() {
+        let doc = Document::parse("## ==Important== Notice\n");
+        let headings = doc.headings();
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].text, "Important Notice");
+        assert_eq!(headings[0].anchor, "important-notice");
+    }
+
+    #[test]
+    fn escaped_highlight_is_literal_text() {
+        let doc = Document::parse("\\==not highlighted==\n");
+        let events = doc.events();
+        let has_mark = events
+            .iter()
+            .any(|(e, _)| matches!(e, Event::InlineHtml(h) if h.as_ref() == "<mark>"));
+        assert!(!has_mark, "escaped highlight was resolved");
     }
 }

@@ -127,11 +127,12 @@ struct MarkdownEditingTests {
         #expect(result.text.distance(from: result.text.startIndex, to: result.selection.lowerBound) == 13)
     }
 
-    @Test("the same machinery does italic, code, and strikethrough")
+    @Test("the same machinery does italic, code, strikethrough, and highlight")
     func otherMarkers() {
         #expect(wrap("a b c", "b", "*").0 == "a *b* c")
         #expect(wrap("a b c", "b", "`").0 == "a `b` c")
         #expect(wrap("a b c", "b", "~~").0 == "a ~~b~~ c")
+        #expect(wrap("a b c", "b", "==").0 == "a ==b== c")
     }
 
     // ---- links -------------------------------------------------------------

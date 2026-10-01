@@ -6,16 +6,16 @@ fast enough to call in a loop.
 Three panes in one window — a directory sidebar that also holds the front
 document's outline and its task list, a rendered preview, and an optional source
 editor.
-Tabs. Find-in-document that highlights every match at once. Sixteen themes that
+Tabs. Find-in-document that highlights every match at once. Seventeen themes that
 follow the system appearance instantly. Math and Mermaid diagrams rendered ahead
 of time in Rust, so a document ships no JavaScript. Click a checkbox and it
 writes one byte to your file; edit in the third pane and autosave writes 800 ms
 after you stop typing. The `mark` CLI does everything the window does, and
 drives the running app over a Unix socket.
 
-**Status: complete.** All ten milestones are implemented and tested —
-651 Rust tests, 895 Swift tests, 48 integration checks, and committed
-performance gates.
+Requires macOS 14 or later on Apple silicon. Covered by Rust unit and
+integration tests, Swift tests, end-to-end checks over the app's socket, and
+committed performance gates.
 
 ## Install
 
@@ -34,7 +34,7 @@ brew update && brew upgrade --fetch-HEAD shr3kst3r/mark/mark
 
 `brew update` first is not optional. It is what refreshes the tap, and until the
 tap is refreshed Homebrew resolves the head with a strategy that cannot see past
-its own cache on a private repo — the upgrade then says `already installed` no
+its own cache while the repo is private — the upgrade then says `already installed` no
 matter how far behind you are. `packaging/README.md` has the details.
 
 The formula builds from source, which is the point: locally built code is never
@@ -56,17 +56,17 @@ one costs.
 ### Which build am I running?
 
 ```sh
-mark --version      # mark 0.2.0 (f63a7ca 2026-08-25)
+mark --version      # mark 0.5.0 (68744bc 2026-09-15)
 mark doctor         # that, plus the build the running app reports
 ```
 
 The commit is the identifier, not the version. `mark` is installed from a
 `--HEAD` tap, so the semver in `Cargo.toml` moves on a deliberate bump while the
 code moves every push, and brew already talks in commits —
-`HEAD-43b49df -> HEAD-f63a7ca`. It is stamped into both binaries at compile time
+`HEAD-19ecc64 -> HEAD-061dce8`. It is stamped into both binaries at compile time
 (`core/build.rs`) and into `Info.plist` (`scripts/assemble-bundle.sh`), so
 **About mark** reports it too, and a build from a tree with uncommitted work
-says `f63a7ca-dirty`.
+says `061dce8-dirty`.
 
 `mark doctor` prints the CLI's build *and* the running app's, side by side.
 Those disagreeing means a `mark` on your PATH and a `mark.app` LaunchServices
@@ -79,7 +79,7 @@ more than one claimant means `open notes.md` is a coin toss:
 
 ```
 registered          2 bundles claim dev.mark.app — * is the one `mark open` launches
-                    * /opt/homebrew/Cellar/mark/HEAD-4504327/mark.app
+                    * /opt/homebrew/Cellar/mark/HEAD-fa48e96/mark.app
                       /Users/you/src/mark/.worktrees/spike/target/mark.app
                     ! that is not the bundle this CLI is in; `mark open` and `mark render` are two builds
 ```
@@ -275,7 +275,7 @@ multiply what mark costs.
 > An earlier design claimed ~1.2 MB per tab and a 110 MB ceiling for 24 of them;
 > that came from a benchmark that summed RSS by walking the app's process
 > subtree, and WebKit's content processes are children of launchd, so it counted
-> none of them. See `docs/adrs/2026-08-24-tab-residency-and-memory-model.md` —
+> none of them. See `docs/adrs/superseded/2026-08-24-tab-residency-and-memory-model.md` —
 > it is the clearest example in this repo of a measurement that reproduced
 > perfectly and measured the wrong thing.
 
@@ -300,9 +300,9 @@ so `mark render --html` produces exactly what the window shows, with no
 JavaScript and no network access. A broken expression gets a styled badge with
 the parser's message and keeps its source selectable, rather than disappearing.
 
-**Themes.** Sixteen curated themes, eight light/dark pairs, derived from base16
-palettes so the chrome and the code colours come from the same source and cannot
-clash. Both appearances are injected as CSS custom properties, so switching macOS
+**Themes.** Seventeen curated themes (eight light/dark pairs and Dracula),
+derived from base16 palettes so the chrome and the code colours come from the
+same source and cannot clash. Both appearances are injected as CSS custom properties, so switching macOS
 between light and dark re-colours everything with zero IPC, zero re-render, and
 no flash. Pick one from **View ▸ Theme**, which is built when you open it — so a
 file you have just dropped in is listed, and one that would not parse is named
@@ -564,9 +564,7 @@ script, or in a listing you printed a minute ago — is stale. Re-read
 `mark tasks` rather than carrying an index across a change to the file — or
 carry the marker's byte offset instead: `mark check --at <start>` names the
 task by where its `[ ]` is, resolves it against the same bytes it writes, and
-refuses with exit 3 if those bytes are no longer a marker. Measured blast
-radius on documents that exist today: zero, since none of them use those
-markers yet.
+refuses with exit 3 if those bytes are no longer a marker.
 
 **Writes take an `flock(2)`.** A window with unsaved edits holds an exclusive
 lock on that document for exactly as long as it is dirty, and a CLI write to it
@@ -602,7 +600,7 @@ loop is the `just` recipes below, which already work from a clone, and `mark`
 itself is a symlink into an installed `mark.app`: a `~/bin` wrapper running this
 checkout from source would shadow it silently, including in the agent sessions
 the skill is for. `spg.toml` is unrelated to packaging either way —
-`packaging/mark.rb` still owns installing the app and putting `mark` on your
+`Formula/mark.rb` still owns installing the app and putting `mark` on your
 PATH.
 
 ## Building
@@ -620,7 +618,7 @@ just bump minor    # 0.2.0 -> 0.3.0, Cargo.lock with it
 just           # every recipe
 ```
 
-`just check` is what CI runs, so local and CI cannot drift.
+`just check` is the full gate: run it before opening a pull request.
 
 The version is bumped **in the PR that changes behaviour**, not in a release
 commit afterwards: a `--HEAD` tap has no releases to hang one on, so a bump that
@@ -638,7 +636,7 @@ shadow the Homebrew toolchain every measurement was taken against.
 ```
 core/    the document core: parsing, block identity, highlighting, tasks, tree,
          math, diagrams, themes, diffing
-  src/lib.rs        the C ABI — the only pub extern surface, 13 functions (ADR-1)
+  src/lib.rs        the C ABI — the only pub extern surface, 17 functions (ADR-1)
 cli/     clap dispatch, terminal rendering, and the socket client
 app/     the Swift/AppKit shell
   Sources/Mark/         the window, sidebar, tabs, document view, IPC, editor
@@ -647,7 +645,8 @@ app/     the Swift/AppKit shell
   Resources/            shell.html, shell.js, shell.css — no third-party JS
   Sources/MarkBench/    the performance gates, run in a real window
 docs/adrs/          the decision records; accepted ones are immutable
-packaging/          the formula, the cask, the man page, shell completions
+Formula/, Casks/    the Homebrew formula and cask
+packaging/          the man page, shell completions, icons, packaging notes
 scripts/            bundle assembly, integration checks, corpus generator
 bench/              fixtures and the class-vs-inline highlighting pair
 skills/mark/        the agent skill: how to drive the CLI, and its JSON shapes
@@ -659,8 +658,8 @@ Mach-O executables — the AppKit app and the CLI — and is 34 MB.
 
 ## Why it is like this
 
-The decisions, with their measurements, are in `docs/adrs/`. Six are active and
-one is superseded; `docs/adrs/INDEX.md` is generated from their frontmatter. The
+The decisions, with their measurements, are in `docs/adrs/`, and
+`docs/adrs/INDEX.md` is generated from their frontmatter. The
 short version:
 
 - The core is **Rust** because `pulldown-cmark` gives every event a byte range,
@@ -668,7 +667,7 @@ short version:
   is built around. Parsing speed is *not* the reason — parsing is ~1% of the
   budget. The shell is **Swift/AppKit** because native tabs, `NSOutlineView`,
   system appearance, and `NSTextView`'s undo and spellcheck are not worth
-  reimplementing. They meet at a hand-written C ABI of 12 flat, string-shaped
+  reimplementing. They meet at a hand-written C ABI of 17 flat, string-shaped
   functions.
 - The CLI talks to the app over a **Unix socket**, with `mark://` registered for
   cold launch and Finder. Every other mechanism on macOS either raises a consent

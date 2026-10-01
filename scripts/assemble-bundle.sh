@@ -88,7 +88,7 @@ cat >"${bundle}/Contents/Info.plist" <<PLIST
     <!--
       Not Apple keys, and deliberately not folded into CFBundleVersion:
       Homebrew's cask machinery and LaunchServices both compare that as a
-      version number, and "0.2.0+f63a7ca" is not one. The App's About panel
+      version number, and "0.2.0+061dce8" is not one. The App's About panel
       reads its build string out of the linked core instead (AppDelegate); these
       are for everything that inspects a bundle without launching it.
     -->

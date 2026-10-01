@@ -4,9 +4,9 @@ import Foundation
 ///
 /// The text is the task's **own source line**, not ``Task/text`` or
 /// ``Task/label``. Both of those are flattened plain text, and a daily is full
-/// of items like `- [ ] More website issues <https://…>` whose link would
-/// arrive as bare words. Copying the line verbatim is also exactly what the
-/// journal's own carry-forward does, and for the same reason: *links, `@tags`,
+/// of items like `- [ ] Fix the [broken links](https://…)` whose link would
+/// arrive as bare words. Copying the line verbatim is also exactly what a
+/// journal's carry-forward does, and for the same reason: *links, `@tags`,
 /// priorities and the state byte all survive*.
 public struct TodayItem: Equatable, Sendable {
 
@@ -243,7 +243,7 @@ public struct TodayDigest: Equatable, Sendable {
 
     // MARK: - Dailies
 
-    /// `daily/2026/08/2026-08-31.md`, the journal's own layout.
+    /// `daily/2026/08/2026-08-31.md`, the journal layout.
     public static func dailyRelativePath(for date: Date, calendar: Calendar = .current) -> String {
         let iso = isoDate(date, calendar: calendar)
         let year = String(iso.prefix(4))
@@ -388,8 +388,8 @@ public struct TodayDigest: Equatable, Sendable {
             tagged: taggedGroups(for: slug, from: tagged, file: taggedFile))
     }
 
-    /// `projects/<slug>.md` — the flat form the tag table in the journal's own
-    /// README describes. Rarer than the directory form and supported for the
+    /// `projects/<slug>.md` — the flat form of a project's front page.
+    /// Rarer than the directory form and supported for the
     /// same reason: a file sitting there that the page ignored would look like
     /// a bug.
     private static func fileProject(
@@ -411,10 +411,9 @@ public struct TodayDigest: Equatable, Sendable {
             tagged: taggedGroups(for: slug, from: tagged, file: taggedFile))
     }
 
-    /// `index.md` first, then everything else by name — the ordering the
-    /// journal's own README relies on (*"`index.md` sorts first, so the front
-    /// page is always the top of the listing"*), stated here rather than
-    /// inherited from the alphabet.
+    /// `index.md` first, then everything else by name — the ordering a
+    /// journal relies on so that the front page is always the top of the
+    /// listing, stated here rather than inherited from the alphabet.
     static func frontPageOrder(_ a: URL, _ b: URL) -> Bool {
         let aIsIndex = a.lastPathComponent.lowercased() == "index.md"
         let bIsIndex = b.lastPathComponent.lowercased() == "index.md"
@@ -630,7 +629,7 @@ public struct TodayDigest: Equatable, Sendable {
 
     /// Outstanding, and actually says something.
     ///
-    /// The journal's own templates ship `## Open` with a bare `- [ ]` under it,
+    /// Journal templates commonly ship `## Open` with a bare `- [ ]` under it,
     /// waiting to be typed into. It is a real task marker in a real file and
     /// the core is right to report it — but an empty checkbox on a page whose
     /// whole job is "what is outstanding" is noise, and a project whose only

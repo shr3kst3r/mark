@@ -40,7 +40,7 @@ exploit.
 
 ### The number that rules out the naive version
 
-Newly measured under a large source tree (`~/src`), which research §2.8 put at 608,597
+Newly measured under `~/src`, which research §2.8 put at 608,597
 files: **33 repositories at depth ≤ 2, and 99 `.git` entries at depth ≤ 4** once
 worktrees are counted. A sidebar rooted there with a few folders expanded can
 span dozens of repositories. Refreshing all of them on the 2-second tick is

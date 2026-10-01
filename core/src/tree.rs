@@ -1,9 +1,9 @@
 //! Lazy, `.gitignore`-aware directory queries.
 //!
-//! Research 2.8 makes this a hard constraint rather than a preference: the
-//! user's `~/src` holds **608,597 files**, so an eager full-tree walk is a
-//! multi-second stall and computing per-file task counts eagerly means parsing
-//! 37 MB of markdown. Two rules follow, and both are tested:
+//! Research 2.8 makes this a hard constraint rather than a preference: a
+//! source tree at `~/src` holds **608,597 files**, so an eager full-tree walk
+//! is a multi-second stall and computing per-file task counts eagerly means
+//! parsing 37 MB of markdown. Two rules follow, and both are tested:
 //!
 //! * **One level per call.** [`list_dir`] reads exactly one directory. Deeper
 //!   listing is opt-in via [`Options::max_depth`], and there is no "unlimited"

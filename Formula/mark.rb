@@ -49,8 +49,8 @@ class Mark < Formula
   # `GitHubGitDownloadStrategy`, which answers "what is the latest commit?" over
   # the GitHub REST API instead of by fetching. That request is sent
   # unauthenticated — `GitHub.last_commit` calls curl with an `Accept` header and
-  # nothing else, so `HOMEBREW_GITHUB_API_TOKEN` does not help — and this repo is
-  # private, so the API returns 404, `GitHub.last_commit` returns nil, and the
+  # nothing else, so `HOMEBREW_GITHUB_API_TOKEN` does not help — and for a private
+  # repo the API returns 404, `GitHub.last_commit` returns nil, and the
   # strategy falls back to `git rev-parse HEAD` in Homebrew's *cached clone*.
   # Nothing on that path ever fetches, so the cache still holds the commit you
   # last installed, "latest HEAD" equals the installed HEAD, and
@@ -60,8 +60,8 @@ class Mark < Formula
   #
   # `using: :git` forces the plain `GitDownloadStrategy`, whose `commit_outdated?`
   # actually runs `git fetch` against the remote with your credentials and
-  # compares real commits. Making the repo public would fix it too; this does not
-  # depend on that.
+  # compares real commits. A public repo avoids the 404 too; this does not depend
+  # on visibility.
   head "https://github.com/shr3kst3r/mark.git", branch: "main", using: :git
 
   depends_on "just" => :build

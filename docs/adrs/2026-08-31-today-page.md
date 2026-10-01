@@ -24,9 +24,8 @@ argument. `mark ls` and `mark tasks` already answer the two queries. What does
 knows a directory can have a *shape*.
 
 Because that is what the sentence turns on. "My current date daily items" and
-"each project" are not properties of markdown; they are properties of the
-requester's journal, which is laid out — and documented, in its own README —
-as:
+"each project" are not properties of markdown; they are properties of a
+journal, and the one this page is built for is laid out as:
 
 ```
 daily/2026/08/2026-08-31.md      one file per day
@@ -52,10 +51,10 @@ requester rather than guessed:
 * **What a project's open items are.** Its own files only, or its own files plus
   the `@proj(slug)`-tagged items living elsewhere.
 
-The last of those has a forcing answer. The requester's daily for the day this
-was written holds five tasks tagged `@proj(website-launch)` and that
-project's `index.md` holds none. "Its own files only" would show that project as
-having nothing in flight while five of the day's items belong to it.
+The last of those has a forcing answer. A typical daily holds several tasks
+tagged `@proj(website-launch)` while that project's `index.md` holds none. "Its
+own files only" would show that project as having nothing in flight while
+several of the day's items belong to it.
 
 One constraint pulls against the whole idea.
 `2026-08-26-new-documents-are-files-on-disk` says mark never holds a document
@@ -117,8 +116,8 @@ the top of a 200-line daily.
 
 **An item's text is its own source line, copied verbatim** — not `Task::text` or
 `Task::label`, which are flattened plain text that would turn
-`[issue](https://…)` into the bare word "issue". This is the same choice the
-journal's own carry-forward makes, and for the same reason. It requires two
+`[issue](https://…)` into the bare word "issue". This is the same choice a
+journal's carry-forward makes, and for the same reason. It requires two
 corrections, both of which are the page's own doing and neither of which the
 core should know about:
 
@@ -173,7 +172,7 @@ followed at all, now work.
 **What becomes harder, and what is being accepted.**
 
 * **mark now knows a directory layout.** `daily/YYYY/MM/YYYY-MM-DD.md` and
-  `projects/<slug>/index.md` are one person's convention in a general-purpose
+  `projects/<slug>/index.md` are one journal's convention in a general-purpose
   markdown tool. It is confined to `JournalRoot` and read by nothing else, and
   the layout-agnostic alternative was declined below — but this is a product
   claim, not just a technical one, and it is the largest thing here to disagree
@@ -186,7 +185,7 @@ followed at all, now work.
 * **A multi-line task item loses its continuation.** An item is copied as the
   single source line its marker is on; `Task` carries the marker's byte range,
   not the item's, so the extent of a wrapped item is not available over the ABI.
-  Nothing in the requester's journal wraps, and the honest fix is a core change
+  Nothing in the target journal layout wraps, and the honest fix is a core change
   rather than a guess in Swift.
 * **A file whose name contains `#` cannot be linked.** The renderer does not
   encode it and the split cannot tell it from an anchor. That is markdown's
@@ -205,8 +204,7 @@ followed at all, now work.
 
 **What is explicitly not in scope.** No `mark today` CLI verb and no socket
 command — `mark tasks --open` and `mark ls --json` already answer these
-questions for a script, and the shell one-liners are in the journal's own
-README. No writing from the page. No per-item deep link to the exact task: the
+questions for a script, and a shell one-liner covers the rest. No writing from the page. No per-item deep link to the exact task: the
 digest carries each item's index and byte offset, so
 `DocumentView.scrollToTask(index:byteOffset:)` is a later change to the link
 format and not to the digest. No weekly or meeting sections. And the pre-existing

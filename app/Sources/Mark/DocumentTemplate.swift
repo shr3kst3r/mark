@@ -18,7 +18,7 @@ import Foundation
 ///
 /// The search walks *up* from the target directory to the journal or sidebar
 /// root, so `notes/daily/_template.md` covers every daily without a copy in
-/// each month's folder — which matters, because the journal's own layout puts
+/// each month's folder — which matters, because the journal layout puts
 /// dailies three directories deep.
 ///
 /// # Substitutions

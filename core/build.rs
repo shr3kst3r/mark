@@ -42,7 +42,7 @@
 //! Homebrew `--HEAD` formula, so the semver in `Cargo.toml` moves on a
 //! deliberate bump while the code moves every push: between two bumps every
 //! install reports the same version and "which build am I running?" has no
-//! answer. Brew already speaks in commits — `HEAD-43b49df -> HEAD-f63a7ca` —
+//! answer. Brew already speaks in commits — `HEAD-19ecc64 -> HEAD-061dce8` —
 //! so `mark --version` and `mark doctor` do too.
 
 use std::env;

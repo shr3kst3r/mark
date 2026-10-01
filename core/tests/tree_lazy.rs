@@ -1,8 +1,8 @@
 //! `tree.rs` must not descend eagerly, and must honour `.gitignore`.
 //!
-//! Research 2.8 makes the stakes concrete: a large source tree (`~/src`) holds 608,597
-//! files, so a walk that descends when it was not asked to is a multi-second
-//! hang in the sidebar rather than a slightly slow test. The assertions here
+//! Research 2.8 makes the stakes concrete: a large source tree (`~/src`)
+//! holds 608,597 files, so a walk that descends when it was not asked to is a
+//! multi-second hang in the sidebar rather than a slightly slow test. The assertions here
 //! are on the *number of directory reads*, not on the returned entries, because
 //! a correct-looking listing produced by walking everything is exactly the bug
 //! this guards against.

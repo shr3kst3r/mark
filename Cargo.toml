@@ -34,6 +34,14 @@ strip = true
 # turn a recoverable render failure into a process kill.
 panic = "unwind"
 
+# Proc-macros and build scripts build under `build-override`, which inherits
+# `strip = true`. With rustc 1.98 and the macOS 27 linker (ld-27037), stripping a
+# proc-macro dylib leaves a malformed LINKEDIT (`mis-aligned LINKEDIT string
+# pool`), dlopen refuses it, and every derive fails with E0463. They never ship,
+# so they are left unstripped; the shipped binaries are still stripped.
+[profile.release.build-override]
+strip = false
+
 # ADR-5 measured merman at +10.2 MB with `opt-level = "z"`. This project cannot
 # use the rest of that measurement's profile — `panic = "abort"` is ruled out
 # above — but it can apply the size setting to merman's own crates, which are

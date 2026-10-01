@@ -120,7 +120,7 @@ struct JournalRootTests {
 @Suite("Today — the digest")
 struct TodayDigestTests {
 
-    /// The shape of a real daily: five states, nesting, `@proj(…)`, and two
+    /// The shape of a typical daily: five states, nesting, `@proj(…)`, and two
     /// headings' worth of items.
     private static let daily = """
         # 2026-08-31 Monday
@@ -376,8 +376,8 @@ struct TodayProjectTests {
         #expect(quiet.hasNothingOpen)
     }
 
-    /// `projects/<slug>.md`, the flat form the journal's own tag table
-    /// describes. A file sitting there that the page ignored would look like a
+    /// `projects/<slug>.md`, the flat form of a project's front page. A
+    /// file sitting there that the page ignored would look like a
     /// bug.
     @Test("a bare projects/<slug>.md is a project too")
     func flatProject() throws {

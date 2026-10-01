@@ -13,7 +13,7 @@ date: 2026-08-27
 
 A task can only be open or done, so an item you have decided not to do has
 nowhere to go. The two workarounds both cost something, measured against
-`mark 0.2.0 (333513b)`:
+`mark 0.2.0 (db66d21)`:
 
 - **`- [-] item`** is not a task at all. `pulldown-cmark`'s
   `scan_task_list_marker` accepts exactly `[ ]`, `[x]`, `[X]`, so the item is

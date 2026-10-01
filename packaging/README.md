@@ -137,22 +137,22 @@ Homebrew picks a download strategy from the URL, and a bare
 resolves "the latest commit" by asking the GitHub REST API rather than by
 fetching. It sends that request unauthenticated — `GitHub.last_commit` calls
 curl with an `Accept` header and nothing else, so `HOMEBREW_GITHUB_API_TOKEN`
-does not enter into it — and this repo is private, so the API answers 404. The
+does not enter into it — and for a private repo the API answers 404. The
 strategy then falls back to `git rev-parse HEAD` in Homebrew's cached clone of
 the repo, and nothing on that path ever fetches, so the cache still holds the
 commit you last installed. "Latest HEAD" comes back equal to the installed HEAD
 and you get:
 
 ```
-Warning: shr3kst3r/mark/mark HEAD-5bb4c6a already installed
+Warning: shr3kst3r/mark/mark HEAD-2022a88 already installed
 ```
 
 forever, however far behind you are. `brew outdated --fetch-HEAD` disagrees and
 correctly says you are behind — it reaches that answer down a different code
 path — which is how this got noticed. `using: :git` forces the plain
 `GitDownloadStrategy`, whose `commit_outdated?` runs a real `git fetch` with
-your credentials and compares real commits. Making the repo public would also
-fix it; the formula does not rely on that happening.
+your credentials and compares real commits. A public repo avoids the 404 too;
+the formula works either way.
 
 Three things worth knowing:
 
@@ -280,10 +280,10 @@ matter. Tap the checkout instead.
 Everything else about packaging — the man page, the shell completions, and this
 document — stays here in `packaging/`; only the two Ruby files had to move.
 
-## A warning about `brew audit` on this machine
+## A warning about `brew audit`
 
 `brew audit` turns Homebrew's developer mode on and reinstalls Homebrew's own
-vendored Ruby gem bundle. On this machine (Homebrew 6.0.19, portable-ruby 4.0.6)
+vendored Ruby gem bundle. With Homebrew 6.0.19 and portable-ruby 4.0.6
 the reinstalled `json` gem is incompatible with the bundled Ruby, and every
 subsequent *developer* command dies with
 `undefined method 'default_sort_keys_proc='`. Ordinary commands keep working.

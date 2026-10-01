@@ -6,7 +6,7 @@ import Foundation
 /// semver in `Cargo.toml` moves on a deliberate bump while the code moves every
 /// push: between two bumps every install reports the same version, and "am I
 /// running the build I just made?" has no answer. Brew already speaks in
-/// commits — `HEAD-43b49df -> HEAD-f63a7ca` — so this does too.
+/// commits — `HEAD-19ecc64 -> HEAD-061dce8` — so this does too.
 ///
 /// The values come from `Info.plist`, which `scripts/assemble-bundle.sh` writes
 /// from the same checkout, in the same run, that produced the two binaries next
@@ -41,13 +41,13 @@ public enum BuildInfo {
     /// which is how `swift test` and `mark-bench` run.
     public static var version: String { version(main) }
 
-    /// `f63a7ca`, `f63a7ca-dirty`, or `unknown`.
+    /// `061dce8`, `061dce8-dirty`, or `unknown`.
     public static var commit: String { commit(main) }
 
     /// The date ``commit`` was committed, `YYYY-MM-DD`, or `unknown`.
     public static var date: String { date(main) }
 
-    /// `0.2.0 (f63a7ca 2026-08-25)`. What the launch log and `ping` report, and
+    /// `0.2.0 (061dce8 2026-08-25)`. What the launch log and `ping` report, and
     /// what a bug report should carry.
     public static var summary: String { summary(main) }
 

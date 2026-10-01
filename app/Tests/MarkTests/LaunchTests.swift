@@ -88,11 +88,11 @@ struct LaunchTests {
     func summary() {
         let stamped: BuildInfo.Lookup = [
             "CFBundleShortVersionString": "0.2.0",
-            "MarkBuildCommit": "f63a7ca",
+            "MarkBuildCommit": "061dce8",
             "MarkBuildDate": "2026-08-25",
         ].lookup
 
-        #expect(BuildInfo.summary(stamped) == "0.2.0 (f63a7ca 2026-08-25)")
+        #expect(BuildInfo.summary(stamped) == "0.2.0 (061dce8 2026-08-25)")
     }
 
     /// A build from a source tarball has no `.git` to ask, and `build.rs` and

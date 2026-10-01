@@ -810,7 +810,11 @@
     var found = 0;
     while (low <= high) {
       var mid = (low + high) >> 1;
-      if (blocks[mid].getBoundingClientRect().top <= 0) {
+      /* Under a pixel below the top still counts as at the top. Scroll
+       * positions snap to device pixels, so `scrollToSource` aiming at a
+       * block's fractional top can land a fraction above it, and a strict
+       * `<= 0` would then report the previous block's last byte. */
+      if (blocks[mid].getBoundingClientRect().top < 1) {
         found = mid;
         low = mid + 1;
       } else {

@@ -81,7 +81,8 @@ const EXIT_REFUSED: u8 = 5;
 const EXIT_LOCKED: u8 = 6;
 
 /// Depth limit for the recursive commands. Deep enough for any real notes tree
-/// and bounded, because a large source tree (`~/src`) holds 608k files (research 2.8).
+/// and bounded, because a large source tree (`~/src`) holds 608k files
+/// (research 2.8).
 use mark_core::tree::DEFAULT_RECURSIVE_DEPTH;
 
 #[derive(Parser)]

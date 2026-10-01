@@ -35,10 +35,13 @@ with an ADR, the ADR is right and the projection is stale.
 ## Regenerating
 
 ```bash
-python3 ~/.claude/skills/adr-rpi/scripts/adr_index.py docs/adrs             # rewrite INDEX.md
-python3 ~/.claude/skills/adr-rpi/scripts/adr_index.py docs/adrs --check     # CI: fail if stale
-python3 ~/.claude/skills/adr-rpi/scripts/adr_chain.py docs/adrs --validate  # check the links
+just adr        # rewrite INDEX.md and validate the supersession chain
+just adr-check  # fail on a stale INDEX.md instead of rewriting it
 ```
+
+Both run `adr_index.py` and `adr_chain.py`, which are not vendored here: set
+`ADR_SCRIPTS` to their directory. Without them `just adr-check` is skipped with
+a notice, so `just check` still runs from a plain clone.
 
 The validator catches the failure that actually loses decisions: a supersession
 recorded on one end only. Run it after any status change.

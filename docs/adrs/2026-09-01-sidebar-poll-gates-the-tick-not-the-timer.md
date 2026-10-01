@@ -17,12 +17,11 @@ window that `occlusionState` reports visible and the split view has not collapse
 it, and fires once immediately on appearing and on being uncovered."*
 
 That sentence is what shipped, and it does not work. Observed on a running
-0.3.0 (`645822f`) with three windows open for four hours:
+0.3.0 (`a0b523f`) with three windows open for four hours:
 
-* A file written into an expanded directory never appeared.
-  ⌘⇧O on it logged `reveal: notes-….md is not listed under
-  …/notes` twice, sixteen seconds apart, while that window was
-  frontmost.
+* A file written into an expanded directory never appeared. ⌘⇧O on it logged
+  `reveal: notes-….md is not listed under …/notes` twice, sixteen seconds
+  apart, while that window was frontmost.
 * Files written into that directory, into a sibling, and into the sidebar's own
   root moved each directory's mtime and produced no `dev.mark:tree` activity
   over four intervals, while `dev.mark:git` logged its badge poll every two

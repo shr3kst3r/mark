@@ -30,8 +30,7 @@ import MarkKit
 // meaningful on a machine whose home directory looks nothing like this one.
 //
 // **Why there is a screenshot here at all.** `screencapture` returns black
-// while the screen is locked, which it has been for two milestones. An
-// `NSView` snapshot through `cacheDisplay(in:to:)` does not go anywhere near
+// while the screen is locked. An `NSView` snapshot through `cacheDisplay(in:to:)` does not go anywhere near
 // the window server's screen capture path and works regardless, and the sidebar
 // is AppKit, so `WKWebView.takeSnapshot` — M2's answer — is no help here.
 //

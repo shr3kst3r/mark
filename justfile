@@ -1,9 +1,8 @@
 # mark — a fast native markdown viewer for macOS.
 # `just` with no args lists every recipe.
 #
-# This is the entry point for everything, matching the convention in the other
-# repos: nobody should need to remember that this project will
-# eventually have two toolchains.
+# This is the entry point for everything: nobody should need to remember that
+# this project has two toolchains.
 #
 # All ten milestones are implemented: the Rust core and headless CLI (M1), the
 # AppKit shell and progressive rendering (M2), tabs (M3), CLI->app IPC (M4),
@@ -13,7 +12,9 @@
 
 set shell := ["bash", "-cu"]
 
-adr_scripts := env_var('HOME') / ".claude/skills/adr-rpi/scripts"
+# The ADR index and chain scripts are not vendored here. `ADR_SCRIPTS` points
+# at a checkout of them; the default is where the adr-rpi agent skill installs.
+adr_scripts := env_var_or_default("ADR_SCRIPTS", env_var('HOME') / ".claude/skills/adr-rpi/scripts")
 
 # Show all recipes.
 default:
@@ -37,7 +38,7 @@ hooks:
 # --- the one thing to run before pushing -------------------------------
 
 # fmt-check + clippy + test + release build + swift test + ADR index check.
-# What CI runs.
+# Run it before opening a pull request.
 check: fmt-check lint test build-rust swift-test adr-check
 
 # Formatting, without rewriting anything.
@@ -78,6 +79,13 @@ swift-test *args: build-rust
         flags=(-Xswiftc -F -Xswiftc "${fw}"
                -Xlinker -rpath -Xlinker "${fw}"
                -Xlinker -rpath -Xlinker "${lib}")
+    fi
+    # Swift 6.4's Command Line Tools moved swift-testing's macro plugin into a
+    # subdirectory the compiler does not search, so every `#expect` fails to
+    # expand with "plugin for module 'TestingMacros' not found".
+    plugins=/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing
+    if [[ -d "${plugins}" ]]; then
+        flags+=(-Xswiftc -plugin-path -Xswiftc "${plugins}")
     fi
     cd app
     log=$(mktemp)
@@ -370,16 +378,24 @@ adr: _adr-tools-present
     python3 "{{adr_scripts}}/adr_index.py" docs/adrs
     python3 "{{adr_scripts}}/adr_chain.py" docs/adrs --validate
 
-# Same, but fail on a stale INDEX.md instead of regenerating it.
-adr-check: _adr-tools-present
+# Same, but fail on a stale INDEX.md instead of regenerating it. Skipped, with
+# a notice, where the scripts are not installed, so `just check` and the
+# pre-commit hook work from a plain clone.
+adr-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -f "{{adr_scripts}}/adr_index.py" ]]; then
+        echo "adr-check: skipped, no ADR tooling at {{adr_scripts}} (set ADR_SCRIPTS)" >&2
+        exit 0
+    fi
     python3 "{{adr_scripts}}/adr_index.py" docs/adrs --check
     python3 "{{adr_scripts}}/adr_chain.py" docs/adrs --validate
 
-# The corpus tooling lives in the adr-rpi skill, not in this repo. Say so
-# plainly rather than failing with "No such file or directory".
+# Regenerating needs the scripts. Say so plainly rather than failing with
+# "No such file or directory".
 _adr-tools-present:
     @test -f "{{adr_scripts}}/adr_index.py" || { \
-        echo "ADR tooling not found at {{adr_scripts}} — install the adr-rpi skill." >&2; \
+        echo "ADR tooling not found at {{adr_scripts}}; set ADR_SCRIPTS to its directory." >&2; \
         exit 1; }
 
 # --- diagnostics -------------------------------------------------------

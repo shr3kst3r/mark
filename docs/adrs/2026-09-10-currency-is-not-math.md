@@ -95,9 +95,8 @@ unambiguous, and no one writes a price with two dollar signs.
 ## Consequences
 
 **Easier.** The six shapes in the table above all render as what they say.
-Prose that mentions prices
-stops being corrupted by a feature it never asked for. The rule is four lines of
-predicate over a byte range and costs one slice comparison per inline math
+Prose that mentions prices stops being corrupted by a feature it never asked
+for. The rule is four lines of predicate over a byte range and costs one slice comparison per inline math
 event, so it is free against ADR-2's budget. Because the demoted event carries
 the source spelling, round-tripping through the editor is byte-identical, and
 the anchor of a heading containing a price no longer depends on whether a math

@@ -83,7 +83,7 @@ use crate::render::{RenderOptions, render};
 /// The core's version, as reported by `mark doctor`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The commit this was built from, short — `f63a7ca`, or `f63a7ca-dirty` when
+/// The commit this was built from, short — `061dce8`, or `061dce8-dirty` when
 /// the tree had uncommitted work, or `unknown` when there was no git to ask.
 ///
 /// Stamped by `build.rs`. [`VERSION`] alone cannot answer "which build is
@@ -94,7 +94,7 @@ pub const COMMIT: &str = env!("MARK_BUILD_COMMIT");
 /// The date [`COMMIT`] was committed, `YYYY-MM-DD`, or `unknown`.
 pub const BUILD_DATE: &str = env!("MARK_BUILD_DATE");
 
-/// The one string that identifies a build — `0.2.0 (f63a7ca 2026-08-25)`.
+/// The one string that identifies a build — `0.2.0 (061dce8 2026-08-25)`.
 ///
 /// What `mark --version`, `mark doctor`, the About panel, and the `ping`
 /// response all report, so that comparing the CLI against the running app is
